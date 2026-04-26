@@ -44,6 +44,8 @@ pub const TokenKind = enum {
     keyword_delete,
     keyword_update,
     keyword_set,
+    keyword_group,
+    keyword_having,
     plus,
     minus,
     star,
@@ -280,6 +282,8 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "delete")) return .keyword_delete;
     if (eqlIgnoreCase(text, "update")) return .keyword_update;
     if (eqlIgnoreCase(text, "set")) return .keyword_set;
+    if (eqlIgnoreCase(text, "group")) return .keyword_group;
+    if (eqlIgnoreCase(text, "having")) return .keyword_having;
     return null;
 }
 

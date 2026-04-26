@@ -13,15 +13,17 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 
 ### Phase 2 拡張 (実用 SQL の縦串)
-- [ ] Iter15: `ORDER BY <expr> [ASC|DESC]` + `LIMIT N [OFFSET M]`
-- [ ] Iter16: `DISTINCT`
-- [ ] Iter17: 集約関数 (count, sum, min, max, avg) + `GROUP BY` / `HAVING`
-- [ ] Iter18: `DELETE FROM t [WHERE ...]` / `UPDATE t SET col = expr [WHERE ...]`
+- [x] Iter15: `ORDER BY <expr> [ASC|DESC]` + `LIMIT N [OFFSET M]`
+- [x] Iter16: `DISTINCT`
+- [x] Iter17: 集約関数 (count, sum, min, max, avg, total) + `GROUP BY` / `HAVING`
+- [x] Iter18: `DELETE FROM t [WHERE ...]` / `UPDATE t SET col = expr [WHERE ...]`
 
-### Phase 1 既知の取り残し (低優先)
+### 残課題 (低優先)
+- [ ] `count(DISTINCT x)` / `sum(DISTINCT x)` 形式 (parser に DISTINCT を function-arg として認識させる必要)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
+- [ ] JOIN (Phase 6 へ送る選択肢もあり)
 
 ## Backlog (Phase 3以降)
 

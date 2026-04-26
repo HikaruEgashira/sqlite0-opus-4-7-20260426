@@ -560,3 +560,47 @@ CREATE TABLE t(x, y); INSERT INTO t VALUES (1, 'a'); UPDATE t SET x = 99, y = 'Z
 CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); UPDATE t SET x = NULL WHERE x = 1; SELECT * FROM t
 CREATE TABLE t(x); INSERT INTO t VALUES (1); UPDATE t SET y = 1
 CREATE TABLE t(x); INSERT INTO t VALUES (1); DELETE FROM nonexistent
+
+# 集約関数 (Iter17) — count/sum/avg/min/max/total
+SELECT count(*)
+SELECT count(1)
+SELECT count(NULL)
+SELECT min(1)
+SELECT max(1)
+SELECT min(3, 1, 2)
+SELECT max(3, 1, 2)
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT count(*) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT count(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT avg(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT min(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT max(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT total(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (NULL), (3); SELECT count(x), count(*), sum(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (NULL), (3); SELECT min(x), max(x), avg(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (NULL), (NULL); SELECT sum(x), avg(x), min(x), max(x), total(x) FROM t
+CREATE TABLE t(x); SELECT count(*), sum(x), avg(x), min(x), max(x), total(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT typeof(sum(x)), typeof(avg(x)), typeof(total(x)), typeof(min(x)), typeof(max(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1.5), (2.5); SELECT sum(x), typeof(sum(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2.0); SELECT sum(x), typeof(sum(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES ('hello'), ('world'); SELECT min(x), max(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x*2) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x) + 100 FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT count(*) FROM t WHERE x > 1
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x) FROM t WHERE x > 100
+
+# GROUP BY (Iter17)
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, count(*) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, sum(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, min(v), max(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3), ('b', 4); SELECT g, avg(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', NULL), ('a', 1), ('b', NULL); SELECT g, count(v), count(*), sum(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(a, b, v); INSERT INTO t VALUES (1, 'x', 10), (1, 'x', 20), (1, 'y', 30); SELECT a, b, sum(v) FROM t GROUP BY a, b ORDER BY a, b
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, sum(v) FROM t WHERE v > 1 GROUP BY g ORDER BY g
+CREATE TABLE t(g); INSERT INTO t VALUES (1), (NULL), (1), (NULL); SELECT g, count(*) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 4); SELECT g, sum(v) FROM t GROUP BY g ORDER BY sum(v) DESC
+
+# HAVING (Iter17)
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g FROM t GROUP BY g HAVING count(*) > 1
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4); SELECT g, sum(v) FROM t GROUP BY g HAVING sum(v) >= 3 ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('b', 2); SELECT g FROM t GROUP BY g HAVING g = 'a'

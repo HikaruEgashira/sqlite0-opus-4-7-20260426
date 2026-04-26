@@ -355,6 +355,12 @@ pub const Parser = struct {
 
     /// Function-call body parser, called after the name and `(` have been
     /// consumed by `parseIdentifierExpr`.
+    ///
+    /// `name(*)` is the aggregate-`*` form (`count(*)`). It's modeled as a
+    /// 0-arg call because `count()`/`count(*)`/`count(1)` all behave
+    /// identically as "count rows" once aggregate dispatch sees a 0-arg or
+    /// always-truthy arg. The `*` is consumed silently — distinguishing it
+    /// from a true 0-arg call would require an AST shape we don't need.
     fn parseFunctionCallTail(self: *Parser, name: []const u8) Error!*ast.Expr {
         self.advance(); // consume lparen
         var args: std.ArrayList(*ast.Expr) = .empty;
@@ -362,7 +368,9 @@ pub const Parser = struct {
             for (args.items) |a| a.deinit(self.allocator);
             args.deinit(self.allocator);
         }
-        if (self.cur.kind != .rparen) {
+        if (self.cur.kind == .star) {
+            self.advance();
+        } else if (self.cur.kind != .rparen) {
             try args.ensureUnusedCapacity(self.allocator, 1);
             args.appendAssumeCapacity(try self.parseExpr());
             while (self.cur.kind == .comma) {

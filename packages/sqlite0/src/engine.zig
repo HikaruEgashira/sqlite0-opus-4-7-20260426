@@ -15,6 +15,8 @@ const stmt_mod = @import("stmt.zig");
 const stmt_dml = @import("stmt_dml.zig");
 const parser_mod = @import("parser.zig");
 const select_mod = @import("select.zig");
+const select_post = @import("select_post.zig");
+const aggregate = @import("aggregate.zig");
 const eval = @import("eval.zig");
 const database = @import("database.zig");
 
@@ -192,17 +194,45 @@ fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.Parse
 /// to long-lived memory. Also called by `executeInsert` for `INSERT INTO t
 /// SELECT ...`, in which case the rows are deep-duped into the target table
 /// rather than the long-lived ExecResult.
+///
+/// Path selection: when GROUP BY is present or any aggregate call is found
+/// in the SELECT items / HAVING / ORDER BY, dispatch to `aggregate.executeAggregated`.
+/// Otherwise the per-row path runs (`select.executeWithFrom` /
+/// `executeWithoutFrom`). HAVING is meaningless without aggregates and
+/// without GROUP BY, so the non-aggregate path ignores it.
 pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
     const pp = postProcessFromParsed(alloc, ps) catch |err| return err;
     defer alloc.free(pp.order_by);
+
+    const wants_grouping = ps.group_by.len > 0 or
+        aggregate.selectHasAggregates(ps.items, ps.having, pp.order_by);
+
+    const empty_row: []const Value = &.{};
+    var synthetic = [_][]const Value{empty_row};
+
     if (ps.from) |from| switch (from) {
-        .inline_values => |iv| return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where, pp),
+        .inline_values => |iv| {
+            if (wants_grouping) {
+                const inputs = try alloc.alloc([]const Value, iv.rows.len);
+                for (iv.rows, inputs) |src, *slot| slot.* = src;
+                return aggregate.executeAggregated(alloc, ps.items, inputs, iv.columns, ps.where, ps.group_by, ps.having, pp);
+            }
+            return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where, pp);
+        },
         .table_ref => |name| {
             const t = try lookupTable(db, alloc, name);
+            if (wants_grouping) {
+                const inputs = try alloc.alloc([]const Value, t.rows.items.len);
+                for (t.rows.items, inputs) |src, *slot| slot.* = src;
+                return aggregate.executeAggregated(alloc, ps.items, inputs, t.columns, ps.where, ps.group_by, ps.having, pp);
+            }
             return select_mod.executeWithFrom(alloc, ps.items, t.rows.items, t.columns, ps.where, pp);
         },
     };
     if (select_mod.containsStar(ps.items)) return Error.SyntaxError;
+    if (wants_grouping) {
+        return aggregate.executeAggregated(alloc, ps.items, synthetic[0..], &.{}, ps.where, ps.group_by, ps.having, pp);
+    }
     return select_mod.executeWithoutFrom(alloc, ps.items, ps.where, pp);
 }
 

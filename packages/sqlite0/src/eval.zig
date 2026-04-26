@@ -33,7 +33,20 @@ pub const EvalContext = struct {
     /// Column names matching `current_row` positionally (same length).
     /// Borrowed from the SQL source string. Empty for FROM-less SELECT.
     columns: []const []const u8 = &.{},
+    /// Per-group aggregate-call substitution table. When evaluating SELECT
+    /// items / HAVING / ORDER BY for an aggregated query, the
+    /// `aggregate.zig` driver pre-computes each aggregate call's value for
+    /// the current group, then puts a `*const Expr → Value` mapping here.
+    /// `evalFuncCall` looks up the func_call AST pointer; on hit it returns
+    /// the precomputed value (duped) instead of dispatching to scalar
+    /// `funcs.call`. Null (the default) means "no aggregate substitution"
+    /// — the normal scalar path runs.
+    agg_values: ?*const AggregateValues = null,
 };
+
+/// Pointer-keyed map from func_call AST nodes to their finalised aggregate
+/// values for the current group. Owned and populated by `aggregate.zig`.
+pub const AggregateValues = std.AutoHashMapUnmanaged(*const ast.Expr, Value);
 
 pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
     return switch (expr.*) {
@@ -51,7 +64,7 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .logical_or => |b| try evalLogicalOr(ctx, b),
         .logical_not => |operand| try evalLogicalNot(ctx, operand),
         .case_expr => |ce| try evalCaseExpr(ctx, ce),
-        .func_call => |fc| try evalFuncCall(ctx, fc),
+        .func_call => |fc| try evalFuncCall(ctx, expr, fc),
         .like => |l| try evalLike(ctx, l),
     };
 }
@@ -202,7 +215,16 @@ fn evalCaseExpr(ctx: EvalContext, ce: Expr.CaseExpr) Error!Value {
     return Value.null;
 }
 
-fn evalFuncCall(ctx: EvalContext, fc: Expr.FuncCall) Error!Value {
+fn evalFuncCall(ctx: EvalContext, expr: *const Expr, fc: Expr.FuncCall) Error!Value {
+    // Aggregate substitution: when this func_call is one the aggregate
+    // driver pre-computed for the current group, return the precomputed
+    // value (duped) without ever evaluating the arguments. Skipping the
+    // arg eval is essential — `count(x)` should not error if `x` doesn't
+    // resolve in the per-group scope (the value was already accumulated
+    // in the source-row scope during the group scan).
+    if (ctx.agg_values) |map| {
+        if (map.get(expr)) |v| return dupeLiteral(ctx.allocator, v);
+    }
     var arg_values: std.ArrayList(Value) = .empty;
     defer {
         for (arg_values.items) |v| ops.freeValue(ctx.allocator, v);

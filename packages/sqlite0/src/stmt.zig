@@ -31,6 +31,15 @@ pub const ParsedSelect = struct {
     from: ?ParsedFrom,
     where: ?*ast.Expr,
     distinct: bool = false,
+    /// `GROUP BY e1 [, e2 ...]` — one ASTs per group key. Empty slice when
+    /// the clause is absent. The aggregate execution path treats empty
+    /// group_by as "implicit single group" only when at least one aggregate
+    /// call is present in items/having/order_by.
+    group_by: []*ast.Expr = &.{},
+    /// `HAVING <expr>` filter applied after grouping. May reference
+    /// aggregates not in the SELECT list (sqlite3 allows this). Null when
+    /// absent.
+    having: ?*ast.Expr = null,
     order_by: []OrderTerm = &.{},
     limit: ?*ast.Expr = null,
     offset: ?*ast.Expr = null,
@@ -87,6 +96,21 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
         where_ast = try p.parseExpr();
     }
 
+    var group_by: []*ast.Expr = &.{};
+    errdefer freeExprList(p.allocator, group_by);
+    if (p.cur.kind == .keyword_group) {
+        p.advance();
+        try p.expect(.keyword_by);
+        group_by = try parseExprList(p);
+    }
+
+    var having_ast: ?*ast.Expr = null;
+    errdefer if (having_ast) |h| h.deinit(p.allocator);
+    if (p.cur.kind == .keyword_having) {
+        p.advance();
+        having_ast = try p.parseExpr();
+    }
+
     var order_by: []OrderTerm = &.{};
     errdefer freeOrderTerms(p.allocator, order_by);
     if (p.cur.kind == .keyword_order) {
@@ -118,10 +142,33 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
         .from = from,
         .where = where_ast,
         .distinct = distinct,
+        .group_by = group_by,
+        .having = having_ast,
         .order_by = order_by,
         .limit = limit_ast,
         .offset = offset_ast,
     };
+}
+
+/// Parse `<expr> [, <expr>]*`. Used by GROUP BY (and trivially extensible
+/// to other comma-list contexts that don't need extra per-term metadata).
+fn parseExprList(p: *Parser) ![]*ast.Expr {
+    var list: std.ArrayList(*ast.Expr) = .empty;
+    errdefer {
+        for (list.items) |e| e.deinit(p.allocator);
+        list.deinit(p.allocator);
+    }
+    try list.append(p.allocator, try p.parseExpr());
+    while (p.cur.kind == .comma) {
+        p.advance();
+        try list.append(p.allocator, try p.parseExpr());
+    }
+    return list.toOwnedSlice(p.allocator);
+}
+
+pub fn freeExprList(allocator: std.mem.Allocator, list: []*ast.Expr) void {
+    for (list) |e| e.deinit(allocator);
+    allocator.free(list);
 }
 
 fn parseOrderBy(p: *Parser) ![]OrderTerm {
@@ -330,72 +377,12 @@ fn freeAsts(allocator: std.mem.Allocator, asts: []const *ast.Expr) void {
 }
 
 // ── CREATE TABLE ────────────────────────────────────────────────────────────
+// Implementation lives in stmt_ddl.zig; re-exported here so existing call
+// sites keep their `stmt.parseCreateTableStatement` reference working.
 
-/// All slices borrow from `Parser.src`, which the caller (`Database.execute`)
-/// holds for the entire `execute` call; the outer slice is in
-/// `Parser.allocator` (per-statement arena). The caller dupes `name` and
-/// `columns[*]` to long-lived memory before storing them.
-pub const ParsedCreateTable = struct {
-    name: []const u8,
-    columns: [][]const u8,
-};
-
-/// `CREATE TABLE <name> ( <col-def> [, <col-def> ...] )`
-///
-/// Each col-def is a column name optionally followed by a type-name and any
-/// column-constraints; the type and constraints are consumed and discarded
-/// (Iter14.B). SQLite3 dynamic typing means the absence of constraint
-/// enforcement is observationally equivalent for Phase 2.
-pub fn parseCreateTableStatement(p: *Parser) !ParsedCreateTable {
-    try p.expect(.keyword_create);
-    try p.expect(.keyword_table);
-
-    if (p.cur.kind != .identifier) return Error.SyntaxError;
-    const name = p.cur.slice(p.src);
-    p.advance();
-
-    try p.expect(.lparen);
-
-    var columns: std.ArrayList([]const u8) = .empty;
-    errdefer columns.deinit(p.allocator);
-
-    while (true) {
-        const col_name = try parseColumnDef(p);
-        try columns.append(p.allocator, col_name);
-        if (p.cur.kind == .comma) {
-            p.advance();
-            continue;
-        }
-        break;
-    }
-    try p.expect(.rparen);
-
-    return .{ .name = name, .columns = try columns.toOwnedSlice(p.allocator) };
-}
-
-/// Column-def: `<name> [<type-name> ...] [<column-constraint> ...]`. We only
-/// care about the column name; everything until the next `,` or `)` at
-/// paren-depth 0 is consumed and ignored. This permits `x INTEGER NOT NULL`,
-/// `x INT DEFAULT (1+1)`, `x VARCHAR(255)`, etc.
-fn parseColumnDef(p: *Parser) ![]const u8 {
-    if (p.cur.kind != .identifier) return Error.SyntaxError;
-    const name = p.cur.slice(p.src);
-    p.advance();
-    var depth: u32 = 0;
-    while (true) {
-        switch (p.cur.kind) {
-            .comma, .rparen => if (depth == 0) return name,
-            else => {},
-        }
-        switch (p.cur.kind) {
-            .lparen => depth += 1,
-            .rparen => depth -= 1,
-            .eof => return Error.SyntaxError,
-            else => {},
-        }
-        p.advance();
-    }
-}
+const stmt_ddl = @import("stmt_ddl.zig");
+pub const ParsedCreateTable = stmt_ddl.ParsedCreateTable;
+pub const parseCreateTableStatement = stmt_ddl.parseCreateTableStatement;
 
 // ── INSERT ──────────────────────────────────────────────────────────────────
 
