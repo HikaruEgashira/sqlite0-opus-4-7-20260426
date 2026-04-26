@@ -15,7 +15,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [ ] Iter9: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
 - [ ] Iter12: `SELECT <expr> AS <alias>` (列リネーム — Result の列名表示用)
 - [x] Iter13.A: `LIKE` 演算子 (% / _ ワイルドカード, ASCII case-insensitive, 3VL)
-- [ ] Iter13.B: `GLOB` 演算子 (* / ? / [abc] / [a-z] / [!abc] / [^abc], case-sensitive)
+- [x] Iter13.B: `GLOB` 演算子 (* / ? / [abc] / [a-z] / [^abc], case-sensitive)
 - [ ] Iter13.C: `LIKE` の `ESCAPE` 句
 
 ## Backlog (Phase 3以降)

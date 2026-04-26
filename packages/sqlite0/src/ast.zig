@@ -21,6 +21,7 @@ const Value = value_mod.Value;
 pub const BinaryOp = enum { add, sub, mul, div, mod };
 pub const CompareOp = enum { lt, le, gt, ge };
 pub const EqOp = enum { eq, ne };
+pub const LikeOp = enum { like, glob };
 
 pub const Expr = union(enum) {
     literal: Value,
@@ -43,8 +44,9 @@ pub const Expr = union(enum) {
     logical_not: *Expr,
     case_expr: CaseExpr,
     func_call: FuncCall,
-    /// `value LIKE pattern` (Iter13.A). ESCAPE is deferred to Iter13.C; GLOB
-    /// will reuse this struct once Iter13.B adds a pattern-flavour field.
+    /// `value LIKE pattern` / `value GLOB pattern`. The `op` field selects
+    /// between SQLite's two pattern-match operators which differ in
+    /// case-sensitivity and wildcard syntax. ESCAPE is deferred to Iter13.C.
     like: Like,
 
     pub const BinaryArith = struct { op: BinaryOp, left: *Expr, right: *Expr };
@@ -68,7 +70,7 @@ pub const Expr = union(enum) {
         else_branch: ?*Expr,
     };
     pub const FuncCall = struct { name: []const u8, args: []*Expr };
-    pub const Like = struct { value: *Expr, pattern: *Expr, negated: bool };
+    pub const Like = struct { op: LikeOp, value: *Expr, pattern: *Expr, negated: bool };
 
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -228,9 +230,9 @@ pub fn makeFuncCall(allocator: std.mem.Allocator, name: []const u8, args: []*Exp
     return node;
 }
 
-pub fn makeLike(allocator: std.mem.Allocator, value: *Expr, pattern: *Expr, negated: bool) !*Expr {
+pub fn makeLike(allocator: std.mem.Allocator, op: LikeOp, value: *Expr, pattern: *Expr, negated: bool) !*Expr {
     const node = try allocator.create(Expr);
-    node.* = .{ .like = .{ .value = value, .pattern = pattern, .negated = negated } };
+    node.* = .{ .like = .{ .op = op, .value = value, .pattern = pattern, .negated = negated } };
     return node;
 }
 

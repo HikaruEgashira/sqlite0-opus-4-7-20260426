@@ -100,6 +100,101 @@ fn asciiEqIgnoreCase(a: u8, b: u8) bool {
     return std.ascii.toLower(a) == std.ascii.toLower(b);
 }
 
+/// SQL `GLOB`: case-sensitive wildcard match. `*` matches zero-or-more,
+/// `?` matches exactly one byte, `[abc]` / `[a-z]` matches a single byte
+/// against a character class, with leading `!` or `^` negating the class.
+/// NULL on either side propagates as NULL. Numeric values are coerced to
+/// text first.
+pub fn applyGlob(allocator: std.mem.Allocator, value: Value, pattern: Value) Error!Value {
+    if (value == .null or pattern == .null) return Value.null;
+    const v_bytes = try valueToMatchBytes(allocator, value);
+    defer freeMatchBytes(allocator, value, v_bytes);
+    const p_bytes = try valueToMatchBytes(allocator, pattern);
+    defer freeMatchBytes(allocator, pattern, p_bytes);
+    return ops.boolValue(matchGlob(v_bytes, p_bytes));
+}
+
+/// `*` greedily matches via right-anchored recursion; `?` consumes one byte.
+/// Character classes `[...]` are inlined into one matchClass call; a class
+/// without a closing `]` is treated as a malformed pattern and matches
+/// nothing — sqlite3 returns 0 in that case (`'[' GLOB '['` → 0).
+pub fn matchGlob(text: []const u8, pattern: []const u8) bool {
+    var ti: usize = 0;
+    var pi: usize = 0;
+    while (pi < pattern.len) {
+        const pc = pattern[pi];
+        switch (pc) {
+            '*' => {
+                while (pi + 1 < pattern.len and pattern[pi + 1] == '*') pi += 1;
+                if (pi + 1 == pattern.len) return true;
+                pi += 1;
+                while (ti <= text.len) : (ti += 1) {
+                    if (matchGlob(text[ti..], pattern[pi..])) return true;
+                }
+                return false;
+            },
+            '?' => {
+                if (ti >= text.len) return false;
+                ti += 1;
+                pi += 1;
+            },
+            '[' => {
+                if (ti >= text.len) return false;
+                const close = findClassEnd(pattern, pi + 1) orelse return false;
+                if (!matchClass(pattern[pi + 1 .. close], text[ti])) return false;
+                ti += 1;
+                pi = close + 1;
+            },
+            else => {
+                if (ti >= text.len or text[ti] != pc) return false;
+                ti += 1;
+                pi += 1;
+            },
+        }
+    }
+    return ti == text.len;
+}
+
+/// Locate the closing `]` for a `[...]` class starting at index `start`
+/// (the byte after `[`). Per sqlite3 only `^` is a leading negation marker;
+/// `!` is a literal class member. An immediately-leading `]` is also a
+/// literal member (e.g. `[]a]` matches `]` or `a`), so we skip past one
+/// optional `^` then optionally one `]` before searching for the closing
+/// bracket. Returns null if no closing bracket exists.
+fn findClassEnd(pattern: []const u8, start: usize) ?usize {
+    if (start >= pattern.len) return null;
+    var i: usize = start;
+    if (pattern[i] == '^') i += 1;
+    if (i < pattern.len and pattern[i] == ']') i += 1;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == ']') return i;
+    }
+    return null;
+}
+
+fn matchClass(class: []const u8, c: u8) bool {
+    if (class.len == 0) return false;
+    var i: usize = 0;
+    var negated = false;
+    if (class[0] == '^') {
+        negated = true;
+        i = 1;
+    }
+    var found = false;
+    while (i < class.len) {
+        if (i + 2 < class.len and class[i + 1] == '-') {
+            const lo = class[i];
+            const hi = class[i + 2];
+            if (c >= lo and c <= hi) found = true;
+            i += 3;
+        } else {
+            if (class[i] == c) found = true;
+            i += 1;
+        }
+    }
+    return if (negated) !found else found;
+}
+
 test "match: matchLike basic %" {
     try std.testing.expect(matchLike("abc", "a%", null));
     try std.testing.expect(matchLike("abc", "%c", null));
@@ -134,4 +229,34 @@ test "match: applyLike NULL propagation" {
 test "match: applyLike numeric coercion" {
     const r = try applyLike(std.testing.allocator, .{ .integer = 123 }, .{ .text = "1%" }, null);
     try std.testing.expectEqual(@as(i64, 1), r.integer);
+}
+
+test "match: matchGlob basic" {
+    try std.testing.expect(matchGlob("abc", "a*"));
+    try std.testing.expect(matchGlob("abc", "*c"));
+    try std.testing.expect(matchGlob("abc", "a?c"));
+    try std.testing.expect(!matchGlob("abc", "A*"));
+    try std.testing.expect(!matchGlob("ab", "a??"));
+}
+
+test "match: matchGlob character classes" {
+    try std.testing.expect(matchGlob("a", "[abc]"));
+    try std.testing.expect(matchGlob("c", "[a-c]"));
+    try std.testing.expect(!matchGlob("d", "[a-c]"));
+    try std.testing.expect(matchGlob("d", "[^abc]"));
+    try std.testing.expect(!matchGlob("a", "[^abc]"));
+    // Only `^` negates; `!` is a literal class member (matches sqlite3).
+    try std.testing.expect(matchGlob("!", "[!abc]"));
+    try std.testing.expect(matchGlob("a", "[!abc]"));
+    try std.testing.expect(!matchGlob("d", "[!abc]"));
+}
+
+test "match: matchGlob unmatched bracket" {
+    try std.testing.expect(!matchGlob("[", "["));
+    try std.testing.expect(!matchGlob("a", "[ab"));
+}
+
+test "match: applyGlob NULL propagation" {
+    try std.testing.expectEqual(Value.null, try applyGlob(std.testing.allocator, .null, .{ .text = "*" }));
+    try std.testing.expectEqual(Value.null, try applyGlob(std.testing.allocator, .{ .text = "a" }, .null));
 }
