@@ -387,3 +387,32 @@ test "Database.execute: CREATE TABLE duplicate column case-insensitive" {
     defer db.deinit();
     try std.testing.expectError(Error.DuplicateColumnName, db.execute("CREATE TABLE t(name TEXT, NAME INTEGER)"));
 }
+
+test "Database.execute: SELECT alias parses (AS form)" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("SELECT 1+2 AS sum");
+    defer er.deinit();
+    try std.testing.expectEqual(@as(i64, 3), er.statements[0].select[0][0].integer);
+}
+
+test "Database.execute: SELECT bare alias parses" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("SELECT 1 foo");
+    defer er.deinit();
+    try std.testing.expectEqual(@as(i64, 1), er.statements[0].select[0][0].integer);
+}
+
+test "Database.execute: alias preserved across FROM and WHERE" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE t(x); INSERT INTO t VALUES (5), (10); SELECT x AS n FROM t WHERE x > 5");
+    defer er.deinit();
+    const rows = er.statements[2].select;
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(@as(i64, 10), rows[0][0].integer);
+}

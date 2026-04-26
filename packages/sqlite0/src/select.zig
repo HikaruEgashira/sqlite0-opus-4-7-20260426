@@ -21,11 +21,22 @@ const Error = ops.Error;
 const Parser = parser_mod.Parser;
 
 /// One element in a SELECT list: either `*` (expand to all FROM columns)
-/// or an expression. `*` is invalid without a FROM clause and rejected at
-/// execute time to mirror sqlite3 (`SELECT *` → "no tables specified").
+/// or an expression with an optional output alias. `*` is invalid without a
+/// FROM clause and rejected at execute time to mirror sqlite3 (`SELECT *` →
+/// "no tables specified").
+///
+/// `alias` is purely metadata: it's parsed for syntactic completeness (so
+/// `SELECT 1 + 2 AS sum` accepts) but the current CLI doesn't print headers,
+/// so it has no observable effect on output. Future iterations (header mode,
+/// ORDER BY referencing aliases) will read it.
 pub const SelectItem = union(enum) {
     star,
-    expr: *ast.Expr,
+    expr: ExprItem,
+
+    pub const ExprItem = struct {
+        expr: *ast.Expr,
+        alias: ?[]const u8 = null,
+    };
 };
 
 pub fn parseSelectList(p: *Parser) ![]SelectItem {
@@ -47,13 +58,40 @@ fn parseSelectItem(p: *Parser, items: *std.ArrayList(SelectItem)) !void {
         return;
     }
     const expr = try p.parseExpr();
-    items.appendAssumeCapacity(.{ .expr = expr });
+    const alias = parseOptionalAlias(p);
+    items.appendAssumeCapacity(.{ .expr = .{ .expr = expr, .alias = alias } });
+}
+
+/// Recognize `AS <ident>` (mandatory ident after AS) or a bare `<ident>`
+/// alias. A bare keyword (FROM, WHERE, ...) is left for the surrounding
+/// statement parser. The alias slice borrows from `Parser.src` and lives as
+/// long as the input string.
+///
+/// CAVEAT: this greedily consumes any post-expression identifier as an
+/// alias. When adding new infix operators (IS, IN, BETWEEN, ...), register
+/// them as keywords in `lex.zig` BEFORE wiring them into `parseExpr` —
+/// otherwise this function silently steals the operator name as a bare
+/// alias and the resulting parse error misleadingly points at the rhs.
+fn parseOptionalAlias(p: *Parser) ?[]const u8 {
+    if (p.cur.kind == .keyword_as) {
+        p.advance();
+        if (p.cur.kind != .identifier) return null;
+        const name = p.cur.slice(p.src);
+        p.advance();
+        return name;
+    }
+    if (p.cur.kind == .identifier) {
+        const name = p.cur.slice(p.src);
+        p.advance();
+        return name;
+    }
+    return null;
 }
 
 fn freeSelectListItems(allocator: std.mem.Allocator, items: *std.ArrayList(SelectItem)) void {
     for (items.items) |item| switch (item) {
         .star => {},
-        .expr => |e| e.deinit(allocator),
+        .expr => |e| e.expr.deinit(allocator),
     };
     items.deinit(allocator);
 }
@@ -61,7 +99,7 @@ fn freeSelectListItems(allocator: std.mem.Allocator, items: *std.ArrayList(Selec
 pub fn freeSelectList(allocator: std.mem.Allocator, items: []SelectItem) void {
     for (items) |item| switch (item) {
         .star => {},
-        .expr => |e| e.deinit(allocator),
+        .expr => |e| e.expr.deinit(allocator),
     };
     allocator.free(items);
 }
@@ -154,8 +192,8 @@ fn evaluateSelectRow(
                 produced += 1;
             }
         },
-        .expr => |expr| {
-            row[produced] = try eval.evalExpr(ctx, expr);
+        .expr => |e| {
+            row[produced] = try eval.evalExpr(ctx, e.expr);
             produced += 1;
         },
     };
