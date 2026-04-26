@@ -205,7 +205,7 @@ pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.Parse
         current = try engine_setop.combine(alloc, branch.kind, current, right);
         if (left_arity == null) left_arity = right_arity;
     }
-    return engine_setop.applySetopPostProcess(alloc, current, ps.order_by, ps.limit, ps.offset);
+    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset);
 }
 
 /// Execute one ParsedSelect with the given PostProcess. Stripped out of
@@ -226,20 +226,20 @@ fn executeOneSelect(
         if (wants_grouping) {
             const empty_row: []const Value = &.{};
             var synthetic = [_][]const Value{empty_row};
-            return aggregate.executeAggregated(alloc, ps.items, synthetic[0..], &.{}, &.{}, ps.where, ps.group_by, ps.having, pp);
+            return aggregate.executeAggregated(alloc, db, ps.items, synthetic[0..], &.{}, &.{}, ps.where, ps.group_by, ps.having, pp);
         }
-        return select_mod.executeWithoutFrom(alloc, ps.items, ps.where, pp);
+        return select_mod.executeWithoutFrom(alloc, db, ps.items, ps.where, pp);
     }
 
     const cart = try engine_from.cartesianFromSources(db, alloc, ps.from);
     if (wants_grouping) {
         const inputs = try alloc.alloc([]const Value, cart.rows.len);
         for (cart.rows, inputs) |src, *slot| slot.* = src;
-        return aggregate.executeAggregated(alloc, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp);
+        return aggregate.executeAggregated(alloc, db, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp);
     }
     const rows_const = try alloc.alloc([]const Value, cart.rows.len);
     for (cart.rows, rows_const) |src, *slot| slot.* = src;
-    return select_mod.executeWithFrom(alloc, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp);
+    return select_mod.executeWithFrom(alloc, db, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp);
 }
 
 /// PostProcess for one branch of a setop chain: keep the per-branch DISTINCT

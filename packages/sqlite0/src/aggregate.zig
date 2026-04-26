@@ -30,12 +30,14 @@ const select = @import("select.zig");
 const select_post = @import("select_post.zig");
 const walk = @import("aggregate_walk.zig");
 const state = @import("aggregate_state.zig");
+const database = @import("database.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
 const Aggregator = state.Aggregator;
 const dupeArena = state.dupeArena;
 const aggregatorFromCall = state.aggregatorFromCall;
+const Database = database.Database;
 
 // Re-export walking helpers so callers (engine.zig) can keep importing the
 // aggregate driver as their single entry point.
@@ -61,6 +63,7 @@ const Group = struct {
 /// so callers tear everything down by deinit'ing the arena.
 pub fn executeAggregated(
     alloc: std.mem.Allocator,
+    db: ?*Database,
     items: []const select.SelectItem,
     source_rows: []const []const Value,
     source_columns: []const []const u8,
@@ -97,13 +100,14 @@ pub fn executeAggregated(
                 .current_row = row,
                 .columns = source_columns,
                 .column_qualifiers = source_qualifiers,
+                .db = db,
             };
             const cond = try eval.evalExpr(ctx, w);
             defer ops.freeValue(alloc, cond);
             if (!(ops.truthy(cond) orelse false)) continue;
         }
 
-        const key = try evaluateGroupKey(alloc, group_by, row, source_columns, source_qualifiers);
+        const key = try evaluateGroupKey(alloc, db, group_by, row, source_columns, source_qualifiers);
         const group_idx = if (findGroup(groups.items, key)) |idx| blk: {
             // Existing group — discard the redundant key (arena reclaims).
             for (key) |v| ops.freeValue(alloc, v);
@@ -118,7 +122,7 @@ pub fn executeAggregated(
             });
             break :blk idx;
         };
-        try feedRow(alloc, &groups.items[group_idx], agg_calls.items, row, source_columns, source_qualifiers);
+        try feedRow(alloc, db, &groups.items[group_idx], agg_calls.items, row, source_columns, source_qualifiers);
     }
 
     // Implicit-group rule: if there are aggregates but no GROUP BY and no
@@ -133,11 +137,12 @@ pub fn executeAggregated(
         });
     }
 
-    return finaliseGroups(alloc, items, having, pp, agg_calls.items, groups.items, source_columns, source_qualifiers);
+    return finaliseGroups(alloc, db, items, having, pp, agg_calls.items, groups.items, source_columns, source_qualifiers);
 }
 
 fn evaluateGroupKey(
     alloc: std.mem.Allocator,
+    db: ?*Database,
     group_by: []const *ast.Expr,
     row: []const Value,
     columns: []const []const u8,
@@ -154,6 +159,7 @@ fn evaluateGroupKey(
         .current_row = row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .db = db,
     };
     while (produced < group_by.len) : (produced += 1) {
         key[produced] = try eval.evalExpr(ctx, group_by[produced]);
@@ -191,6 +197,7 @@ fn makeAggregators(alloc: std.mem.Allocator, calls: []const *const ast.Expr) ![]
 
 fn feedRow(
     alloc: std.mem.Allocator,
+    db: ?*Database,
     group: *Group,
     calls: []const *const ast.Expr,
     row: []const Value,
@@ -202,6 +209,7 @@ fn feedRow(
         .current_row = row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .db = db,
     };
     for (calls, group.aggs) |call_expr, *agg| {
         const fc = call_expr.*.func_call;
@@ -217,6 +225,7 @@ fn feedRow(
 
 fn finaliseGroups(
     alloc: std.mem.Allocator,
+    db: ?*Database,
     items: []const select.SelectItem,
     having: ?*ast.Expr,
     pp: select_post.PostProcess,
@@ -262,6 +271,7 @@ fn finaliseGroups(
             .columns = source_columns,
             .column_qualifiers = source_qualifiers,
             .agg_values = &agg_map,
+            .db = db,
         };
 
         if (having) |h| {
@@ -286,7 +296,7 @@ fn finaliseGroups(
         try rows.append(alloc, out_row);
 
         if (pp.order_by.len > 0) {
-            const key = try evaluateAggOrderKey(alloc, pp.order_by, g.representative, source_columns, source_qualifiers, out_row, &agg_map);
+            const key = try evaluateAggOrderKey(alloc, db, pp.order_by, g.representative, source_columns, source_qualifiers, out_row, &agg_map);
             sort_keys.append(alloc, key) catch |err| {
                 for (key) |v| ops.freeValue(alloc, v);
                 alloc.free(key);
@@ -307,11 +317,12 @@ fn finaliseGroups(
 
     var all_rows = try rows.toOwnedSlice(alloc);
     if (pp.distinct) all_rows = select_post.dedupeRows(alloc, all_rows);
-    return select_post.applyLimitOffset(alloc, all_rows, pp);
+    return select_post.applyLimitOffset(alloc, db, all_rows, pp);
 }
 
 fn evaluateAggOrderKey(
     alloc: std.mem.Allocator,
+    db: ?*Database,
     terms: []const select_post.OrderTerm,
     current_row: []const Value,
     columns: []const []const u8,
@@ -331,6 +342,7 @@ fn evaluateAggOrderKey(
         .columns = columns,
         .column_qualifiers = column_qualifiers,
         .agg_values = agg_map,
+        .db = db,
     };
     while (produced < terms.len) : (produced += 1) {
         const term = terms[produced];

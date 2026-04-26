@@ -17,10 +17,12 @@ const parser_mod = @import("parser.zig");
 const eval = @import("eval.zig");
 const func_util = @import("func_util.zig");
 const post = @import("select_post.zig");
+const database = @import("database.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
+const Database = database.Database;
 
 pub const OrderTerm = post.OrderTerm;
 pub const PostProcess = post.PostProcess;
@@ -152,14 +154,15 @@ fn starWidth(qualifier: ?[]const u8, column_qualifiers: []const []const u8) usiz
 /// upstream by `containsStar`, so every item here is `.expr`.
 pub fn executeWithoutFrom(
     allocator: std.mem.Allocator,
+    db: ?*Database,
     items: []const SelectItem,
     where_ast: ?*ast.Expr,
     pp: PostProcess,
 ) ![][]Value {
-    if (!try evalWhereTruthy(allocator, where_ast, &.{}, &.{}, &.{})) {
+    if (!try evalWhereTruthy(allocator, db, where_ast, &.{}, &.{}, &.{})) {
         return allocator.alloc([]Value, 0);
     }
-    const row = try evaluateSelectRow(allocator, items, &.{}, &.{}, &.{});
+    const row = try evaluateSelectRow(allocator, db, items, &.{}, &.{}, &.{});
     errdefer {
         for (row) |v| ops.freeValue(allocator, v);
         allocator.free(row);
@@ -167,7 +170,7 @@ pub fn executeWithoutFrom(
     var rows = try allocator.alloc([]Value, 1);
     rows[0] = row;
     // ORDER BY is a no-op on a single row, but LIMIT/OFFSET still applies.
-    return post.applyLimitOffset(allocator, rows, pp);
+    return post.applyLimitOffset(allocator, db, rows, pp);
 }
 
 /// Execute a SELECT against a FROM source. For each source row, optionally
@@ -176,6 +179,7 @@ pub fn executeWithoutFrom(
 /// the SOURCE row (sqlite3 resolves ORDER BY in the FROM scope first).
 pub fn executeWithFrom(
     allocator: std.mem.Allocator,
+    db: ?*Database,
     items: []const SelectItem,
     source_rows: []const []const Value,
     source_columns: []const []const u8,
@@ -201,15 +205,15 @@ pub fn executeWithFrom(
     }
 
     for (source_rows) |source_row| {
-        if (!try evalWhereTruthy(allocator, where_ast, source_row, source_columns, source_qualifiers)) continue;
-        const out_row = try evaluateSelectRow(allocator, items, source_row, source_columns, source_qualifiers);
+        if (!try evalWhereTruthy(allocator, db, where_ast, source_row, source_columns, source_qualifiers)) continue;
+        const out_row = try evaluateSelectRow(allocator, db, items, source_row, source_columns, source_qualifiers);
         rows.append(allocator, out_row) catch |err| {
             for (out_row) |v| ops.freeValue(allocator, v);
             allocator.free(out_row);
             return err;
         };
         if (pp.order_by.len > 0) {
-            const key = try evaluateOrderKey(allocator, pp.order_by, source_row, source_columns, source_qualifiers, out_row);
+            const key = try evaluateOrderKey(allocator, db, pp.order_by, source_row, source_columns, source_qualifiers, out_row);
             sort_keys.append(allocator, key) catch |err| {
                 for (key) |v| ops.freeValue(allocator, v);
                 allocator.free(key);
@@ -230,11 +234,12 @@ pub fn executeWithFrom(
 
     var all_rows = try rows.toOwnedSlice(allocator);
     if (pp.distinct) all_rows = post.dedupeRows(allocator, all_rows);
-    return post.applyLimitOffset(allocator, all_rows, pp);
+    return post.applyLimitOffset(allocator, db, all_rows, pp);
 }
 
 fn evaluateOrderKey(
     allocator: std.mem.Allocator,
+    db: ?*Database,
     terms: []const OrderTerm,
     current_row: []const Value,
     columns: []const []const u8,
@@ -252,6 +257,7 @@ fn evaluateOrderKey(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .db = db,
     };
     while (produced < terms.len) : (produced += 1) {
         const term = terms[produced];
@@ -276,6 +282,7 @@ fn evaluateOrderKey(
 /// source row); expression items are evaluated normally.
 fn evaluateSelectRow(
     allocator: std.mem.Allocator,
+    db: ?*Database,
     items: []const SelectItem,
     current_row: []const Value,
     columns: []const []const u8,
@@ -297,6 +304,7 @@ fn evaluateSelectRow(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .db = db,
     };
     for (items) |item| switch (item) {
         .star => |q| {
@@ -334,6 +342,7 @@ fn dupeRowValue(allocator: std.mem.Allocator, v: Value) !Value {
 /// branch uniformly.
 fn evalWhereTruthy(
     allocator: std.mem.Allocator,
+    db: ?*Database,
     where_ast: ?*ast.Expr,
     current_row: []const Value,
     columns: []const []const u8,
@@ -345,6 +354,7 @@ fn evalWhereTruthy(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .db = db,
     };
     const cond = try eval.evalExpr(ctx, w);
     defer ops.freeValue(allocator, cond);

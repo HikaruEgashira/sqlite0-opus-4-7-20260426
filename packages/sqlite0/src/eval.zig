@@ -18,6 +18,7 @@ const value_mod = @import("value.zig");
 const funcs = @import("funcs.zig");
 const func_util = @import("func_util.zig");
 const match = @import("match.zig");
+const database = @import("database.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -48,6 +49,15 @@ pub const EvalContext = struct {
     /// `funcs.call`. Null (the default) means "no aggregate substitution"
     /// — the normal scalar path runs.
     agg_values: ?*const AggregateValues = null,
+    /// Database handle — non-null whenever the expression is evaluated as
+    /// part of a query running through `engine.dispatchOne`. Iter22.A
+    /// threads this through every SELECT/DML expression-evaluation path so
+    /// Iter22.B can dispatch scalar subqueries (`(SELECT ...)`) to
+    /// `engine.executeSelect` without the eval module taking a runtime
+    /// dependency on engine. Null only on the parse-time VALUES tuple
+    /// path (`stmt.parseValuesTuple`); subqueries there will surface a
+    /// runtime error in 22.B.
+    db: ?*database.Database = null,
 };
 
 /// Pointer-keyed map from func_call AST nodes to their finalised aggregate

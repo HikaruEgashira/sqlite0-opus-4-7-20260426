@@ -12,10 +12,12 @@ const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const stmt_mod = @import("stmt.zig");
 const select_post = @import("select_post.zig");
+const database = @import("database.zig");
 
 const Value = value_mod.Value;
 const SetopKind = stmt_mod.SetopKind;
 const Error = ops.Error;
+const Database = database.Database;
 
 pub fn combine(
     arena: std.mem.Allocator,
@@ -83,6 +85,7 @@ fn rowExistsIn(set: []const []Value, row: []const Value) bool {
 /// result set" for `SELECT 1 UNION SELECT 2 ORDER BY abs(1)`).
 pub fn applySetopPostProcess(
     arena: std.mem.Allocator,
+    db: ?*Database,
     rows: [][]Value,
     order_by: []const stmt_mod.OrderTerm,
     limit: ?*ast.Expr,
@@ -111,5 +114,5 @@ pub fn applySetopPostProcess(
         .limit = limit,
         .offset = offset,
     };
-    return select_post.applyLimitOffset(arena, current, pp);
+    return select_post.applyLimitOffset(arena, db, current, pp);
 }

@@ -14,8 +14,10 @@ const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const eval = @import("eval.zig");
+const database = @import("database.zig");
 
 const Value = value_mod.Value;
+const Database = database.Database;
 
 pub const OrderTerm = struct {
     expr: *ast.Expr,
@@ -168,6 +170,7 @@ pub fn sortRowsByKeys(
 /// new shorter slice with the dropped rows freed in between.
 pub fn applyLimitOffset(
     allocator: std.mem.Allocator,
+    db: ?*Database,
     rows: [][]Value,
     pp: PostProcess,
 ) ![][]Value {
@@ -184,6 +187,7 @@ pub fn applyLimitOffset(
         .allocator = allocator,
         .current_row = &.{},
         .columns = &.{},
+        .db = db,
     };
     var skip: usize = 0;
     if (pp.offset) |e| {

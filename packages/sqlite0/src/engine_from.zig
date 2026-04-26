@@ -89,6 +89,7 @@ pub fn cartesianFromSources(
                         .current_row = combined,
                         .columns = merged_columns,
                         .column_qualifiers = merged_qualifiers,
+                        .db = db,
                     };
                     const cond = try eval.evalExpr(ctx, on);
                     defer ops.freeValue(alloc, cond);
