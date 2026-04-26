@@ -23,10 +23,13 @@
 - [x] Iter8.A: `ast.zig` / `eval.zig` 新設、`parsePrimary` / `parseAddSub` を AST 化 (他は literal でラップ継続)
 - [x] Iter8.B: `parseMulDiv` / `parseConcat` / `parseUnary` / `parseComparison` を AST 化 (parseEquality は IS/BETWEEN/IN を含むため Iter8.C に持ち越し)
 - [x] Iter8.C: `parseEquality` / `parseNot` / `parseAnd` / `parseOr` / `parseCase` / `parseBetween` / `parseInList` / `parseFunctionCall` / `parseExpr` を AST 化、`stmt.zig` の `parseExpressionList` が `eval.evalExpr` を呼ぶように切り替え、parser.zig から ops.zig の評価系呼び出しが消える (Error 型と unescapeStringLiteral だけ残る)
-- [ ] Iter8.D: `column_ref` + `EvalContext.current_row` 実装、`SELECT x FROM (VALUES ...)` / `SELECT x+1 FROM (VALUES ...)` を通す
+- [x] Iter8.D: `column_ref` (eval時name解決) + `EvalContext.current_row`/`columns` 実装、`SELECT column1 FROM (VALUES ...)` / `SELECT column1+1 FROM ...` / 大文字小文字区別なし / 任意 `[AS] alias` を通す。SQLite互換のため `AS alias(col_list)` 形式は受け付けず、column1/column2... の自動命名のみ。
 
 ### Phase 1 残タスク (AST 移行と独立)
 - [ ] Iter9: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
+- [ ] Iter10: `SELECT *` 展開 (FROM source の全列を Result に展開)
+- [ ] Iter11: `SELECT <expr> AS <alias>` (列リネーム — Result の列名表示用)
+- [ ] Iter12: `WHERE <pred>` (FROM source からの行フィルタリング)
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 

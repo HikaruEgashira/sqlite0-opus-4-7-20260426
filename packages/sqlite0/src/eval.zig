@@ -16,6 +16,7 @@ const ops = @import("ops.zig");
 const lex = @import("lex.zig");
 const value_mod = @import("value.zig");
 const funcs = @import("funcs.zig");
+const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -23,12 +24,20 @@ const Error = ops.Error;
 
 pub const EvalContext = struct {
     allocator: std.mem.Allocator,
+    /// Values for the row the expression is evaluated against. Empty for
+    /// FROM-less SELECT. Bytes here are owned by the row producer (the
+    /// FROM-clause materialised rows in `stmt.zig`); `evalExpr` dupes
+    /// TEXT/BLOB column refs so the returned `Value` outlives the row.
     current_row: []const Value = &.{},
+    /// Column names matching `current_row` positionally (same length).
+    /// Borrowed from the SQL source string. Empty for FROM-less SELECT.
+    columns: []const []const u8 = &.{},
 };
 
 pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
     return switch (expr.*) {
         .literal => |v| dupeLiteral(ctx.allocator, v),
+        .column_ref => |name| try evalColumnRef(ctx, name),
         .binary_arith => |b| try evalBinaryArith(ctx, b),
         .binary_concat => |b| try evalBinaryConcat(ctx, b),
         .unary_negate => |operand| try evalUnaryNegate(ctx, operand),
@@ -202,6 +211,18 @@ fn evalFuncCall(ctx: EvalContext, fc: Expr.FuncCall) Error!Value {
         arg_values.appendAssumeCapacity(try evalExpr(ctx, arg_expr));
     }
     return funcs.call(ctx.allocator, fc.name, arg_values.items);
+}
+
+/// Resolve a column reference against the current row. Case-insensitive
+/// match per SQL's identifier rules. Returns a fresh `Value` owned by
+/// `ctx.allocator` (TEXT/BLOB bytes duped). Unknown name → SyntaxError.
+fn evalColumnRef(ctx: EvalContext, name: []const u8) Error!Value {
+    for (ctx.columns, 0..) |col, i| {
+        if (func_util.eqlIgnoreCase(name, col)) {
+            return dupeLiteral(ctx.allocator, ctx.current_row[i]);
+        }
+    }
+    return Error.SyntaxError;
 }
 
 /// Dupe TEXT/BLOB bytes so the returned Value outlives the AST node that

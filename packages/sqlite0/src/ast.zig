@@ -1,9 +1,9 @@
 //! Expression AST nodes (ADR-0002).
 //!
 //! Iter8.A introduced `literal` + `binary_arith`. Iter8.B added concat,
-//! unary, compare. Iter8.C completes the expression grammar: eq_check,
+//! unary, compare. Iter8.C completed the expression grammar: eq_check,
 //! is_check, between, in_list, logical_and/or/not, case_expr, func_call.
-//! Iter8.D will add `column_ref` for FROM-clause row binding.
+//! Iter8.D adds `column_ref` for FROM-clause row binding.
 //!
 //! Each node owns its children and any heap bytes inside `literal` values;
 //! `Expr.deinit` recursively releases everything. `func_call.name` is
@@ -24,6 +24,12 @@ pub const EqOp = enum { eq, ne };
 
 pub const Expr = union(enum) {
     literal: Value,
+    /// Column name borrowed from the SQL source string. Resolved at
+    /// `eval` time against `EvalContext.columns` (case-insensitive). See
+    /// ADR-0002 §"Iter8.D column_ref": eval-time resolution sidesteps the
+    /// SELECT-before-FROM ordering problem since the parser doesn't know
+    /// the binding scope when it consumes a SELECT-list identifier.
+    column_ref: []const u8,
     binary_arith: BinaryArith,
     binary_concat: BinaryConcat,
     unary_negate: *Expr,
@@ -63,6 +69,7 @@ pub const Expr = union(enum) {
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .literal => |v| ops.freeValue(allocator, v),
+            .column_ref => {}, // name borrowed from src; nothing to free
             .binary_arith => |b| {
                 b.left.deinit(allocator);
                 b.right.deinit(allocator);
@@ -121,6 +128,12 @@ pub const Expr = union(enum) {
 pub fn makeLiteral(allocator: std.mem.Allocator, v: Value) !*Expr {
     const node = try allocator.create(Expr);
     node.* = .{ .literal = v };
+    return node;
+}
+
+pub fn makeColumnRef(allocator: std.mem.Allocator, name: []const u8) !*Expr {
+    const node = try allocator.create(Expr);
+    node.* = .{ .column_ref = name };
     return node;
 }
 

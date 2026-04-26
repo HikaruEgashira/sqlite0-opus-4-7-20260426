@@ -302,19 +302,29 @@ pub const Parser = struct {
                 try self.expect(.rparen);
                 return inner;
             },
-            .identifier => return self.parseFunctionCall(),
+            .identifier => return self.parseIdentifierExpr(),
             .keyword_case => return self.parseCase(),
             else => return Error.SyntaxError,
         }
     }
 
-    fn parseFunctionCall(self: *Parser) Error!*ast.Expr {
-        const name_tok = self.cur;
-        const name = name_tok.slice(self.src);
+    /// Identifier disambiguation: `name(args...)` is a function call,
+    /// bare `name` is a column reference resolved at eval time. SQLite has
+    /// no other use of bare identifiers in expressions (no enums, no bare
+    /// constants like `current_date`).
+    fn parseIdentifierExpr(self: *Parser) Error!*ast.Expr {
+        const name = self.cur.slice(self.src);
         self.advance();
-        if (self.cur.kind != .lparen) return Error.SyntaxError;
-        self.advance();
+        if (self.cur.kind == .lparen) {
+            return self.parseFunctionCallTail(name);
+        }
+        return ast.makeColumnRef(self.allocator, name);
+    }
 
+    /// Function-call body parser, called after the name and `(` have been
+    /// consumed by `parseIdentifierExpr`.
+    fn parseFunctionCallTail(self: *Parser, name: []const u8) Error!*ast.Expr {
+        self.advance(); // consume lparen
         var args: std.ArrayList(*ast.Expr) = .empty;
         errdefer {
             for (args.items) |a| a.deinit(self.allocator);
