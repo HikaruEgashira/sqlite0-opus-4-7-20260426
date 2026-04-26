@@ -6,11 +6,8 @@
 
 ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-statement 実行 + `CREATE TABLE` / `INSERT` / `SELECT FROM t` の縦串を通す。
 
-### 次の縦スライス (ADR-0003 の Phase 2 移行)
-- [ ] Iter14.A: `database.zig` 新設、`Database` struct + `Database.execute` (multi-statement loop)。`exec.execute` は thin wrapper に置換、`main.zig` は `-c` / REPL で `Database` を1個共有。`SELECT 1; SELECT 2` 系の差分ケース追加、既存 286 ケース非回帰確認。
-- [ ] Iter14.B: `CREATE TABLE name (col [type], ...)` パース・実行 (型注釈破棄)。空テーブルを `Database.tables` に登録。
-- [ ] Iter14.C: `INSERT INTO t VALUES (...) [, (...)]` と `SELECT ... FROM t [WHERE ...]`。`FromSource` を `(VALUES ...)` から `Database.tables` まで拡張、`*` 展開も table columns で動かす。
-- [ ] Iter14.D (任意): `INSERT INTO t (c1, c2) VALUES (...)` の column list 指定 + `INSERT INTO t SELECT ...`。stmt.zig が 500 行を超えそうなら `ddl.zig` / `dml.zig` を抽出。
+### 次の縦スライス (ADR-0003 の Phase 2)
+- [ ] Iter14.D (任意): `INSERT INTO t (c1, c2) VALUES (...)` の column list 指定 + `INSERT INTO t SELECT ...`。着手前に database.zig (498 行) を engine.zig へ split する。
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 
