@@ -198,14 +198,17 @@ fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.Parse
 /// Path selection: when GROUP BY is present or any aggregate call is found
 /// in the SELECT items / HAVING / ORDER BY, dispatch to `aggregate.executeAggregated`.
 /// Otherwise the per-row path runs (`select.executeWithFrom` /
-/// `executeWithoutFrom`). HAVING is meaningless without aggregates and
-/// without GROUP BY, so the non-aggregate path ignores it.
+/// `executeWithoutFrom`). HAVING without GROUP BY and without aggregates is
+/// rejected here — sqlite3 reports "HAVING clause on a non-aggregate query"
+/// (verified against sqlite3 3.51.0); without this check the non-aggregate
+/// path would silently drop the predicate.
 pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
     const pp = postProcessFromParsed(alloc, ps) catch |err| return err;
     defer alloc.free(pp.order_by);
 
-    const wants_grouping = ps.group_by.len > 0 or
-        aggregate.selectHasAggregates(ps.items, ps.having, pp.order_by);
+    const has_aggregates = aggregate.selectHasAggregates(ps.items, ps.having, pp.order_by);
+    if (ps.having != null and ps.group_by.len == 0 and !has_aggregates) return Error.SyntaxError;
+    const wants_grouping = ps.group_by.len > 0 or has_aggregates;
 
     const empty_row: []const Value = &.{};
     var synthetic = [_][]const Value{empty_row};

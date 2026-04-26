@@ -604,3 +604,6 @@ CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 4); SELECT 
 CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g FROM t GROUP BY g HAVING count(*) > 1
 CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4); SELECT g, sum(v) FROM t GROUP BY g HAVING sum(v) >= 3 ORDER BY g
 CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('b', 2); SELECT g FROM t GROUP BY g HAVING g = 'a'
+# HAVING without GROUP BY and without aggregates: sqlite3 errors with "HAVING clause on a non-aggregate query"
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT x FROM t HAVING x > 1
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT 1 FROM t HAVING 0
