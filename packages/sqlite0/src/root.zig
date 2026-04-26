@@ -14,6 +14,7 @@ pub const select = @import("select.zig");
 pub const stmt = @import("stmt.zig");
 pub const exec = @import("exec.zig");
 pub const database = @import("database.zig");
+pub const engine = @import("engine.zig");
 
 pub const Value = value.Value;
 pub const Result = exec.Result;
