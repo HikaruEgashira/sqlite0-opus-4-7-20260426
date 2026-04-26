@@ -1,0 +1,96 @@
+//! DELETE / UPDATE statement parsing.
+//!
+//! Kept out of `stmt.zig` so that file can stay under the 500-line
+//! discipline (CLAUDE.md "Module Splitting Rules"). Execution of these
+//! statements lives in `engine.zig`; this file only describes the parsed
+//! shape and walks the parser.
+
+const std = @import("std");
+const ops = @import("ops.zig");
+const ast = @import("ast.zig");
+const parser_mod = @import("parser.zig");
+
+const Error = ops.Error;
+const Parser = parser_mod.Parser;
+
+/// `DELETE FROM <name> [WHERE <expr>]`. Without WHERE, every row in the
+/// table is removed (sqlite3 behavior).
+pub const ParsedDelete = struct {
+    table: []const u8,
+    where: ?*ast.Expr,
+};
+
+/// `UPDATE <name> SET <col> = <expr> [, <col> = <expr>]... [WHERE <expr>]`.
+/// `assignments` is a parallel array of column names + value expressions,
+/// in the order they appear in the SET clause. Duplicates are flagged at
+/// execute time (sqlite3 errors with "duplicate column name in SET" too).
+pub const ParsedUpdate = struct {
+    table: []const u8,
+    assignments: []Assignment,
+    where: ?*ast.Expr,
+
+    pub const Assignment = struct {
+        column: []const u8,
+        value: *ast.Expr,
+    };
+};
+
+pub fn parseDeleteStatement(p: *Parser) !ParsedDelete {
+    try p.expect(.keyword_delete);
+    try p.expect(.keyword_from);
+    if (p.cur.kind != .identifier) return Error.SyntaxError;
+    const table = p.cur.slice(p.src);
+    p.advance();
+
+    var where_ast: ?*ast.Expr = null;
+    errdefer if (where_ast) |w| w.deinit(p.allocator);
+    if (p.cur.kind == .keyword_where) {
+        p.advance();
+        where_ast = try p.parseExpr();
+    }
+    return .{ .table = table, .where = where_ast };
+}
+
+pub fn parseUpdateStatement(p: *Parser) !ParsedUpdate {
+    try p.expect(.keyword_update);
+    if (p.cur.kind != .identifier) return Error.SyntaxError;
+    const table = p.cur.slice(p.src);
+    p.advance();
+    try p.expect(.keyword_set);
+
+    var assignments: std.ArrayList(ParsedUpdate.Assignment) = .empty;
+    errdefer {
+        for (assignments.items) |a| a.value.deinit(p.allocator);
+        assignments.deinit(p.allocator);
+    }
+
+    try parseAssignment(p, &assignments);
+    while (p.cur.kind == .comma) {
+        p.advance();
+        try parseAssignment(p, &assignments);
+    }
+
+    var where_ast: ?*ast.Expr = null;
+    errdefer if (where_ast) |w| w.deinit(p.allocator);
+    if (p.cur.kind == .keyword_where) {
+        p.advance();
+        where_ast = try p.parseExpr();
+    }
+    return .{
+        .table = table,
+        .assignments = try assignments.toOwnedSlice(p.allocator),
+        .where = where_ast,
+    };
+}
+
+fn parseAssignment(p: *Parser, list: *std.ArrayList(ParsedUpdate.Assignment)) !void {
+    if (p.cur.kind != .identifier) return Error.SyntaxError;
+    const col = p.cur.slice(p.src);
+    p.advance();
+    try p.expect(.eq);
+    const value = try p.parseExpr();
+    list.append(p.allocator, .{ .column = col, .value = value }) catch |err| {
+        value.deinit(p.allocator);
+        return err;
+    };
+}

@@ -41,6 +41,9 @@ pub const TokenKind = enum {
     keyword_desc,
     keyword_limit,
     keyword_offset,
+    keyword_delete,
+    keyword_update,
+    keyword_set,
     plus,
     minus,
     star,
@@ -274,6 +277,9 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "desc")) return .keyword_desc;
     if (eqlIgnoreCase(text, "limit")) return .keyword_limit;
     if (eqlIgnoreCase(text, "offset")) return .keyword_offset;
+    if (eqlIgnoreCase(text, "delete")) return .keyword_delete;
+    if (eqlIgnoreCase(text, "update")) return .keyword_update;
+    if (eqlIgnoreCase(text, "set")) return .keyword_set;
     return null;
 }
 

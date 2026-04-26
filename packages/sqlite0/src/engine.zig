@@ -10,9 +10,12 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
+const ast = @import("ast.zig");
 const stmt_mod = @import("stmt.zig");
+const stmt_dml = @import("stmt_dml.zig");
 const parser_mod = @import("parser.zig");
 const select_mod = @import("select.zig");
+const eval = @import("eval.zig");
 const database = @import("database.zig");
 
 const Value = value_mod.Value;
@@ -56,8 +59,132 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             const rowcount = try executeInsert(db, p.allocator, parsed);
             return .{ .insert = .{ .rowcount = rowcount } };
         },
+        .keyword_delete => {
+            const parsed = try stmt_dml.parseDeleteStatement(p);
+            const rowcount = try executeDelete(db, p.allocator, parsed);
+            return .{ .delete = .{ .rowcount = rowcount } };
+        },
+        .keyword_update => {
+            const parsed = try stmt_dml.parseUpdateStatement(p);
+            const rowcount = try executeUpdate(db, p.allocator, parsed);
+            return .{ .update = .{ .rowcount = rowcount } };
+        },
         else => return Error.SyntaxError,
     }
+}
+
+/// Remove rows from `parsed.table` for which the WHERE predicate is truthy
+/// (or all rows when WHERE is absent). Returns the count of deleted rows.
+/// Mutation is performed by building a survivor list, so partial WHERE
+/// failures leave the table unchanged (all-or-nothing — ADR-0003 §1).
+fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedDelete) !u64 {
+    const t = try lookupTable(db, db.allocator, parsed.table);
+    if (parsed.where) |w_ast| {
+        var survivors: std.ArrayList([]Value) = .empty;
+        errdefer survivors.deinit(arena);
+        var to_free: std.ArrayList([]Value) = .empty;
+        errdefer to_free.deinit(arena);
+
+        for (t.rows.items) |row| {
+            const ctx = eval.EvalContext{
+                .allocator = arena,
+                .current_row = row,
+                .columns = t.columns,
+            };
+            const cond = try eval.evalExpr(ctx, w_ast);
+            defer ops.freeValue(arena, cond);
+            if (ops.truthy(cond) orelse false) {
+                try to_free.append(arena, row);
+            } else {
+                try survivors.append(arena, row);
+            }
+        }
+
+        // Atomic swap: install survivors as the new row list, then free the
+        // dropped rows.
+        const new_rows = try db.allocator.alloc([]Value, survivors.items.len);
+        @memcpy(new_rows, survivors.items);
+        const old_storage = t.rows;
+        t.rows = .empty;
+        try t.rows.ensureTotalCapacity(db.allocator, new_rows.len);
+        for (new_rows) |row| t.rows.appendAssumeCapacity(row);
+        // Free the storage (capacity buffer); rows themselves are now either
+        // referenced by t.rows (survivors) or about to be freed (to_free).
+        var os = old_storage;
+        os.deinit(db.allocator);
+        db.allocator.free(new_rows);
+
+        for (to_free.items) |row| {
+            for (row) |v| ops.freeValue(db.allocator, v);
+            db.allocator.free(row);
+        }
+        return to_free.items.len;
+    } else {
+        // DELETE without WHERE — drop everything.
+        const count: u64 = t.rows.items.len;
+        for (t.rows.items) |row| {
+            for (row) |v| ops.freeValue(db.allocator, v);
+            db.allocator.free(row);
+        }
+        t.rows.clearAndFree(db.allocator);
+        return count;
+    }
+}
+
+/// Apply assignments to rows where WHERE matches. New values are eagerly
+/// evaluated into a scratch row, the old values are then freed and the
+/// scratch row is moved into place. Errors during evaluation leave the
+/// table unchanged for that row (and previously updated rows stay updated —
+/// matching sqlite3's per-row UPDATE behavior, not per-statement).
+fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedUpdate) !u64 {
+    const t = try lookupTable(db, db.allocator, parsed.table);
+
+    // Resolve column indices once (validation precedes mutation per ADR-0003).
+    const indices = try arena.alloc(usize, parsed.assignments.len);
+    for (parsed.assignments, indices) |a, *idx| {
+        idx.* = findTableColumn(t, a.column) orelse return Error.SyntaxError;
+    }
+
+    var changed: u64 = 0;
+    for (t.rows.items) |*row_ptr| {
+        if (parsed.where) |w_ast| {
+            const ctx = eval.EvalContext{
+                .allocator = arena,
+                .current_row = row_ptr.*,
+                .columns = t.columns,
+            };
+            const cond = try eval.evalExpr(ctx, w_ast);
+            defer ops.freeValue(arena, cond);
+            if (!(ops.truthy(cond) orelse false)) continue;
+        }
+        const ctx = eval.EvalContext{
+            .allocator = arena,
+            .current_row = row_ptr.*,
+            .columns = t.columns,
+        };
+        // Evaluate all RHS values first (in arena), then transfer to long-
+        // lived. If any eval fails the row stays untouched.
+        const new_values = try arena.alloc(Value, parsed.assignments.len);
+        var produced: usize = 0;
+        errdefer {
+            for (new_values[0..produced]) |v| ops.freeValue(arena, v);
+        }
+        while (produced < parsed.assignments.len) : (produced += 1) {
+            new_values[produced] = try eval.evalExpr(ctx, parsed.assignments[produced].value);
+        }
+        // All evaluated. Now apply: dupe each new value to db.allocator,
+        // free the old value, install the new one. Only commit per assignment
+        // pair so an OOM mid-row leaves a consistent (partially updated) row;
+        // the cell-level swap still preserves storage-class invariants.
+        for (indices, new_values) |col_idx, new_v| {
+            const duped = try dupeValueDeep(db.allocator, new_v);
+            ops.freeValue(db.allocator, row_ptr.*[col_idx]);
+            row_ptr.*[col_idx] = duped;
+        }
+        for (new_values) |v| ops.freeValue(arena, v);
+        changed += 1;
+    }
+    return changed;
 }
 
 /// Run a parsed SELECT against `db` state. Result rows are allocated in

@@ -47,7 +47,7 @@ pub fn execute(allocator: std.mem.Allocator, sql: []const u8) !Result {
     // produce no rows; the resulting Result has zero entries.
     const raw_rows: [][]Value = switch (er.statements[0]) {
         .select, .values => |r| r,
-        .create_table, .insert => &.{},
+        .create_table, .insert, .delete, .update => &.{},
     };
     er.statements[0] = .{ .select = &.{} };
     er.deinit();

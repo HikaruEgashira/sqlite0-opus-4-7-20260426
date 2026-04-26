@@ -37,11 +37,13 @@ pub const StatementResult = union(enum) {
     values: [][]Value,
     create_table,
     insert: struct { rowcount: u64 },
+    delete: struct { rowcount: u64 },
+    update: struct { rowcount: u64 },
 
     pub fn deinit(self: StatementResult, allocator: std.mem.Allocator) void {
         switch (self) {
             .select, .values => |rows| freeRows(allocator, rows),
-            .create_table, .insert => {},
+            .create_table, .insert, .delete, .update => {},
         }
     }
 };
