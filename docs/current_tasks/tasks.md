@@ -20,7 +20,7 @@
 - [x] `ops.zig` / `parser.zig` / `funcs.zig` / `func_util.zig` / `funcs_text.zig` / `stmt.zig` 抽出 (500行ルール遵守の継続的分割)
 
 ### 次の縦スライス (ADR-0002 の AST 移行)
-- [ ] Iter8.A: `ast.zig` / `eval.zig` 新設、`parsePrimary` / `parseAddSub` を AST 化 (他は literal でラップ継続)
+- [x] Iter8.A: `ast.zig` / `eval.zig` 新設、`parsePrimary` / `parseAddSub` を AST 化 (他は literal でラップ継続)
 - [ ] Iter8.B: `parseMulDiv` / `parseConcat` / `parseUnary` / `parseEquality` / `parseComparison` を AST 化
 - [ ] Iter8.C: `parseNot` / `parseAnd` / `parseOr` / `parseCase` / `parseBetween` / `parseInList` / `parseFunctionCall` を AST 化、parser.zig から ops.zig 呼び出しが消える
 - [ ] Iter8.D: `column_ref` + `EvalContext.current_row` 実装、`SELECT x FROM (VALUES ...)` / `SELECT x+1 FROM (VALUES ...)` を通す

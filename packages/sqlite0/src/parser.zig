@@ -3,16 +3,19 @@ const lex = @import("lex.zig");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const funcs = @import("funcs.zig");
+const ast = @import("ast.zig");
+const eval = @import("eval.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
 const Value = value_mod.Value;
 const Error = ops.Error;
 
-/// Recursive-descent SQL expression parser. Each `parse*` method both consumes
-/// tokens and folds the values it just parsed (eager tree-walk evaluation —
-/// no AST). Statement-level dispatch lives in `stmt.zig`; this file owns the
-/// expression layer.
+/// Recursive-descent SQL expression parser. ADR-0002 Iter8.A migrates the
+/// bottom of the precedence stack (`parsePrimary` / `parseAddSub`) to return
+/// `*ast.Expr`; intermediate methods still return `Value` and use `eval.evalExpr`
+/// as a shim until Iter8.B/C extend the AST. Statement-level dispatch lives in
+/// `stmt.zig`.
 pub const Parser = struct {
     src: []const u8,
     lx: lex.Lexer,
@@ -188,11 +191,11 @@ pub const Parser = struct {
     }
 
     fn parseComparison(self: *Parser) Error!Value {
-        var left = try self.parseAddSub();
+        var left = try self.parseAddSubAsValue();
         while (self.cur.kind == .lt or self.cur.kind == .le or self.cur.kind == .gt or self.cur.kind == .ge) {
             const op = self.cur.kind;
             self.advance();
-            const right = try self.parseAddSub();
+            const right = try self.parseAddSubAsValue();
             defer ops.freeValue(self.allocator, right);
             const new_left = ops.applyComparison(op, left, right);
             ops.freeValue(self.allocator, left);
@@ -201,18 +204,37 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseAddSub(self: *Parser) Error!Value {
-        var left = try self.parseMulDiv();
+    /// Iter8.A migration shim — drives the AST-returning `parseAddSub` and
+    /// lowers it back to a `Value` for the still-eager methods above. Removed
+    /// once `parseComparison` is migrated in Iter8.B.
+    fn parseAddSubAsValue(self: *Parser) Error!Value {
+        const expr = try self.parseAddSub();
+        defer expr.deinit(self.allocator);
+        return eval.evalExpr(.{ .allocator = self.allocator }, expr);
+    }
+
+    fn parseAddSub(self: *Parser) Error!*ast.Expr {
+        var left = try self.parseMulDivAsExpr();
+        errdefer left.deinit(self.allocator);
         while (self.cur.kind == .plus or self.cur.kind == .minus) {
-            const op = self.cur.kind;
+            const op: ast.BinaryOp = if (self.cur.kind == .plus) .add else .sub;
             self.advance();
-            const right = try self.parseMulDiv();
-            defer ops.freeValue(self.allocator, right);
-            const new_left = try ops.applyArith(op, left, right);
-            ops.freeValue(self.allocator, left);
-            left = new_left;
+            const right = try self.parseMulDivAsExpr();
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeBinaryArith(self.allocator, op, left, right);
         }
         return left;
+    }
+
+    /// Wrap `parseMulDiv`'s eager Value into an AST literal so `parseAddSub`
+    /// can compose them as proper `binary_arith` children. Removed in Iter8.B
+    /// when `parseMulDiv` itself returns `*ast.Expr`.
+    fn parseMulDivAsExpr(self: *Parser) Error!*ast.Expr {
+        const v = try self.parseMulDiv();
+        return ast.makeLiteral(self.allocator, v) catch |err| {
+            ops.freeValue(self.allocator, v);
+            return err;
+        };
     }
 
     fn parseMulDiv(self: *Parser) Error!Value {
@@ -256,33 +278,39 @@ pub const Parser = struct {
             self.advance();
             return self.parseUnary();
         }
-        return self.parsePrimary();
+        const expr = try self.parsePrimary();
+        defer expr.deinit(self.allocator);
+        return eval.evalExpr(.{ .allocator = self.allocator }, expr);
     }
 
-    fn parsePrimary(self: *Parser) Error!Value {
+    fn parsePrimary(self: *Parser) Error!*ast.Expr {
         const tok = self.cur;
         switch (tok.kind) {
             .integer => {
                 self.advance();
                 const text = tok.slice(self.src);
                 const n = std.fmt.parseInt(i64, text, 10) catch return Error.InvalidNumber;
-                return Value{ .integer = n };
+                return ast.makeLiteral(self.allocator, Value{ .integer = n });
             },
             .real => {
                 self.advance();
                 const text = tok.slice(self.src);
                 const f = std.fmt.parseFloat(f64, text) catch return Error.InvalidNumber;
-                return Value{ .real = f };
+                return ast.makeLiteral(self.allocator, Value{ .real = f });
             },
             .string => {
                 self.advance();
                 const text = tok.slice(self.src);
                 if (text.len < 2 or text[0] != '\'' or text[text.len - 1] != '\'') return Error.InvalidString;
-                return Value{ .text = try ops.unescapeStringLiteral(self.allocator, text[1 .. text.len - 1]) };
+                const unesc = try ops.unescapeStringLiteral(self.allocator, text[1 .. text.len - 1]);
+                return ast.makeLiteral(self.allocator, Value{ .text = unesc }) catch |err| {
+                    self.allocator.free(unesc);
+                    return err;
+                };
             },
             .keyword_null => {
                 self.advance();
-                return Value.null;
+                return ast.makeLiteral(self.allocator, Value.null);
             },
             .lparen => {
                 self.advance();
@@ -292,10 +320,25 @@ pub const Parser = struct {
                     return Error.SyntaxError;
                 }
                 self.advance();
-                return v;
+                return ast.makeLiteral(self.allocator, v) catch |err| {
+                    ops.freeValue(self.allocator, v);
+                    return err;
+                };
             },
-            .identifier => return self.parseFunctionCall(),
-            .keyword_case => return self.parseCase(),
+            .identifier => {
+                const v = try self.parseFunctionCall();
+                return ast.makeLiteral(self.allocator, v) catch |err| {
+                    ops.freeValue(self.allocator, v);
+                    return err;
+                };
+            },
+            .keyword_case => {
+                const v = try self.parseCase();
+                return ast.makeLiteral(self.allocator, v) catch |err| {
+                    ops.freeValue(self.allocator, v);
+                    return err;
+                };
+            },
             else => return Error.SyntaxError,
         }
     }
