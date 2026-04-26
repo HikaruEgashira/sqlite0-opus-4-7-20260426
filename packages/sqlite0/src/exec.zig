@@ -44,6 +44,21 @@ const Parser = struct {
         self.cur = self.lx.next();
     }
 
+    /// Capture the lexer/cursor state before a speculative advance so we can
+    /// restore it if the lookahead fails. Used for resolving the `NOT BETWEEN`
+    /// / `NOT IN` / `IS [NOT] DISTINCT FROM` ambiguities, where a leading
+    /// keyword may belong to an outer rule.
+    const Snapshot = struct { cur: Token, pos: u32 };
+
+    fn snapshot(self: *const Parser) Snapshot {
+        return .{ .cur = self.cur, .pos = self.lx.pos };
+    }
+
+    fn restore(self: *Parser, snap: Snapshot) void {
+        self.cur = snap.cur;
+        self.lx.pos = snap.pos;
+    }
+
     fn expect(self: *Parser, kind: TokenKind) !void {
         if (self.cur.kind != kind) return Error.SyntaxError;
         self.advance();
@@ -121,21 +136,87 @@ const Parser = struct {
                 },
                 .keyword_is => {
                     self.advance();
-                    var negate = false;
+                    var has_not = false;
                     if (self.cur.kind == .keyword_not) {
-                        negate = true;
+                        has_not = true;
                         self.advance();
+                    }
+                    var has_distinct = false;
+                    if (self.cur.kind == .keyword_distinct) {
+                        self.advance();
+                        try self.expect(.keyword_from);
+                        has_distinct = true;
                     }
                     const right = try self.parseComparison();
                     defer ops.freeValue(self.allocator, right);
                     const eq = ops.identicalValues(left, right);
                     ops.freeValue(self.allocator, left);
+                    const negate = has_not != has_distinct; // XOR
                     left = ops.boolValue(if (negate) !eq else eq);
+                },
+                .keyword_between => {
+                    self.advance();
+                    left = try self.parseBetween(left, false);
+                },
+                .keyword_in => {
+                    self.advance();
+                    left = try self.parseInList(left, false);
+                },
+                .keyword_not => {
+                    const snap = self.snapshot();
+                    self.advance();
+                    if (self.cur.kind == .keyword_between) {
+                        self.advance();
+                        left = try self.parseBetween(left, true);
+                    } else if (self.cur.kind == .keyword_in) {
+                        self.advance();
+                        left = try self.parseInList(left, true);
+                    } else {
+                        self.restore(snap);
+                        break;
+                    }
                 },
                 else => break,
             }
         }
         return left;
+    }
+
+    fn parseBetween(self: *Parser, left: Value, negate: bool) Error!Value {
+        const lo = try self.parseComparison();
+        defer ops.freeValue(self.allocator, lo);
+        try self.expect(.keyword_and);
+        const hi = try self.parseComparison();
+        defer ops.freeValue(self.allocator, hi);
+
+        const ge = ops.applyComparison(.ge, left, lo);
+        const le = ops.applyComparison(.le, left, hi);
+        ops.freeValue(self.allocator, left);
+        const conj = ops.logicalAnd(ge, le);
+        if (negate) return ops.logicalNot(conj);
+        return conj;
+    }
+
+    fn parseInList(self: *Parser, left: Value, negate: bool) Error!Value {
+        try self.expect(.lparen);
+        var items: std.ArrayList(Value) = .empty;
+        defer {
+            for (items.items) |v| ops.freeValue(self.allocator, v);
+            items.deinit(self.allocator);
+        }
+        if (self.cur.kind != .rparen) {
+            try items.append(self.allocator, try self.parseExpr());
+            while (self.cur.kind == .comma) {
+                self.advance();
+                try items.append(self.allocator, try self.parseExpr());
+            }
+        }
+        try self.expect(.rparen);
+
+        defer ops.freeValue(self.allocator, left);
+        const result = ops.applyIn(left, items.items);
+        if (negate) return ops.logicalNot(result);
+        return result;
     }
 
     fn parseComparison(self: *Parser) Error!Value {
@@ -335,6 +416,51 @@ test "execute: SELECT NOT NULL is NULL" {
 test "execute: SELECT 1<2 AND 2<3" {
     const allocator = std.testing.allocator;
     var r = try execute(allocator, "SELECT 1<2 AND 2<3");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+}
+
+test "execute: BETWEEN inclusive endpoints" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT 1 BETWEEN 1 AND 10, 10 BETWEEN 1 AND 10");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[1].integer);
+}
+
+test "execute: NOT BETWEEN" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT 0 NOT BETWEEN 1 AND 10");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+}
+
+test "execute: IN list" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT 2 IN (1, 2, 3), 4 IN (1, 2, 3)");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+    try std.testing.expectEqual(@as(i64, 0), r.rows[0].values[1].integer);
+}
+
+test "execute: NULL IS DISTINCT FROM NULL is 0" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT NULL IS DISTINCT FROM NULL");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 0), r.rows[0].values[0].integer);
+}
+
+test "execute: NULL IS NOT DISTINCT FROM NULL is 1" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT NULL IS NOT DISTINCT FROM NULL");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+}
+
+test "execute: NOT after literal is unary not BETWEEN modifier" {
+    // `1 AND NOT 0` → NOT applies as unary
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT 1 AND NOT 0");
     defer r.deinit();
     try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
 }

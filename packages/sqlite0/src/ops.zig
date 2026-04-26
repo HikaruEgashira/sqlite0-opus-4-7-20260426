@@ -212,6 +212,27 @@ pub fn applyEquality(op: TokenKind, lhs: Value, rhs: Value) Value {
     });
 }
 
+/// `a IN (e1, e2, ...)` is three-valued OR over `a = ei`.
+/// - left is NULL → NULL
+/// - any e matches → 1 (short-circuit)
+/// - no match but some `a = ei` was NULL → NULL
+/// - no match and no NULLs → 0
+/// - empty list → 0
+pub fn applyIn(left: Value, list: []const Value) Value {
+    if (left == .null) return Value.null;
+    var saw_null = false;
+    for (list) |item| {
+        const eq = applyEquality(.eq, left, item);
+        switch (eq) {
+            .integer => |i| if (i == 1) return boolValue(true),
+            .null => saw_null = true,
+            else => unreachable,
+        }
+    }
+    if (saw_null) return Value.null;
+    return boolValue(false);
+}
+
 test "ops: applyArith integer division truncates" {
     const r = try applyArith(.slash, .{ .integer = 100 }, .{ .integer = 4 });
     try std.testing.expectEqual(@as(i64, 25), r.integer);
@@ -256,4 +277,29 @@ test "ops: compareValues by storage class" {
     try std.testing.expectEqual(Order.lt, compareValues(.{ .integer = 1 }, .{ .text = "a" }));
     try std.testing.expectEqual(Order.gt, compareValues(.{ .blob = "x" }, .{ .text = "x" }));
     try std.testing.expectEqual(Order.eq, compareValues(.{ .integer = 1 }, .{ .real = 1.0 }));
+}
+
+test "ops: applyIn matches" {
+    const list = [_]Value{ .{ .integer = 1 }, .{ .integer = 2 }, .{ .integer = 3 } };
+    try std.testing.expectEqual(@as(i64, 1), applyIn(.{ .integer = 2 }, &list).integer);
+    try std.testing.expectEqual(@as(i64, 0), applyIn(.{ .integer = 4 }, &list).integer);
+}
+
+test "ops: applyIn with NULL in left is NULL" {
+    const list = [_]Value{ .{ .integer = 1 } };
+    try std.testing.expectEqual(Value.null, applyIn(.null, &list));
+}
+
+test "ops: applyIn no match but contains NULL is NULL" {
+    const list = [_]Value{ .{ .integer = 1 }, .null, .{ .integer = 3 } };
+    try std.testing.expectEqual(Value.null, applyIn(.{ .integer = 2 }, &list));
+}
+
+test "ops: applyIn match preempts NULL" {
+    const list = [_]Value{ .null, .{ .integer = 1 } };
+    try std.testing.expectEqual(@as(i64, 1), applyIn(.{ .integer = 1 }, &list).integer);
+}
+
+test "ops: applyIn empty list is 0" {
+    try std.testing.expectEqual(@as(i64, 0), applyIn(.{ .integer = 1 }, &.{}).integer);
 }
