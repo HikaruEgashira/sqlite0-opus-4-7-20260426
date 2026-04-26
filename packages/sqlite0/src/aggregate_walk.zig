@@ -93,6 +93,10 @@ fn exprHasAggregate(expr: *const ast.Expr) bool {
         .like => |l| exprHasAggregate(l.value) or
             exprHasAggregate(l.pattern) or
             (l.escape != null and exprHasAggregate(l.escape.?)),
+        // Scalar subquery (Iter22.B): aggregates inside the inner SELECT
+        // are scoped to that SELECT — they don't promote the outer SELECT
+        // into the aggregate path. Same logic for `collectInExpr` below.
+        .subquery => false,
     };
 }
 
@@ -183,5 +187,10 @@ fn collectInExpr(
             try collectInExpr(allocator, l.pattern, out);
             if (l.escape) |e| try collectInExpr(allocator, e, out);
         },
+        // Scalar subquery: aggregates inside the inner SELECT are scoped
+        // to that SELECT (and resolved by its own aggregate.executeAggregated
+        // call) — they don't get hoisted into the outer SELECT's aggregate
+        // list.
+        .subquery => {},
     }
 }

@@ -15,6 +15,7 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
+const stmt = @import("stmt.zig");
 
 const Value = value_mod.Value;
 
@@ -48,6 +49,13 @@ pub const Expr = union(enum) {
     /// between SQLite's two pattern-match operators which differ in
     /// case-sensitivity and wildcard syntax. ESCAPE is deferred to Iter13.C.
     like: Like,
+    /// Scalar subquery: `(SELECT ...)` used in expression position. Iter22
+    /// only supports the scalar form (returns 0 or 1 row × exactly 1
+    /// column → NULL or that single value; multi-row keeps the first row,
+    /// matching sqlite3). The boxed `ParsedSelect` is owned by the AST —
+    /// `Expr.deinit` recurses through `stmt.freeParsedSelectFields` and
+    /// frees the box.
+    subquery: *stmt.ParsedSelect,
 
     pub const BinaryArith = struct { op: BinaryOp, left: *Expr, right: *Expr };
     pub const BinaryConcat = struct { left: *Expr, right: *Expr };
@@ -141,6 +149,10 @@ pub const Expr = union(enum) {
                 l.value.deinit(allocator);
                 l.pattern.deinit(allocator);
                 if (l.escape) |e| e.deinit(allocator);
+            },
+            .subquery => |sq| {
+                stmt.freeParsedSelectFields(allocator, sq.*);
+                allocator.destroy(sq);
             },
         }
         allocator.destroy(self);
@@ -261,6 +273,20 @@ pub fn makeLike(
 ) !*Expr {
     const node = try allocator.create(Expr);
     node.* = .{ .like = .{ .op = op, .value = value, .pattern = pattern, .escape = escape, .negated = negated } };
+    return node;
+}
+
+/// Box a `ParsedSelect` and return it wrapped as an `Expr.subquery`. On
+/// allocation failure the box pointer is reclaimed; the inner ParsedSelect
+/// remains owned by the caller, who must `freeParsedSelectFields` via an
+/// errdefer at the call site (see parser.zig parsePrimary). On success
+/// ownership transfers to the returned node.
+pub fn makeSubquery(allocator: std.mem.Allocator, ps: stmt.ParsedSelect) !*Expr {
+    const box = try allocator.create(stmt.ParsedSelect);
+    box.* = ps;
+    errdefer allocator.destroy(box);
+    const node = try allocator.create(Expr);
+    node.* = .{ .subquery = box };
     return node;
 }
 

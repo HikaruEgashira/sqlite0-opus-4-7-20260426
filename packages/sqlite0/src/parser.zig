@@ -329,6 +329,17 @@ pub const Parser = struct {
             },
             .lparen => {
                 self.advance();
+                if (self.cur.kind == .keyword_select) {
+                    // Scalar subquery: `(SELECT ...)` in expression position.
+                    // The inner SELECT supports the full grammar (ORDER BY /
+                    // LIMIT / setop chain) — we just terminate at `rparen`
+                    // and box the ParsedSelect into an ast.Expr.subquery.
+                    const stmt_mod = @import("stmt.zig");
+                    const ps = try stmt_mod.parseSelectStatement(self);
+                    errdefer stmt_mod.freeParsedSelectFields(self.allocator, ps);
+                    try self.expect(.rparen);
+                    return ast.makeSubquery(self.allocator, ps);
+                }
                 const inner = try self.parseExpr();
                 errdefer inner.deinit(self.allocator);
                 try self.expect(.rparen);

@@ -748,3 +748,28 @@ CREATE TABLE a21(id INT); INSERT INTO a21 VALUES (1),(2),(3); SELECT a21.id, s.v
 SELECT 1 FROM (SELECT 'a' AS k) ORDER BY k
 # ORDER BY referencing a subquery-projected column from a multi-row source
 CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (3),(1),(2); SELECT 1 FROM (SELECT x AS sortkey FROM t21) ORDER BY sortkey
+# Iter22.B: scalar subquery in expression position
+# bare scalar subquery (FROM-less, single literal)
+SELECT (SELECT 42)
+# scalar subquery in SELECT list paired with a FROM-clause column
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); SELECT x, (SELECT max(x) FROM t22) AS m FROM t22 ORDER BY x
+# scalar subquery in WHERE
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); SELECT x FROM t22 WHERE x = (SELECT max(x) FROM t22)
+# scalar subquery in ORDER BY (drives ascending sort key)
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (3),(1),(2); SELECT x FROM t22 ORDER BY (SELECT x FROM t22 LIMIT 1) - x
+# empty scalar subquery → NULL (formatted as empty string by both engines)
+CREATE TABLE t22(x); SELECT (SELECT x FROM t22)
+# multi-row scalar subquery — sqlite3 picks the first row, no error
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2); SELECT (SELECT x FROM t22)
+# multi-column scalar subquery → both engines error
+SELECT (SELECT 1, 2)
+# scalar subquery with aggregate
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (10),(20),(30); SELECT (SELECT count(*) FROM t22) AS n
+# scalar subquery used in arithmetic
+SELECT (SELECT 7) * 6
+# scalar subquery as WHERE filter against another table
+CREATE TABLE a22(x); CREATE TABLE b22(y); INSERT INTO a22 VALUES (1),(2),(3); INSERT INTO b22 VALUES (5); SELECT x FROM a22 WHERE x < (SELECT y FROM b22) ORDER BY x
+# DELETE WHERE with scalar subquery (Iter22.A symmetry: DML eval also threads db)
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); DELETE FROM t22 WHERE x = (SELECT max(x) FROM t22); SELECT x FROM t22 ORDER BY x
+# UPDATE SET with scalar subquery RHS
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); UPDATE t22 SET x = (SELECT max(x) FROM t22) WHERE x = 1; SELECT x FROM t22 ORDER BY x
