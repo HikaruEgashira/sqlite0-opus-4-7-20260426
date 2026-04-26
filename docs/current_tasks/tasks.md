@@ -19,7 +19,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter18: `DELETE FROM t [WHERE ...]` / `UPDATE t SET col = expr [WHERE ...]`
 
 ### 残課題 (低優先)
-- [ ] `count(DISTINCT x)` / `sum(DISTINCT x)` 形式 (parser に DISTINCT を function-arg として認識させる必要)
+- [x] Iter17.A: `count(DISTINCT x)` / `sum(DISTINCT x)` / `avg(DISTINCT x)` / min/max/total + DISTINCT
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)

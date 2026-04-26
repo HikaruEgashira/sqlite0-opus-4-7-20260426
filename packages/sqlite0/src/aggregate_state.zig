@@ -1,0 +1,194 @@
+//! Per-aggregate accumulator state and per-row feed/finalize logic.
+//!
+//! Split out of `aggregate.zig` to keep both files under the 500-line
+//! discipline (CLAUDE.md "Module Splitting Rules"). The boundary is clean:
+//! this module knows about one row at a time and one aggregate call at a
+//! time. The grouping driver (`aggregate.zig`) owns the row loop, the
+//! per-group `Aggregator` slice, and HAVING/ORDER BY post-processing — it
+//! never reaches into `Aggregator` internals.
+
+const std = @import("std");
+const value_mod = @import("value.zig");
+const ops = @import("ops.zig");
+const ast = @import("ast.zig");
+const func_util = @import("func_util.zig");
+
+const Value = value_mod.Value;
+const Error = ops.Error;
+
+/// Per-aggregate accumulator. Keeps the running state for one func_call
+/// across the rows of one group. Created once per (group × aggregate-call)
+/// pair when a group is first seen.
+pub const Aggregator = struct {
+    kind: Kind,
+    /// `count(DISTINCT x)` / `sum(DISTINCT x)` etc. — when true, `feed`
+    /// consults `seen` and skips already-observed non-NULL values before
+    /// running the underlying accumulation. NULL is always skipped (matches
+    /// the non-DISTINCT non-COUNT-star path).
+    distinct: bool = false,
+    /// DISTINCT dedup set. Linear scan against `ops.identicalValues` (sqlite3
+    /// "IS NOT DISTINCT FROM" semantics: NULL == NULL, INTEGER 1 == REAL 1.0,
+    /// but '1' is its own group). Empty when `distinct == false`. TEXT/BLOB
+    /// payloads are duped into the per-statement arena when admitted.
+    seen: std.ArrayList(Value) = .empty,
+    /// Shared 64-bit row counter. For COUNT it's the result; for
+    /// SUM/AVG/TOTAL it's the non-NULL contributor count.
+    count: u64 = 0,
+    /// Integer running sum (i128 to defer overflow until finalize). Active
+    /// while every contributor parses as an integer.
+    sum_int: i128 = 0,
+    /// Real running sum. Active once any contributor is non-integer (REAL,
+    /// non-integer text/blob coercion).
+    sum_real: f64 = 0,
+    /// Promotion latch: once true we accumulate into `sum_real` only.
+    is_real: bool = false,
+    /// Best non-NULL value seen so far for MIN/MAX. The bytes live in the
+    /// per-statement arena passed to `feed` — arena lifetime spans the
+    /// whole grouped SELECT, so this pointer stays valid until finalise.
+    best: ?Value = null,
+
+    pub const Kind = enum { count_star, count, sum, avg, min, max, total };
+
+    pub fn init(kind: Kind, distinct: bool) Aggregator {
+        return .{ .kind = kind, .distinct = distinct };
+    }
+
+    /// Try to parse `bytes` as an i64. Returns null if the text isn't a
+    /// pure integer (matches sqlite3's "sum keeps integer mode while every
+    /// contributor is an integer-shaped string" behaviour).
+    fn parseIntStrict(bytes: []const u8) ?i64 {
+        const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+        if (trimmed.len == 0) return null;
+        return std.fmt.parseInt(i64, trimmed, 10) catch null;
+    }
+
+    fn promoteToReal(self: *Aggregator) void {
+        if (self.is_real) return;
+        self.sum_real = @floatFromInt(self.sum_int);
+        self.is_real = true;
+    }
+
+    /// Feed one row's contribution. `v` is owned by the caller. For MIN/MAX
+    /// the kept best-value is duped into `arena` so the pointer remains
+    /// valid after the caller frees `v`.
+    pub fn feed(self: *Aggregator, arena: std.mem.Allocator, v: Value) Error!void {
+        if (self.distinct) {
+            // DISTINCT skips NULL (consistent with non-aggregate-NULL handling
+            // for sum/avg/min/max/count(col)) and skips already-seen values.
+            // count_star is excluded at validation time so we don't need to
+            // handle "DISTINCT of *" here.
+            if (v == .null) return;
+            for (self.seen.items) |prior| {
+                if (ops.identicalValues(prior, v)) return;
+            }
+            try self.seen.append(arena, try dupeArena(arena, v));
+        }
+        switch (self.kind) {
+            .count_star => self.count += 1,
+            .count => if (v != .null) {
+                self.count += 1;
+            },
+            .sum, .avg, .total => {
+                if (v == .null) return;
+                self.count += 1;
+                switch (v) {
+                    .integer => |i| {
+                        if (self.is_real) {
+                            self.sum_real += @floatFromInt(i);
+                        } else {
+                            self.sum_int += i;
+                        }
+                    },
+                    .real => |r| {
+                        self.promoteToReal();
+                        self.sum_real += r;
+                    },
+                    .text, .blob => |bytes| {
+                        if (!self.is_real) {
+                            if (parseIntStrict(bytes)) |as_int| {
+                                self.sum_int += as_int;
+                                return;
+                            }
+                            self.promoteToReal();
+                        }
+                        self.sum_real += func_util.parseFloatLoose(bytes);
+                    },
+                    .null => unreachable,
+                }
+            },
+            .min, .max => {
+                if (v == .null) return;
+                if (self.best) |current| {
+                    const order = ops.compareValues(current, v);
+                    const replace = switch (self.kind) {
+                        .min => order == .gt,
+                        .max => order == .lt,
+                        else => unreachable,
+                    };
+                    if (replace) {
+                        ops.freeValue(arena, current);
+                        self.best = try dupeArena(arena, v);
+                    }
+                } else {
+                    self.best = try dupeArena(arena, v);
+                }
+            },
+        }
+    }
+
+    /// Produce the finalised Value for this aggregator. TEXT/BLOB bytes are
+    /// duped into `out_alloc` so the result outlives the accumulator's own
+    /// `best` storage (callers free both independently).
+    pub fn finalize(self: *Aggregator, out_alloc: std.mem.Allocator) Error!Value {
+        return switch (self.kind) {
+            .count_star, .count => Value{ .integer = @intCast(self.count) },
+            .sum => blk: {
+                if (self.count == 0) break :blk Value.null;
+                if (self.is_real) break :blk Value{ .real = self.sum_real };
+                if (self.sum_int < std.math.minInt(i64) or self.sum_int > std.math.maxInt(i64)) {
+                    return Error.IntegerOverflow;
+                }
+                break :blk Value{ .integer = @intCast(self.sum_int) };
+            },
+            .total => blk: {
+                if (self.count == 0) break :blk Value{ .real = 0 };
+                if (self.is_real) break :blk Value{ .real = self.sum_real };
+                break :blk Value{ .real = @floatFromInt(self.sum_int) };
+            },
+            .avg => blk: {
+                if (self.count == 0) break :blk Value.null;
+                const numer: f64 = if (self.is_real) self.sum_real else @floatFromInt(self.sum_int);
+                break :blk Value{ .real = numer / @as(f64, @floatFromInt(self.count)) };
+            },
+            .min, .max => blk: {
+                if (self.best) |current| break :blk dupeArena(out_alloc, current) catch |err| return err;
+                break :blk Value.null;
+            },
+        };
+    }
+};
+
+/// Shared TEXT/BLOB byte-dupe used by both `Aggregator.feed`/`finalize` (for
+/// keeping MIN/MAX `best` values alive) and the driver's ORDER-BY-key path.
+pub fn dupeArena(allocator: std.mem.Allocator, v: Value) !Value {
+    return switch (v) {
+        .text => |t| Value{ .text = try allocator.dupe(u8, t) },
+        .blob => |b| Value{ .blob = try allocator.dupe(u8, b) },
+        else => v,
+    };
+}
+
+/// Map an `ast.Expr.FuncCall` aggregate call to an initialised `Aggregator`.
+/// `count` with zero args is `count(*)`; one arg is the column-aware variant.
+/// `min`/`max` arity is already validated to 1 by `aggregate_walk.isAggregateCall`.
+pub fn aggregatorFromCall(fc: ast.Expr.FuncCall) Aggregator {
+    const kind: Aggregator.Kind = if (func_util.eqlIgnoreCase(fc.name, "count"))
+        if (fc.args.len == 0) .count_star else .count
+    else if (func_util.eqlIgnoreCase(fc.name, "sum")) .sum
+    else if (func_util.eqlIgnoreCase(fc.name, "avg")) .avg
+    else if (func_util.eqlIgnoreCase(fc.name, "total")) .total
+    else if (func_util.eqlIgnoreCase(fc.name, "min")) .min
+    else if (func_util.eqlIgnoreCase(fc.name, "max")) .max
+    else unreachable;
+    return Aggregator.init(kind, fc.distinct);
+}

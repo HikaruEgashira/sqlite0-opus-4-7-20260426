@@ -368,6 +368,13 @@ pub const Parser = struct {
             for (args.items) |a| a.deinit(self.allocator);
             args.deinit(self.allocator);
         }
+        // Optional DISTINCT modifier (sqlite3 allows this on any function call;
+        // aggregate dispatch enforces the "exactly one argument" rule).
+        var distinct = false;
+        if (self.cur.kind == .keyword_distinct) {
+            distinct = true;
+            self.advance();
+        }
         if (self.cur.kind == .star) {
             self.advance();
         } else if (self.cur.kind != .rparen) {
@@ -381,7 +388,7 @@ pub const Parser = struct {
         }
         try self.expect(.rparen);
         const args_slice = try args.toOwnedSlice(self.allocator);
-        return ast.makeFuncCall(self.allocator, name, args_slice) catch |err| {
+        return ast.makeFuncCall(self.allocator, name, args_slice, distinct) catch |err| {
             for (args_slice) |a| a.deinit(self.allocator);
             self.allocator.free(args_slice);
             return err;

@@ -18,6 +18,7 @@ pub const stmt = @import("stmt.zig");
 pub const stmt_ddl = @import("stmt_ddl.zig");
 pub const stmt_dml = @import("stmt_dml.zig");
 pub const aggregate = @import("aggregate.zig");
+pub const aggregate_state = @import("aggregate_state.zig");
 pub const aggregate_walk = @import("aggregate_walk.zig");
 pub const exec = @import("exec.zig");
 pub const database = @import("database.zig");

@@ -607,3 +607,23 @@ CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('b', 2); SELECT g FROM t G
 # HAVING without GROUP BY and without aggregates: sqlite3 errors with "HAVING clause on a non-aggregate query"
 CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT x FROM t HAVING x > 1
 CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT 1 FROM t HAVING 0
+
+# DISTINCT inside aggregates (Iter17.A): NULL skipped, "IS NOT DISTINCT FROM" dedup
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT count(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT sum(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT avg(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT min(DISTINCT x), max(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT total(DISTINCT x) FROM t
+# numeric class merges INTEGER/REAL but text '1' is its own group → 2 distinct
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(1.0),('1'); SELECT count(DISTINCT x) FROM t
+# DISTINCT only filters non-NULL; count(DISTINCT) on all-NULL → 0; sum/avg → NULL
+CREATE TABLE t(x); INSERT INTO t VALUES (NULL),(NULL); SELECT count(DISTINCT x), sum(DISTINCT x), avg(DISTINCT x) FROM t
+# DISTINCT with GROUP BY: per-group dedup
+CREATE TABLE t(g,v); INSERT INTO t VALUES ('a',1),('a',1),('a',2),('b',1),('b',NULL); SELECT g, count(DISTINCT v), sum(DISTINCT v) FROM t GROUP BY g ORDER BY g
+# DISTINCT with WHERE filter applied first
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(3),(1); SELECT count(DISTINCT x) FROM t WHERE x >= 2
+# DISTINCT with HAVING
+CREATE TABLE t(g,v); INSERT INTO t VALUES ('a',1),('a',1),('a',2),('b',3),('b',3); SELECT g FROM t GROUP BY g HAVING count(DISTINCT v) > 1
+# DISTINCT 0-arg (count) and DISTINCT 2-arg → sqlite3 errors
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2); SELECT count(DISTINCT) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2); SELECT count(DISTINCT x, 1) FROM t

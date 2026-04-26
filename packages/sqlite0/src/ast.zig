@@ -69,7 +69,11 @@ pub const Expr = union(enum) {
         branches: []CaseBranch,
         else_branch: ?*Expr,
     };
-    pub const FuncCall = struct { name: []const u8, args: []*Expr };
+    /// `distinct` is the SQL `count(DISTINCT x)` modifier. The parser accepts
+    /// it for any function call; aggregate dispatch enforces sqlite3's rule
+    /// that DISTINCT requires exactly one argument and applies only to
+    /// aggregates (scalars silently ignore it, matching sqlite3).
+    pub const FuncCall = struct { name: []const u8, args: []*Expr, distinct: bool = false };
     /// `op == .glob` always has `escape == null` (GLOB has no ESCAPE clause).
     /// For `.like`, `escape` is non-null only when the source contained
     /// `ESCAPE <expr>`. The expression is evaluated per-row; its result must
@@ -229,9 +233,14 @@ pub fn makeCaseExpr(
     return node;
 }
 
-pub fn makeFuncCall(allocator: std.mem.Allocator, name: []const u8, args: []*Expr) !*Expr {
+pub fn makeFuncCall(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    args: []*Expr,
+    distinct: bool,
+) !*Expr {
     const node = try allocator.create(Expr);
-    node.* = .{ .func_call = .{ .name = name, .args = args } };
+    node.* = .{ .func_call = .{ .name = name, .args = args, .distinct = distinct } };
     return node;
 }
 
@@ -291,6 +300,6 @@ test "ast: func_call owns args slice" {
     const allocator = std.testing.allocator;
     const args = try allocator.alloc(*Expr, 1);
     args[0] = try makeLiteral(allocator, Value{ .integer = 7 });
-    const node = try makeFuncCall(allocator, "abs", args);
+    const node = try makeFuncCall(allocator, "abs", args, false);
     node.deinit(allocator);
 }

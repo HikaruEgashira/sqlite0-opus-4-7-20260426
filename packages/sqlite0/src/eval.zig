@@ -383,7 +383,7 @@ test "eval: func_call abs" {
     const allocator = std.testing.allocator;
     const args = try allocator.alloc(*Expr, 1);
     args[0] = try ast.makeLiteral(allocator, Value{ .integer = -7 });
-    const node = try ast.makeFuncCall(allocator, "abs", args);
+    const node = try ast.makeFuncCall(allocator, "abs", args, false);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(@as(i64, 7), v.integer);
