@@ -7,12 +7,12 @@
 縦串で `SELECT <expr>` を通す。テーブル/FROM句はまだ無い。
 
 ### 完了
-- [x] Iter1: `SELECT <int>`, 算術演算, `NULL`, 文字列リテラル — 差分テスト 20/20 pass
+- [x] Iter1: `SELECT <int>`, 算術演算, `NULL`, 文字列リテラル
+- [x] Iter1.5: SQLite互換 `%g` float formatting (15 sig digits, scientific境界 `[-4, 14]`)
 - [x] ADR-0001: nostd解釈・Zig 0.16.0採用
 
 ### 次の縦スライス
-- [ ] Iter1.5: SQLite互換 `%g` float formatting (15 sig digits, scientific境界 `[-4, 14]`) — `0.1+0.2 = 0.3`を通す
-- [ ] Iter2: 比較・論理演算 (`=`, `<>`, `<`, `>`, `AND`, `OR`, `NOT`)
+- [ ] Iter2: 比較・論理演算 (`=`, `<>`, `<`, `>`, `AND`, `OR`, `NOT`, `IS NULL`)
 - [ ] Iter3: CASE式 / IS NULL / BETWEEN / IN
 - [ ] Iter4: 文字列関数 `length()`, `substr()`, `lower()`, `upper()`, `||` 連結
 - [ ] Iter5: 数値関数 `abs()`, `round()`, `min()`, `max()`
