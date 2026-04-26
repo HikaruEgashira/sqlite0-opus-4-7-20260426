@@ -8,6 +8,7 @@ pub const func_util = @import("func_util.zig");
 pub const funcs = @import("funcs.zig");
 pub const funcs_text = @import("funcs_text.zig");
 pub const funcs_format = @import("funcs_format.zig");
+pub const funcs_time = @import("funcs_time.zig");
 pub const ast = @import("ast.zig");
 pub const eval = @import("eval.zig");
 pub const parser = @import("parser.zig");
