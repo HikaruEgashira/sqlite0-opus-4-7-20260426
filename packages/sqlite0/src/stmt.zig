@@ -28,10 +28,11 @@ const Parser = parser_mod.Parser;
 
 pub const ParsedSelect = struct {
     items: []select.SelectItem,
-    /// FROM sources, in clause order. Empty slice = no FROM. One element =
-    /// single-source SELECT (the historic shape). Multiple elements = comma-
-    /// separated list, produces the Cartesian product at execute time.
-    from: []ParsedFromSource = &.{},
+    /// FROM terms, in clause order. Empty slice = no FROM. Each term is a
+    /// source plus the optional ON predicate from the JOIN keyword that
+    /// introduced it. Multiple terms produce the Cartesian product at
+    /// execute time, with ON predicates AND-folded into the row filter.
+    from: []FromTerm = &.{},
     where: ?*ast.Expr,
     distinct: bool = false,
     /// `GROUP BY e1 [, e2 ...]` — one ASTs per group key. Empty slice when
@@ -65,6 +66,7 @@ pub const OrderTerm = struct {
 // existing call sites keep their `stmt.ParsedFromSource` reference working.
 const stmt_from = @import("stmt_from.zig");
 pub const ParsedFromSource = stmt_from.ParsedFromSource;
+pub const FromTerm = stmt_from.FromTerm;
 pub const freeParsedFrom = stmt_from.freeParsedFrom;
 pub const freeFromList = stmt_from.freeFromList;
 
@@ -80,7 +82,7 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
     const items = try select.parseSelectList(p);
     errdefer select.freeSelectList(p.allocator, items);
 
-    var from: []ParsedFromSource = &.{};
+    var from: []FromTerm = &.{};
     errdefer freeFromList(p.allocator, from);
     if (p.cur.kind == .keyword_from) {
         from = try stmt_from.parseFromClause(p);

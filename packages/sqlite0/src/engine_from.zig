@@ -43,10 +43,10 @@ pub const Cartesian = struct {
 pub fn cartesianFromSources(
     db: *Database,
     alloc: std.mem.Allocator,
-    sources: []stmt_mod.ParsedFromSource,
+    terms: []stmt_mod.FromTerm,
 ) !Cartesian {
-    const resolved = try alloc.alloc(ResolvedSource, sources.len);
-    for (sources, resolved) |src, *out| out.* = try resolveSource(db, alloc, src);
+    const resolved = try alloc.alloc(ResolvedSource, terms.len);
+    for (terms, resolved) |term, *out| out.* = try resolveSource(db, alloc, term.source);
 
     const total_cols = blk: {
         var n: usize = 0;
