@@ -21,8 +21,8 @@
 
 ### 次の縦スライス (ADR-0002 の AST 移行)
 - [x] Iter8.A: `ast.zig` / `eval.zig` 新設、`parsePrimary` / `parseAddSub` を AST 化 (他は literal でラップ継続)
-- [ ] Iter8.B: `parseMulDiv` / `parseConcat` / `parseUnary` / `parseEquality` / `parseComparison` を AST 化
-- [ ] Iter8.C: `parseNot` / `parseAnd` / `parseOr` / `parseCase` / `parseBetween` / `parseInList` / `parseFunctionCall` を AST 化、parser.zig から ops.zig 呼び出しが消える
+- [x] Iter8.B: `parseMulDiv` / `parseConcat` / `parseUnary` / `parseComparison` を AST 化 (parseEquality は IS/BETWEEN/IN を含むため Iter8.C に持ち越し)
+- [ ] Iter8.C: `parseEquality` / `parseNot` / `parseAnd` / `parseOr` / `parseCase` / `parseBetween` / `parseInList` / `parseFunctionCall` / `parseExpr` を AST 化、`stmt.zig` の `parseExpressionList` / `parseValuesTuple` が `eval.evalExpr` を呼ぶように切り替え、parser.zig から ops.zig 呼び出しが消える
 - [ ] Iter8.D: `column_ref` + `EvalContext.current_row` 実装、`SELECT x FROM (VALUES ...)` / `SELECT x+1 FROM (VALUES ...)` を通す
 
 ### Phase 1 残タスク (AST 移行と独立)

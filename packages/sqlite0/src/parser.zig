@@ -11,11 +11,12 @@ const TokenKind = lex.TokenKind;
 const Value = value_mod.Value;
 const Error = ops.Error;
 
-/// Recursive-descent SQL expression parser. ADR-0002 Iter8.A migrates the
-/// bottom of the precedence stack (`parsePrimary` / `parseAddSub`) to return
-/// `*ast.Expr`; intermediate methods still return `Value` and use `eval.evalExpr`
-/// as a shim until Iter8.B/C extend the AST. Statement-level dispatch lives in
-/// `stmt.zig`.
+/// Recursive-descent SQL expression parser. ADR-0002 Iter8.A/B migrates the
+/// bottom of the precedence stack (parsePrimary, parseUnary, parseConcat,
+/// parseMulDiv, parseAddSub, parseComparison) to return `*ast.Expr`. The
+/// remaining levels (parseEquality and above) still return `Value` and use
+/// `eval.evalExpr` as a shim until Iter8.C completes the migration.
+/// Statement-level dispatch lives in `stmt.zig`.
 pub const Parser = struct {
     src: []const u8,
     lx: lex.Lexer,
@@ -93,13 +94,13 @@ pub const Parser = struct {
     }
 
     fn parseEquality(self: *Parser) Error!Value {
-        var left = try self.parseComparison();
+        var left = try self.parseComparisonAsValue();
         while (true) {
             switch (self.cur.kind) {
                 .eq, .ne => {
                     const op = self.cur.kind;
                     self.advance();
-                    const right = try self.parseComparison();
+                    const right = try self.parseComparisonAsValue();
                     defer ops.freeValue(self.allocator, right);
                     const new_left = ops.applyEquality(op, left, right);
                     ops.freeValue(self.allocator, left);
@@ -118,7 +119,7 @@ pub const Parser = struct {
                         try self.expect(.keyword_from);
                         has_distinct = true;
                     }
-                    const right = try self.parseComparison();
+                    const right = try self.parseComparisonAsValue();
                     defer ops.freeValue(self.allocator, right);
                     const eq = ops.identicalValues(left, right);
                     ops.freeValue(self.allocator, left);
@@ -154,10 +155,10 @@ pub const Parser = struct {
     }
 
     fn parseBetween(self: *Parser, left: Value, negate: bool) Error!Value {
-        const lo = try self.parseComparison();
+        const lo = try self.parseComparisonAsValue();
         defer ops.freeValue(self.allocator, lo);
         try self.expect(.keyword_and);
-        const hi = try self.parseComparison();
+        const hi = try self.parseComparisonAsValue();
         defer ops.freeValue(self.allocator, hi);
 
         const ge = ops.applyComparison(.ge, left, lo);
@@ -190,63 +191,61 @@ pub const Parser = struct {
         return result;
     }
 
-    fn parseComparison(self: *Parser) Error!Value {
-        var left = try self.parseAddSubAsValue();
-        while (self.cur.kind == .lt or self.cur.kind == .le or self.cur.kind == .gt or self.cur.kind == .ge) {
-            const op = self.cur.kind;
-            self.advance();
-            const right = try self.parseAddSubAsValue();
-            defer ops.freeValue(self.allocator, right);
-            const new_left = ops.applyComparison(op, left, right);
-            ops.freeValue(self.allocator, left);
-            left = new_left;
-        }
-        return left;
-    }
-
-    /// Iter8.A migration shim — drives the AST-returning `parseAddSub` and
-    /// lowers it back to a `Value` for the still-eager methods above. Removed
-    /// once `parseComparison` is migrated in Iter8.B.
-    fn parseAddSubAsValue(self: *Parser) Error!Value {
-        const expr = try self.parseAddSub();
+    /// Iter8.B migration shim — drives the AST-returning `parseComparison`
+    /// and lowers it back to a `Value` for `parseEquality`. Removed in
+    /// Iter8.C once `parseEquality` itself returns `*ast.Expr`.
+    fn parseComparisonAsValue(self: *Parser) Error!Value {
+        const expr = try self.parseComparison();
         defer expr.deinit(self.allocator);
         return eval.evalExpr(.{ .allocator = self.allocator }, expr);
     }
 
+    fn parseComparison(self: *Parser) Error!*ast.Expr {
+        var left = try self.parseAddSub();
+        errdefer left.deinit(self.allocator);
+        while (self.cur.kind == .lt or self.cur.kind == .le or self.cur.kind == .gt or self.cur.kind == .ge) {
+            const op: ast.CompareOp = switch (self.cur.kind) {
+                .lt => .lt,
+                .le => .le,
+                .gt => .gt,
+                .ge => .ge,
+                else => unreachable,
+            };
+            self.advance();
+            const right = try self.parseAddSub();
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeCompare(self.allocator, op, left, right);
+        }
+        return left;
+    }
+
     fn parseAddSub(self: *Parser) Error!*ast.Expr {
-        var left = try self.parseMulDivAsExpr();
+        var left = try self.parseMulDiv();
         errdefer left.deinit(self.allocator);
         while (self.cur.kind == .plus or self.cur.kind == .minus) {
             const op: ast.BinaryOp = if (self.cur.kind == .plus) .add else .sub;
             self.advance();
-            const right = try self.parseMulDivAsExpr();
+            const right = try self.parseMulDiv();
             errdefer right.deinit(self.allocator);
             left = try ast.makeBinaryArith(self.allocator, op, left, right);
         }
         return left;
     }
 
-    /// Wrap `parseMulDiv`'s eager Value into an AST literal so `parseAddSub`
-    /// can compose them as proper `binary_arith` children. Removed in Iter8.B
-    /// when `parseMulDiv` itself returns `*ast.Expr`.
-    fn parseMulDivAsExpr(self: *Parser) Error!*ast.Expr {
-        const v = try self.parseMulDiv();
-        return ast.makeLiteral(self.allocator, v) catch |err| {
-            ops.freeValue(self.allocator, v);
-            return err;
-        };
-    }
-
-    fn parseMulDiv(self: *Parser) Error!Value {
+    fn parseMulDiv(self: *Parser) Error!*ast.Expr {
         var left = try self.parseConcat();
+        errdefer left.deinit(self.allocator);
         while (self.cur.kind == .star or self.cur.kind == .slash or self.cur.kind == .percent) {
-            const op = self.cur.kind;
+            const op: ast.BinaryOp = switch (self.cur.kind) {
+                .star => .mul,
+                .slash => .div,
+                .percent => .mod,
+                else => unreachable,
+            };
             self.advance();
             const right = try self.parseConcat();
-            defer ops.freeValue(self.allocator, right);
-            const new_left = try ops.applyArith(op, left, right);
-            ops.freeValue(self.allocator, left);
-            left = new_left;
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeBinaryArith(self.allocator, op, left, right);
         }
         return left;
     }
@@ -254,33 +253,30 @@ pub const Parser = struct {
     /// `||` string concatenation. Sits between *,/,% and unary +,- in the
     /// precedence chain (see SQLite "Operators, expressions, and parsed
     /// elements" docs § 3 Order of Operations). Left-associative.
-    fn parseConcat(self: *Parser) Error!Value {
+    fn parseConcat(self: *Parser) Error!*ast.Expr {
         var left = try self.parseUnary();
+        errdefer left.deinit(self.allocator);
         while (self.cur.kind == .concat) {
             self.advance();
             const right = try self.parseUnary();
-            defer ops.freeValue(self.allocator, right);
-            const new_left = try ops.concatValues(self.allocator, left, right);
-            ops.freeValue(self.allocator, left);
-            left = new_left;
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeBinaryConcat(self.allocator, left, right);
         }
         return left;
     }
 
-    fn parseUnary(self: *Parser) Error!Value {
+    fn parseUnary(self: *Parser) Error!*ast.Expr {
         if (self.cur.kind == .minus) {
             self.advance();
             const inner = try self.parseUnary();
-            defer ops.freeValue(self.allocator, inner);
-            return ops.negateValue(inner);
+            errdefer inner.deinit(self.allocator);
+            return ast.makeUnaryNegate(self.allocator, inner);
         }
         if (self.cur.kind == .plus) {
             self.advance();
             return self.parseUnary();
         }
-        const expr = try self.parsePrimary();
-        defer expr.deinit(self.allocator);
-        return eval.evalExpr(.{ .allocator = self.allocator }, expr);
+        return self.parsePrimary();
     }
 
     fn parsePrimary(self: *Parser) Error!*ast.Expr {
