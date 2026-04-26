@@ -15,10 +15,14 @@ const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
 const eval = @import("eval.zig");
+const post = @import("select_post.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
+
+pub const OrderTerm = post.OrderTerm;
+pub const PostProcess = post.PostProcess;
 
 /// One element in a SELECT list: either `*` (expand to all FROM columns)
 /// or an expression with an optional output alias. `*` is invalid without a
@@ -109,25 +113,6 @@ pub fn containsStar(items: []const SelectItem) bool {
     return false;
 }
 
-/// Optional `ORDER BY ... LIMIT N OFFSET M` post-processing. Caller passes
-/// the parsed ORDER terms and limit/offset expressions which are evaluated
-/// once before applying.
-///
-/// When `position` is non-null, the term refers to the 1-based SELECT-list
-/// column (sqlite3 quirk — `ORDER BY 2` sorts by the second projected
-/// column). Otherwise `expr` is evaluated against the source row.
-pub const OrderTerm = struct {
-    expr: *ast.Expr,
-    position: ?usize = null,
-    descending: bool,
-};
-
-pub const PostProcess = struct {
-    order_by: []const OrderTerm = &.{},
-    limit: ?*ast.Expr = null,
-    offset: ?*ast.Expr = null,
-};
-
 /// Execute a SELECT against a synthetic empty row (no FROM). Optionally
 /// filtered by WHERE — `SELECT 1 WHERE 0` returns no rows. `*` is rejected
 /// upstream by `containsStar`, so every item here is `.expr`.
@@ -148,7 +133,7 @@ pub fn executeWithoutFrom(
     var rows = try allocator.alloc([]Value, 1);
     rows[0] = row;
     // ORDER BY is a no-op on a single row, but LIMIT/OFFSET still applies.
-    return applyLimitOffset(allocator, rows, pp);
+    return post.applyLimitOffset(allocator, rows, pp);
 }
 
 /// Execute a SELECT against a FROM source. For each source row, optionally
@@ -199,8 +184,7 @@ pub fn executeWithFrom(
     }
 
     if (pp.order_by.len > 0) {
-        try sortRowsByKeys(allocator, rows.items, sort_keys.items, pp.order_by);
-        // Sort keys are no longer needed after sorting completes; free them.
+        try post.sortRowsByKeys(allocator, rows.items, sort_keys.items, pp.order_by);
         for (sort_keys.items) |key| {
             for (key) |v| ops.freeValue(allocator, v);
             allocator.free(key);
@@ -210,7 +194,7 @@ pub fn executeWithFrom(
     }
 
     const all_rows = try rows.toOwnedSlice(allocator);
-    return applyLimitOffset(allocator, all_rows, pp);
+    return post.applyLimitOffset(allocator, all_rows, pp);
 }
 
 fn evaluateOrderKey(
@@ -247,181 +231,6 @@ fn evaluateOrderKey(
         }
     }
     return key;
-}
-
-/// In-place stable sort of `rows` by parallel `keys`, applying per-term
-/// direction. Uses indirect indices so we don't have to swap the (larger)
-/// projected rows during comparisons.
-fn sortRowsByKeys(
-    allocator: std.mem.Allocator,
-    rows: [][]Value,
-    keys: [][]Value,
-    terms: []const OrderTerm,
-) !void {
-    std.debug.assert(rows.len == keys.len);
-    const indices = try allocator.alloc(usize, rows.len);
-    defer allocator.free(indices);
-    for (indices, 0..) |*slot, i| slot.* = i;
-
-    const Ctx = struct {
-        keys: [][]Value,
-        terms: []const OrderTerm,
-        fn lessThan(self: @This(), a: usize, b: usize) bool {
-            for (self.terms, 0..) |term, ti| {
-                const cmp = compareValues(self.keys[a][ti], self.keys[b][ti]);
-                if (cmp == 0) continue;
-                return if (term.descending) cmp > 0 else cmp < 0;
-            }
-            return false;
-        }
-    };
-    std.sort.pdq(usize, indices, Ctx{ .keys = keys, .terms = terms }, Ctx.lessThan);
-
-    // Permute rows according to indices. Use a scratch buffer to apply.
-    const scratch = try allocator.alloc([]Value, rows.len);
-    defer allocator.free(scratch);
-    for (indices, 0..) |src_idx, dst_idx| scratch[dst_idx] = rows[src_idx];
-    @memcpy(rows, scratch);
-}
-
-/// Compare two Values for ORDER BY using sqlite3's storage-class rules:
-/// NULL first, then numeric (INTEGER/REAL coerced to f64 for cross-class
-/// compare), then TEXT (byte-wise), then BLOB. Returns -1/0/1.
-fn compareValues(a: Value, b: Value) i32 {
-    const ord_a = classOrder(a);
-    const ord_b = classOrder(b);
-    if (ord_a != ord_b) return if (ord_a < ord_b) -1 else 1;
-    switch (ord_a) {
-        0 => return 0, // both NULL
-        1 => {
-            const af: f64 = switch (a) {
-                .integer => |i| @floatFromInt(i),
-                .real => |r| r,
-                else => unreachable,
-            };
-            const bf: f64 = switch (b) {
-                .integer => |i| @floatFromInt(i),
-                .real => |r| r,
-                else => unreachable,
-            };
-            if (af < bf) return -1;
-            if (af > bf) return 1;
-            return 0;
-        },
-        2 => {
-            const at = a.text;
-            const bt = b.text;
-            return switch (std.mem.order(u8, at, bt)) {
-                .lt => -1,
-                .eq => 0,
-                .gt => 1,
-            };
-        },
-        3 => {
-            const ab = a.blob;
-            const bb = b.blob;
-            return switch (std.mem.order(u8, ab, bb)) {
-                .lt => -1,
-                .eq => 0,
-                .gt => 1,
-            };
-        },
-        else => unreachable,
-    }
-}
-
-fn classOrder(v: Value) u8 {
-    return switch (v) {
-        .null => 0,
-        .integer => 1,
-        .real => 1, // sqlite3 treats INTEGER / REAL as one numeric class for sort
-        .text => 2,
-        .blob => 3,
-    };
-}
-
-fn applyLimitOffset(
-    allocator: std.mem.Allocator,
-    rows: [][]Value,
-    pp: PostProcess,
-) ![][]Value {
-    if (pp.limit == null and pp.offset == null) return rows;
-    // Eval limit/offset first. If either errors, free everything we own and
-    // propagate. Once we start freeing rows we disarm this guard.
-    var owned = true;
-    errdefer if (owned) {
-        for (rows) |row| {
-            for (row) |v| ops.freeValue(allocator, v);
-            allocator.free(row);
-        }
-        allocator.free(rows);
-    };
-    const ctx = eval.EvalContext{
-        .allocator = allocator,
-        .current_row = &.{},
-        .columns = &.{},
-    };
-    var skip: usize = 0;
-    if (pp.offset) |e| {
-        const v = try eval.evalExpr(ctx, e);
-        defer ops.freeValue(allocator, v);
-        skip = clampNonNegative(coerceToInt(v));
-    }
-    var keep: usize = std.math.maxInt(usize);
-    if (pp.limit) |e| {
-        const v = try eval.evalExpr(ctx, e);
-        defer ops.freeValue(allocator, v);
-        const n = coerceToInt(v);
-        if (n >= 0) keep = @intCast(n);
-        // sqlite3: negative LIMIT means "no limit" — keep stays at maxInt.
-    }
-    const start = @min(skip, rows.len);
-    const end = @min(start + keep, rows.len);
-    if (start == 0 and end == rows.len) return rows;
-    // Free dropped rows. From here on, `rows[0..start]` and `rows[end..]`
-    // are no-longer-owned; the errdefer above would double-free, so disarm
-    // before any memory work.
-    owned = false;
-    for (rows[0..start]) |row| {
-        for (row) |v| ops.freeValue(allocator, v);
-        allocator.free(row);
-    }
-    for (rows[end..]) |row| {
-        for (row) |v| ops.freeValue(allocator, v);
-        allocator.free(row);
-    }
-    const kept = end - start;
-    if (kept > 0 and start != 0) {
-        var i: usize = 0;
-        while (i < kept) : (i += 1) rows[i] = rows[start + i];
-    }
-    if (allocator.resize(rows, kept)) return rows[0..kept];
-    const shrunk = allocator.alloc([]Value, kept) catch |err| {
-        // OOM during resize fallback: free the kept rows we still own.
-        for (rows[0..kept]) |row| {
-            for (row) |v| ops.freeValue(allocator, v);
-            allocator.free(row);
-        }
-        allocator.free(rows);
-        return err;
-    };
-    @memcpy(shrunk, rows[0..kept]);
-    allocator.free(rows);
-    return shrunk;
-}
-
-fn coerceToInt(v: Value) i64 {
-    return switch (v) {
-        .null => 0,
-        .integer => |i| i,
-        .real => |r| @intFromFloat(r),
-        .text => |t| std.fmt.parseInt(i64, t, 10) catch 0,
-        .blob => |b| std.fmt.parseInt(i64, b, 10) catch 0,
-    };
-}
-
-fn clampNonNegative(n: i64) usize {
-    return if (n < 0) 0 else @intCast(n);
 }
 
 /// Evaluate a SELECT list against one source row. Star items expand to

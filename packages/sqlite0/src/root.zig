@@ -13,6 +13,7 @@ pub const ast = @import("ast.zig");
 pub const eval = @import("eval.zig");
 pub const parser = @import("parser.zig");
 pub const select = @import("select.zig");
+pub const select_post = @import("select_post.zig");
 pub const stmt = @import("stmt.zig");
 pub const exec = @import("exec.zig");
 pub const database = @import("database.zig");
