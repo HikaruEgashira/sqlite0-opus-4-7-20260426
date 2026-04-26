@@ -26,10 +26,11 @@
 - [x] Iter8.D: `column_ref` (eval時name解決) + `EvalContext.current_row`/`columns` 実装、`SELECT column1 FROM (VALUES ...)` / `SELECT column1+1 FROM ...` / 大文字小文字区別なし / 任意 `[AS] alias` を通す。SQLite互換のため `AS alias(col_list)` 形式は受け付けず、column1/column2... の自動命名のみ。
 
 ### Phase 1 残タスク (AST 移行と独立)
+- [x] Iter10: `WHERE <pred>` (FROM source / synthetic single row の行フィルタリング)
+- [ ] Iter11: `SELECT *` 展開 (FROM source の全列を Result に展開)
 - [ ] Iter9: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
-- [ ] Iter10: `SELECT *` 展開 (FROM source の全列を Result に展開)
-- [ ] Iter11: `SELECT <expr> AS <alias>` (列リネーム — Result の列名表示用)
-- [ ] Iter12: `WHERE <pred>` (FROM source からの行フィルタリング)
+- [ ] Iter12: `SELECT <expr> AS <alias>` (列リネーム — Result の列名表示用)
+- [ ] Iter13: `LIKE` / `GLOB` / `REGEXP` 演算子
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 

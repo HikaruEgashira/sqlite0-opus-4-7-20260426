@@ -64,47 +64,98 @@ fn parseSelectStatement(p: *Parser) ![][]Value {
     const select_asts = try parseExpressionAsts(p);
     defer freeAsts(p.allocator, select_asts);
 
+    var source_owned = false;
+    var source: FromSource = .{ .rows = &.{}, .columns = &.{} };
+    defer if (source_owned) source.deinit(p.allocator);
     if (p.cur.kind == .keyword_from) {
-        return parseSelectWithFrom(p, select_asts);
+        source = try parseFromClause(p);
+        source_owned = true;
+    }
+
+    var where_ast: ?*ast.Expr = null;
+    defer if (where_ast) |w| w.deinit(p.allocator);
+    if (p.cur.kind == .keyword_where) {
+        p.advance();
+        where_ast = try p.parseExpr();
     }
 
     if (p.cur.kind == .semicolon) p.advance();
     if (p.cur.kind != .eof) return Error.SyntaxError;
 
-    const row = try evaluateRow(p.allocator, select_asts, &.{}, &.{});
-    errdefer {
-        for (row) |v| ops.freeValue(p.allocator, v);
-        p.allocator.free(row);
+    if (!source_owned) {
+        return executeWithoutFrom(p.allocator, select_asts, where_ast);
     }
-    var rows = try p.allocator.alloc([]Value, 1);
+    return executeWithFrom(p.allocator, select_asts, &source, where_ast);
+}
+
+/// FROM-less SELECT, optionally filtered by WHERE against a synthetic empty
+/// row. Matches sqlite3 (`SELECT 1 WHERE 0` returns no rows; `SELECT 1` and
+/// `SELECT 1 WHERE 1` both return one row).
+fn executeWithoutFrom(
+    allocator: std.mem.Allocator,
+    select_asts: []const *ast.Expr,
+    where_ast: ?*ast.Expr,
+) ![][]Value {
+    if (!try evalWhereTruthy(allocator, where_ast, &.{}, &.{})) {
+        return allocator.alloc([]Value, 0);
+    }
+    const row = try evaluateRow(allocator, select_asts, &.{}, &.{});
+    errdefer {
+        for (row) |v| ops.freeValue(allocator, v);
+        allocator.free(row);
+    }
+    var rows = try allocator.alloc([]Value, 1);
     rows[0] = row;
     return rows;
 }
 
-/// SELECT with FROM clause. Source rows come from `parseFromClause`; for
-/// each source row, evaluate the SELECT list with that row bound, then
-/// stitch the results into the outer `[][]Value`.
-fn parseSelectWithFrom(p: *Parser, select_asts: []const *ast.Expr) ![][]Value {
-    var source = try parseFromClause(p);
-    defer source.deinit(p.allocator);
-
-    if (p.cur.kind == .semicolon) p.advance();
-    if (p.cur.kind != .eof) return Error.SyntaxError;
-
+/// SELECT with FROM clause. For each source row, optionally filter by
+/// WHERE, then evaluate the SELECT list with that row bound.
+fn executeWithFrom(
+    allocator: std.mem.Allocator,
+    select_asts: []const *ast.Expr,
+    source: *const FromSource,
+    where_ast: ?*ast.Expr,
+) ![][]Value {
     var rows: std.ArrayList([]Value) = .empty;
     errdefer {
         for (rows.items) |row| {
-            for (row) |v| ops.freeValue(p.allocator, v);
-            p.allocator.free(row);
+            for (row) |v| ops.freeValue(allocator, v);
+            allocator.free(row);
         }
-        rows.deinit(p.allocator);
+        rows.deinit(allocator);
     }
-    try rows.ensureTotalCapacity(p.allocator, source.rows.len);
     for (source.rows) |source_row| {
-        const out_row = try evaluateRow(p.allocator, select_asts, source_row, source.columns);
-        rows.appendAssumeCapacity(out_row);
+        if (!try evalWhereTruthy(allocator, where_ast, source_row, source.columns)) continue;
+        const out_row = try evaluateRow(allocator, select_asts, source_row, source.columns);
+        rows.append(allocator, out_row) catch |err| {
+            for (out_row) |v| ops.freeValue(allocator, v);
+            allocator.free(out_row);
+            return err;
+        };
     }
-    return rows.toOwnedSlice(p.allocator);
+    return rows.toOwnedSlice(allocator);
+}
+
+/// Evaluate an optional WHERE predicate against a row. NULL is treated as
+/// false (SQL three-valued logic: WHERE NULL filters the row out, same as
+/// WHERE 0). Returns `true` when no predicate is present so callers can
+/// branch uniformly.
+fn evalWhereTruthy(
+    allocator: std.mem.Allocator,
+    where_ast: ?*ast.Expr,
+    current_row: []const Value,
+    columns: []const []const u8,
+) !bool {
+    const w = where_ast orelse return true;
+    const ctx = eval.EvalContext{
+        .allocator = allocator,
+        .current_row = current_row,
+        .columns = columns,
+    };
+    const cond = try eval.evalExpr(ctx, w);
+    defer ops.freeValue(allocator, cond);
+    return ops.truthy(cond) orelse false;
 }
 
 const FromSource = struct {
@@ -358,4 +409,36 @@ test "stmt: multiple columns SELECT column1, column2 FROM (VALUES (1, 'a'), (2, 
     try std.testing.expectEqualStrings("a", rows[0][0].text);
     try std.testing.expectEqual(@as(i64, 1), rows[0][1].integer);
     try std.testing.expectEqualStrings("b", rows[1][0].text);
+}
+
+test "stmt: WHERE filters rows" {
+    const allocator = std.testing.allocator;
+    const rows = try parseStatement(allocator, "SELECT column1 FROM (VALUES (1), (2), (3)) WHERE column1 > 1");
+    defer freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    try std.testing.expectEqual(@as(i64, 2), rows[0][0].integer);
+    try std.testing.expectEqual(@as(i64, 3), rows[1][0].integer);
+}
+
+test "stmt: WHERE NULL filters out (three-valued logic)" {
+    const allocator = std.testing.allocator;
+    const rows = try parseStatement(allocator, "SELECT column1 FROM (VALUES (1), (NULL), (3)) WHERE column1 > 1");
+    defer freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(@as(i64, 3), rows[0][0].integer);
+}
+
+test "stmt: SELECT 1 WHERE 0 returns 0 rows" {
+    const allocator = std.testing.allocator;
+    const rows = try parseStatement(allocator, "SELECT 1 WHERE 0");
+    defer freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+test "stmt: SELECT 1 WHERE 1 returns 1 row" {
+    const allocator = std.testing.allocator;
+    const rows = try parseStatement(allocator, "SELECT 1 WHERE 1");
+    defer freeRows(allocator, rows);
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(@as(i64, 1), rows[0][0].integer);
 }
