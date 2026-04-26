@@ -35,13 +35,13 @@ pub const Parser = struct {
     /// restore it if the lookahead fails. Used for resolving the `NOT BETWEEN`
     /// / `NOT IN` ambiguity, where a leading `NOT` may belong to an outer
     /// rule (`parseNot`) rather than the postfix BETWEEN/IN form.
-    const Snapshot = struct { cur: Token, pos: u32 };
+    pub const Snapshot = struct { cur: Token, pos: u32 };
 
-    fn snapshot(self: *const Parser) Snapshot {
+    pub fn snapshot(self: *const Parser) Snapshot {
         return .{ .cur = self.cur, .pos = self.lx.pos };
     }
 
-    fn restore(self: *Parser, snap: Snapshot) void {
+    pub fn restore(self: *Parser, snap: Snapshot) void {
         self.cur = snap.cur;
         self.lx.pos = snap.pos;
     }
@@ -340,17 +340,28 @@ pub const Parser = struct {
         }
     }
 
-    /// Identifier disambiguation: `name(args...)` is a function call,
-    /// bare `name` is a column reference resolved at eval time. SQLite has
-    /// no other use of bare identifiers in expressions (no enums, no bare
-    /// constants like `current_date`).
+    /// Identifier disambiguation:
+    ///   `name(args...)`  → function call
+    ///   `qual.name`      → qualified column reference (Iter19.A)
+    ///   `name`           → bare column reference resolved at eval time
+    ///
+    /// SQLite has no other use of bare identifiers in expressions (no
+    /// enums, no bare constants like `current_date`). Multi-level
+    /// qualifiers (`schema.table.column`) are not supported.
     fn parseIdentifierExpr(self: *Parser) Error!*ast.Expr {
         const name = self.cur.slice(self.src);
         self.advance();
         if (self.cur.kind == .lparen) {
             return self.parseFunctionCallTail(name);
         }
-        return ast.makeColumnRef(self.allocator, name);
+        if (self.cur.kind == .dot) {
+            self.advance();
+            if (self.cur.kind != .identifier) return Error.SyntaxError;
+            const col = self.cur.slice(self.src);
+            self.advance();
+            return ast.makeColumnRef(self.allocator, name, col);
+        }
+        return ast.makeColumnRef(self.allocator, null, name);
     }
 
     /// Function-call body parser, called after the name and `(` have been

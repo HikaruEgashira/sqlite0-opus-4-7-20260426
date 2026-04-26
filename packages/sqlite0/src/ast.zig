@@ -25,12 +25,12 @@ pub const LikeOp = enum { like, glob };
 
 pub const Expr = union(enum) {
     literal: Value,
-    /// Column name borrowed from the SQL source string. Resolved at
-    /// `eval` time against `EvalContext.columns` (case-insensitive). See
-    /// ADR-0002 §"Iter8.D column_ref": eval-time resolution sidesteps the
-    /// SELECT-before-FROM ordering problem since the parser doesn't know
-    /// the binding scope when it consumes a SELECT-list identifier.
-    column_ref: []const u8,
+    /// Column reference, possibly qualified by a table alias / name as
+    /// `qualifier.name`. Both strings are borrowed from the SQL source.
+    /// Resolved at `eval` time against `EvalContext.columns` (and the
+    /// parallel `column_qualifiers` array when present) — eval-time
+    /// resolution sidesteps the SELECT-before-FROM ordering problem.
+    column_ref: ColumnRef,
     binary_arith: BinaryArith,
     binary_concat: BinaryConcat,
     unary_negate: *Expr,
@@ -74,6 +74,9 @@ pub const Expr = union(enum) {
     /// that DISTINCT requires exactly one argument and applies only to
     /// aggregates (scalars silently ignore it, matching sqlite3).
     pub const FuncCall = struct { name: []const u8, args: []*Expr, distinct: bool = false };
+    /// `qualifier` is null for bare `name`; for `t.name` it holds `"t"`.
+    /// Both fields borrow from the SQL source string.
+    pub const ColumnRef = struct { qualifier: ?[]const u8 = null, name: []const u8 };
     /// `op == .glob` always has `escape == null` (GLOB has no ESCAPE clause).
     /// For `.like`, `escape` is non-null only when the source contained
     /// `ESCAPE <expr>`. The expression is evaluated per-row; its result must
@@ -150,9 +153,13 @@ pub fn makeLiteral(allocator: std.mem.Allocator, v: Value) !*Expr {
     return node;
 }
 
-pub fn makeColumnRef(allocator: std.mem.Allocator, name: []const u8) !*Expr {
+pub fn makeColumnRef(
+    allocator: std.mem.Allocator,
+    qualifier: ?[]const u8,
+    name: []const u8,
+) !*Expr {
     const node = try allocator.create(Expr);
-    node.* = .{ .column_ref = name };
+    node.* = .{ .column_ref = .{ .qualifier = qualifier, .name = name } };
     return node;
 }
 

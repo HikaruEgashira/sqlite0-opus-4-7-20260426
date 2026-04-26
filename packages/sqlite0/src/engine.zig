@@ -19,6 +19,7 @@ const select_post = @import("select_post.zig");
 const aggregate = @import("aggregate.zig");
 const eval = @import("eval.zig");
 const database = @import("database.zig");
+const engine_from = @import("engine_from.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -210,33 +211,25 @@ pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.Parse
     if (ps.having != null and ps.group_by.len == 0 and !has_aggregates) return Error.SyntaxError;
     const wants_grouping = ps.group_by.len > 0 or has_aggregates;
 
-    const empty_row: []const Value = &.{};
-    var synthetic = [_][]const Value{empty_row};
-
-    if (ps.from) |from| switch (from) {
-        .inline_values => |iv| {
-            if (wants_grouping) {
-                const inputs = try alloc.alloc([]const Value, iv.rows.len);
-                for (iv.rows, inputs) |src, *slot| slot.* = src;
-                return aggregate.executeAggregated(alloc, ps.items, inputs, iv.columns, ps.where, ps.group_by, ps.having, pp);
-            }
-            return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where, pp);
-        },
-        .table_ref => |name| {
-            const t = try lookupTable(db, alloc, name);
-            if (wants_grouping) {
-                const inputs = try alloc.alloc([]const Value, t.rows.items.len);
-                for (t.rows.items, inputs) |src, *slot| slot.* = src;
-                return aggregate.executeAggregated(alloc, ps.items, inputs, t.columns, ps.where, ps.group_by, ps.having, pp);
-            }
-            return select_mod.executeWithFrom(alloc, ps.items, t.rows.items, t.columns, ps.where, pp);
-        },
-    };
-    if (select_mod.containsStar(ps.items)) return Error.SyntaxError;
-    if (wants_grouping) {
-        return aggregate.executeAggregated(alloc, ps.items, synthetic[0..], &.{}, ps.where, ps.group_by, ps.having, pp);
+    if (ps.from.len == 0) {
+        if (select_mod.containsStar(ps.items)) return Error.SyntaxError;
+        if (wants_grouping) {
+            const empty_row: []const Value = &.{};
+            var synthetic = [_][]const Value{empty_row};
+            return aggregate.executeAggregated(alloc, ps.items, synthetic[0..], &.{}, &.{}, ps.where, ps.group_by, ps.having, pp);
+        }
+        return select_mod.executeWithoutFrom(alloc, ps.items, ps.where, pp);
     }
-    return select_mod.executeWithoutFrom(alloc, ps.items, ps.where, pp);
+
+    const cart = try engine_from.cartesianFromSources(db, alloc, ps.from);
+    if (wants_grouping) {
+        const inputs = try alloc.alloc([]const Value, cart.rows.len);
+        for (cart.rows, inputs) |src, *slot| slot.* = src;
+        return aggregate.executeAggregated(alloc, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp);
+    }
+    const rows_const = try alloc.alloc([]const Value, cart.rows.len);
+    for (cart.rows, rows_const) |src, *slot| slot.* = src;
+    return select_mod.executeWithFrom(alloc, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp);
 }
 
 /// Translate stmt-level OrderTerm/limit/offset into the select-module's
@@ -362,7 +355,7 @@ fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
 
 /// Look up a table by user-supplied (possibly mixed-case) name. `scratch` is
 /// used for the temporary lower-cased key buffer.
-fn lookupTable(db: *Database, scratch: std.mem.Allocator, name: []const u8) !*Table {
+pub fn lookupTable(db: *Database, scratch: std.mem.Allocator, name: []const u8) !*Table {
     const lower = try database.lowerCaseDupe(scratch, name);
     defer scratch.free(lower);
     return db.tables.getPtr(lower) orelse Error.NoSuchTable;

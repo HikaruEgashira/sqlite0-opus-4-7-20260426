@@ -33,6 +33,12 @@ pub const EvalContext = struct {
     /// Column names matching `current_row` positionally (same length).
     /// Borrowed from the SQL source string. Empty for FROM-less SELECT.
     columns: []const []const u8 = &.{},
+    /// Optional per-column qualifier (table alias or table name), parallel
+    /// to `columns`. When non-empty, qualified refs (`t.x`) match against
+    /// these and bare refs are subjected to ambiguity checking. Empty for
+    /// FROM-less queries and for source paths that have not yet been
+    /// updated to populate qualifier metadata.
+    column_qualifiers: []const []const u8 = &.{},
     /// Per-group aggregate-call substitution table. When evaluating SELECT
     /// items / HAVING / ORDER BY for an aggregated query, the
     /// `aggregate.zig` driver pre-computes each aggregate call's value for
@@ -51,7 +57,7 @@ pub const AggregateValues = std.AutoHashMapUnmanaged(*const ast.Expr, Value);
 pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
     return switch (expr.*) {
         .literal => |v| dupeLiteral(ctx.allocator, v),
-        .column_ref => |name| try evalColumnRef(ctx, name),
+        .column_ref => |cr| try evalColumnRef(ctx, cr),
         .binary_arith => |b| try evalBinaryArith(ctx, b),
         .binary_concat => |b| try evalBinaryConcat(ctx, b),
         .unary_negate => |operand| try evalUnaryNegate(ctx, operand),
@@ -269,12 +275,29 @@ fn evalLike(ctx: EvalContext, l: ast.Expr.Like) Error!Value {
 /// Resolve a column reference against the current row. Case-insensitive
 /// match per SQL's identifier rules. Returns a fresh `Value` owned by
 /// `ctx.allocator` (TEXT/BLOB bytes duped). Unknown name → SyntaxError.
-fn evalColumnRef(ctx: EvalContext, name: []const u8) Error!Value {
+///
+/// Qualified refs (`t.x`) require the source's effective qualifier (alias
+/// if given, else table name) to match `t`. When `column_qualifiers` is
+/// empty (no FROM, or pre-Iter19.A code paths), qualified refs cannot
+/// match — sqlite3 reports "no such column" for that, which we surface as
+/// SyntaxError.
+///
+/// Bare refs are subject to ambiguity detection when `column_qualifiers`
+/// is populated: matching against multiple sources errors as
+/// "ambiguous column name" (also SyntaxError here — differential
+/// equivalence is on error/no-error, not message wording).
+fn evalColumnRef(ctx: EvalContext, ref: ast.Expr.ColumnRef) Error!Value {
+    var found: ?usize = null;
     for (ctx.columns, 0..) |col, i| {
-        if (func_util.eqlIgnoreCase(name, col)) {
-            return dupeLiteral(ctx.allocator, ctx.current_row[i]);
+        if (!func_util.eqlIgnoreCase(ref.name, col)) continue;
+        if (ref.qualifier) |q| {
+            if (i >= ctx.column_qualifiers.len) continue;
+            if (!func_util.eqlIgnoreCase(q, ctx.column_qualifiers[i])) continue;
         }
+        if (found != null) return Error.SyntaxError; // ambiguous
+        found = i;
     }
+    if (found) |idx| return dupeLiteral(ctx.allocator, ctx.current_row[idx]);
     return Error.SyntaxError;
 }
 

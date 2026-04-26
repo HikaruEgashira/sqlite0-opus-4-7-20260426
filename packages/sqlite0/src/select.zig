@@ -15,6 +15,7 @@ const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
 const eval = @import("eval.zig");
+const func_util = @import("func_util.zig");
 const post = @import("select_post.zig");
 
 const Value = value_mod.Value;
@@ -34,7 +35,11 @@ pub const PostProcess = post.PostProcess;
 /// so it has no observable effect on output. Future iterations (header mode,
 /// ORDER BY referencing aliases) will read it.
 pub const SelectItem = union(enum) {
-    star,
+    /// `*` (no qualifier) expands to every column of the combined FROM
+    /// scope. `t.*` (qualifier non-null) expands to columns whose source
+    /// alias matches `t`. Both forms borrow the qualifier slice from
+    /// `Parser.src`.
+    star: ?[]const u8,
     expr: ExprItem,
 
     pub const ExprItem = struct {
@@ -58,8 +63,26 @@ fn parseSelectItem(p: *Parser, items: *std.ArrayList(SelectItem)) !void {
     try items.ensureUnusedCapacity(p.allocator, 1);
     if (p.cur.kind == .star) {
         p.advance();
-        items.appendAssumeCapacity(.star);
+        items.appendAssumeCapacity(.{ .star = null });
         return;
+    }
+    // `qualifier.*` is a SELECT-list-only form (cannot appear in arbitrary
+    // expression positions). Use the parser snapshot to detect it ahead of
+    // parseExpr — otherwise the `.` would be consumed as a qualified column
+    // ref and `*` would surprise the expression grammar.
+    if (p.cur.kind == .identifier) {
+        const snap = p.snapshot();
+        const qual = p.cur.slice(p.src);
+        p.advance();
+        if (p.cur.kind == .dot) {
+            p.advance();
+            if (p.cur.kind == .star) {
+                p.advance();
+                items.appendAssumeCapacity(.{ .star = qual });
+                return;
+            }
+        }
+        p.restore(snap);
     }
     const expr = try p.parseExpr();
     const alias = parseOptionalAlias(p);
@@ -113,6 +136,17 @@ pub fn containsStar(items: []const SelectItem) bool {
     return false;
 }
 
+/// Count the number of source-row columns a star item expands to. Bare `*`
+/// keeps every column; `t.*` keeps only those whose qualifier matches.
+fn starWidth(qualifier: ?[]const u8, column_qualifiers: []const []const u8) usize {
+    const q = qualifier orelse return column_qualifiers.len;
+    var n: usize = 0;
+    for (column_qualifiers) |cq| {
+        if (func_util.eqlIgnoreCase(q, cq)) n += 1;
+    }
+    return n;
+}
+
 /// Execute a SELECT against a synthetic empty row (no FROM). Optionally
 /// filtered by WHERE — `SELECT 1 WHERE 0` returns no rows. `*` is rejected
 /// upstream by `containsStar`, so every item here is `.expr`.
@@ -122,10 +156,10 @@ pub fn executeWithoutFrom(
     where_ast: ?*ast.Expr,
     pp: PostProcess,
 ) ![][]Value {
-    if (!try evalWhereTruthy(allocator, where_ast, &.{}, &.{})) {
+    if (!try evalWhereTruthy(allocator, where_ast, &.{}, &.{}, &.{})) {
         return allocator.alloc([]Value, 0);
     }
-    const row = try evaluateSelectRow(allocator, items, &.{}, &.{});
+    const row = try evaluateSelectRow(allocator, items, &.{}, &.{}, &.{});
     errdefer {
         for (row) |v| ops.freeValue(allocator, v);
         allocator.free(row);
@@ -145,6 +179,7 @@ pub fn executeWithFrom(
     items: []const SelectItem,
     source_rows: []const []const Value,
     source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
     where_ast: ?*ast.Expr,
     pp: PostProcess,
 ) ![][]Value {
@@ -166,15 +201,15 @@ pub fn executeWithFrom(
     }
 
     for (source_rows) |source_row| {
-        if (!try evalWhereTruthy(allocator, where_ast, source_row, source_columns)) continue;
-        const out_row = try evaluateSelectRow(allocator, items, source_row, source_columns);
+        if (!try evalWhereTruthy(allocator, where_ast, source_row, source_columns, source_qualifiers)) continue;
+        const out_row = try evaluateSelectRow(allocator, items, source_row, source_columns, source_qualifiers);
         rows.append(allocator, out_row) catch |err| {
             for (out_row) |v| ops.freeValue(allocator, v);
             allocator.free(out_row);
             return err;
         };
         if (pp.order_by.len > 0) {
-            const key = try evaluateOrderKey(allocator, pp.order_by, source_row, source_columns, out_row);
+            const key = try evaluateOrderKey(allocator, pp.order_by, source_row, source_columns, source_qualifiers, out_row);
             sort_keys.append(allocator, key) catch |err| {
                 for (key) |v| ops.freeValue(allocator, v);
                 allocator.free(key);
@@ -203,6 +238,7 @@ fn evaluateOrderKey(
     terms: []const OrderTerm,
     current_row: []const Value,
     columns: []const []const u8,
+    column_qualifiers: []const []const u8,
     projected_row: []const Value,
 ) ![]Value {
     const key = try allocator.alloc(Value, terms.len);
@@ -215,6 +251,7 @@ fn evaluateOrderKey(
         .allocator = allocator,
         .current_row = current_row,
         .columns = columns,
+        .column_qualifiers = column_qualifiers,
     };
     while (produced < terms.len) : (produced += 1) {
         const term = terms[produced];
@@ -242,10 +279,11 @@ fn evaluateSelectRow(
     items: []const SelectItem,
     current_row: []const Value,
     columns: []const []const u8,
+    column_qualifiers: []const []const u8,
 ) Error![]Value {
     var total: usize = 0;
     for (items) |item| total += switch (item) {
-        .star => current_row.len,
+        .star => |q| starWidth(q, column_qualifiers),
         .expr => 1,
     };
     const row = try allocator.alloc(Value, total);
@@ -258,10 +296,15 @@ fn evaluateSelectRow(
         .allocator = allocator,
         .current_row = current_row,
         .columns = columns,
+        .column_qualifiers = column_qualifiers,
     };
     for (items) |item| switch (item) {
-        .star => {
-            for (current_row) |src_v| {
+        .star => |q| {
+            for (current_row, 0..) |src_v, i| {
+                if (q) |qual| {
+                    if (i >= column_qualifiers.len) continue;
+                    if (!func_util.eqlIgnoreCase(qual, column_qualifiers[i])) continue;
+                }
                 row[produced] = try dupeRowValue(allocator, src_v);
                 produced += 1;
             }
@@ -294,12 +337,14 @@ fn evalWhereTruthy(
     where_ast: ?*ast.Expr,
     current_row: []const Value,
     columns: []const []const u8,
+    column_qualifiers: []const []const u8,
 ) !bool {
     const w = where_ast orelse return true;
     const ctx = eval.EvalContext{
         .allocator = allocator,
         .current_row = current_row,
         .columns = columns,
+        .column_qualifiers = column_qualifiers,
     };
     const cond = try eval.evalExpr(ctx, w);
     defer ops.freeValue(allocator, cond);

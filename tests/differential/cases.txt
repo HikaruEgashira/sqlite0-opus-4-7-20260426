@@ -627,3 +627,27 @@ CREATE TABLE t(g,v); INSERT INTO t VALUES ('a',1),('a',1),('a',2),('b',3),('b',3
 # DISTINCT 0-arg (count) and DISTINCT 2-arg → sqlite3 errors
 CREATE TABLE t(x); INSERT INTO t VALUES (1),(2); SELECT count(DISTINCT) FROM t
 CREATE TABLE t(x); INSERT INTO t VALUES (1),(2); SELECT count(DISTINCT x, 1) FROM t
+
+# Iter19.A: comma-separated FROM (Cartesian product) + qualified column refs
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a, b
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a, b WHERE x = 1
+CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); SELECT a.x, b.x FROM a, b
+# bare column matching only one source resolves; matching multiple sources errors
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); SELECT y FROM a, b
+CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); SELECT x FROM a, b
+# AS alias replaces the bare table name as the qualifier
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT t.x FROM a AS t
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT a.x FROM a AS t
+# self-join via aliases
+CREATE TABLE a(x); INSERT INTO a VALUES (1),(2),(3); SELECT t1.x, t2.x FROM a t1, a t2 WHERE t1.x = t2.x ORDER BY t1.x
+# duplicate alias with explicit qualified ref → ambiguous
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT t.x FROM a t, a t
+# qualified-star expansion preserves source order
+CREATE TABLE a(p,q); CREATE TABLE b(r,s); INSERT INTO a VALUES (1,2); INSERT INTO b VALUES (3,4); SELECT a.*, b.* FROM a, b
+CREATE TABLE a(p,q); CREATE TABLE b(r); INSERT INTO a VALUES (1,2); INSERT INTO b VALUES (10); SELECT b.*, a.* FROM a, b
+# qualified ref to non-existent qualifier
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT t.x FROM a
+# Cartesian + aggregate
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20),(30); SELECT count(*) FROM a, b
+# WHERE refers to qualified column
+CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (1),(3); SELECT a.x FROM a, b WHERE a.x = b.x

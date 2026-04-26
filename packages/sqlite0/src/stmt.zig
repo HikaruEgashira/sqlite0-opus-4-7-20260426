@@ -28,7 +28,10 @@ const Parser = parser_mod.Parser;
 
 pub const ParsedSelect = struct {
     items: []select.SelectItem,
-    from: ?ParsedFrom,
+    /// FROM sources, in clause order. Empty slice = no FROM. One element =
+    /// single-source SELECT (the historic shape). Multiple elements = comma-
+    /// separated list, produces the Cartesian product at execute time.
+    from: []ParsedFromSource = &.{},
     where: ?*ast.Expr,
     distinct: bool = false,
     /// `GROUP BY e1 [, e2 ...]` — one ASTs per group key. Empty slice when
@@ -57,19 +60,13 @@ pub const OrderTerm = struct {
     dir: OrderDirection,
 };
 
-pub const ParsedFrom = union(enum) {
-    /// `FROM (VALUES ...)` — rows already evaluated at parse time, columns
-    /// auto-named `column1, column2, ...`. All allocations are in
-    /// `Parser.allocator` (per-statement arena).
-    inline_values: struct {
-        rows: [][]Value,
-        columns: [][]const u8,
-    },
-    /// `FROM <identifier>` — name borrows from `Parser.src`. Caller resolves
-    /// against `Database.tables` at execute time. Optional alias is consumed
-    /// but not stored (Iter14.D will track it).
-    table_ref: []const u8,
-};
+// FROM clause — types and parsing live in stmt_from.zig (split out to
+// keep this file under the 500-line discipline). Re-exported here so
+// existing call sites keep their `stmt.ParsedFromSource` reference working.
+const stmt_from = @import("stmt_from.zig");
+pub const ParsedFromSource = stmt_from.ParsedFromSource;
+pub const freeParsedFrom = stmt_from.freeParsedFrom;
+pub const freeFromList = stmt_from.freeFromList;
 
 pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
     try p.expect(.keyword_select);
@@ -83,10 +80,10 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
     const items = try select.parseSelectList(p);
     errdefer select.freeSelectList(p.allocator, items);
 
-    var from: ?ParsedFrom = null;
-    errdefer if (from) |f| freeParsedFrom(p.allocator, f);
+    var from: []ParsedFromSource = &.{};
+    errdefer freeFromList(p.allocator, from);
     if (p.cur.kind == .keyword_from) {
-        from = try parseFromClause(p);
+        from = try stmt_from.parseFromClause(p);
     }
 
     var where_ast: ?*ast.Expr = null;
@@ -214,69 +211,6 @@ fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
 pub fn freeOrderTerms(allocator: std.mem.Allocator, terms: []OrderTerm) void {
     for (terms) |t| t.expr.deinit(allocator);
     allocator.free(terms);
-}
-
-/// Free arena-owned content of a `ParsedFrom`. Safe to call on either variant
-/// — `table_ref` borrows from `Parser.src` and owns nothing.
-pub fn freeParsedFrom(allocator: std.mem.Allocator, from: ParsedFrom) void {
-    switch (from) {
-        .inline_values => |iv| {
-            for (iv.rows) |row| {
-                for (row) |v| ops.freeValue(allocator, v);
-                allocator.free(row);
-            }
-            allocator.free(iv.rows);
-            for (iv.columns) |c| allocator.free(c);
-            allocator.free(iv.columns);
-        },
-        .table_ref => {},
-    }
-}
-
-fn parseFromClause(p: *Parser) !ParsedFrom {
-    try p.expect(.keyword_from);
-    if (p.cur.kind == .lparen) {
-        p.advance();
-        try p.expect(.keyword_values);
-        const rows = try parseValuesBody(p);
-        errdefer {
-            for (rows) |row| {
-                for (row) |v| ops.freeValue(p.allocator, v);
-                p.allocator.free(row);
-            }
-            p.allocator.free(rows);
-        }
-        try p.expect(.rparen);
-        if (p.cur.kind == .keyword_as) p.advance();
-        if (p.cur.kind == .identifier) p.advance(); // alias is presentation-only
-
-        const arity: usize = if (rows.len > 0) rows[0].len else 0;
-        const columns = try synthesizeColumnNames(p.allocator, arity);
-        return .{ .inline_values = .{ .rows = rows, .columns = columns } };
-    }
-    if (p.cur.kind == .identifier) {
-        const name = p.cur.slice(p.src);
-        p.advance();
-        if (p.cur.kind == .keyword_as) p.advance();
-        if (p.cur.kind == .identifier) p.advance(); // alias (consumed)
-        return .{ .table_ref = name };
-    }
-    return Error.SyntaxError;
-}
-
-/// Allocate `column1`, `column2`, ... `columnN` matching SQLite's auto-naming
-/// for `(VALUES ...)` subqueries.
-fn synthesizeColumnNames(allocator: std.mem.Allocator, n: usize) ![][]const u8 {
-    var names = try allocator.alloc([]const u8, n);
-    var produced: usize = 0;
-    errdefer {
-        for (names[0..produced]) |name| allocator.free(name);
-        allocator.free(names);
-    }
-    while (produced < n) : (produced += 1) {
-        names[produced] = try std.fmt.allocPrint(allocator, "column{d}", .{produced + 1});
-    }
-    return names;
 }
 
 // ── VALUES ──────────────────────────────────────────────────────────────────

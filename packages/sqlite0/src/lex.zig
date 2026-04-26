@@ -54,6 +54,7 @@ pub const TokenKind = enum {
     lparen,
     rparen,
     comma,
+    dot,
     semicolon,
     eq,
     ne,
@@ -98,6 +99,14 @@ pub const Lexer = struct {
             '(' => return self.single(.lparen),
             ')' => return self.single(.rparen),
             ',' => return self.single(.comma),
+            '.' => {
+                // `.` is a number prefix when followed by a digit (`.5` →
+                // 0.5); otherwise it's the qualified-name separator.
+                if (self.pos + 1 < self.src.len and std.ascii.isDigit(self.src[self.pos + 1])) {
+                    return self.number(start);
+                }
+                return self.single(.dot);
+            },
             ';' => return self.single(.semicolon),
             '=' => return self.single(.eq),
             '<' => {

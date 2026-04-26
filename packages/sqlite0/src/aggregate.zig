@@ -64,6 +64,7 @@ pub fn executeAggregated(
     items: []const select.SelectItem,
     source_rows: []const []const Value,
     source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
     where_ast: ?*ast.Expr,
     group_by: []const *ast.Expr,
     having: ?*ast.Expr,
@@ -95,13 +96,14 @@ pub fn executeAggregated(
                 .allocator = alloc,
                 .current_row = row,
                 .columns = source_columns,
+                .column_qualifiers = source_qualifiers,
             };
             const cond = try eval.evalExpr(ctx, w);
             defer ops.freeValue(alloc, cond);
             if (!(ops.truthy(cond) orelse false)) continue;
         }
 
-        const key = try evaluateGroupKey(alloc, group_by, row, source_columns);
+        const key = try evaluateGroupKey(alloc, group_by, row, source_columns, source_qualifiers);
         const group_idx = if (findGroup(groups.items, key)) |idx| blk: {
             // Existing group — discard the redundant key (arena reclaims).
             for (key) |v| ops.freeValue(alloc, v);
@@ -116,7 +118,7 @@ pub fn executeAggregated(
             });
             break :blk idx;
         };
-        try feedRow(alloc, &groups.items[group_idx], agg_calls.items, row, source_columns);
+        try feedRow(alloc, &groups.items[group_idx], agg_calls.items, row, source_columns, source_qualifiers);
     }
 
     // Implicit-group rule: if there are aggregates but no GROUP BY and no
@@ -131,7 +133,7 @@ pub fn executeAggregated(
         });
     }
 
-    return finaliseGroups(alloc, items, having, pp, agg_calls.items, groups.items, source_columns);
+    return finaliseGroups(alloc, items, having, pp, agg_calls.items, groups.items, source_columns, source_qualifiers);
 }
 
 fn evaluateGroupKey(
@@ -139,6 +141,7 @@ fn evaluateGroupKey(
     group_by: []const *ast.Expr,
     row: []const Value,
     columns: []const []const u8,
+    column_qualifiers: []const []const u8,
 ) ![]Value {
     const key = try alloc.alloc(Value, group_by.len);
     var produced: usize = 0;
@@ -150,6 +153,7 @@ fn evaluateGroupKey(
         .allocator = alloc,
         .current_row = row,
         .columns = columns,
+        .column_qualifiers = column_qualifiers,
     };
     while (produced < group_by.len) : (produced += 1) {
         key[produced] = try eval.evalExpr(ctx, group_by[produced]);
@@ -191,11 +195,13 @@ fn feedRow(
     calls: []const *const ast.Expr,
     row: []const Value,
     columns: []const []const u8,
+    column_qualifiers: []const []const u8,
 ) !void {
     const ctx = eval.EvalContext{
         .allocator = alloc,
         .current_row = row,
         .columns = columns,
+        .column_qualifiers = column_qualifiers,
     };
     for (calls, group.aggs) |call_expr, *agg| {
         const fc = call_expr.*.func_call;
@@ -217,6 +223,7 @@ fn finaliseGroups(
     calls: []const *const ast.Expr,
     groups: []Group,
     source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
 ) ![][]Value {
     var rows: std.ArrayList([]Value) = .empty;
     errdefer {
@@ -253,6 +260,7 @@ fn finaliseGroups(
             .allocator = alloc,
             .current_row = g.representative,
             .columns = source_columns,
+            .column_qualifiers = source_qualifiers,
             .agg_values = &agg_map,
         };
 
@@ -278,7 +286,7 @@ fn finaliseGroups(
         try rows.append(alloc, out_row);
 
         if (pp.order_by.len > 0) {
-            const key = try evaluateAggOrderKey(alloc, pp.order_by, g.representative, source_columns, out_row, &agg_map);
+            const key = try evaluateAggOrderKey(alloc, pp.order_by, g.representative, source_columns, source_qualifiers, out_row, &agg_map);
             sort_keys.append(alloc, key) catch |err| {
                 for (key) |v| ops.freeValue(alloc, v);
                 alloc.free(key);
@@ -307,6 +315,7 @@ fn evaluateAggOrderKey(
     terms: []const select_post.OrderTerm,
     current_row: []const Value,
     columns: []const []const u8,
+    column_qualifiers: []const []const u8,
     projected_row: []const Value,
     agg_map: *const eval.AggregateValues,
 ) ![]Value {
@@ -320,6 +329,7 @@ fn evaluateAggOrderKey(
         .allocator = alloc,
         .current_row = current_row,
         .columns = columns,
+        .column_qualifiers = column_qualifiers,
         .agg_values = agg_map,
     };
     while (produced < terms.len) : (produced += 1) {
