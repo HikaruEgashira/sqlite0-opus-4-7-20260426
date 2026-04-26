@@ -27,7 +27,7 @@
 
 ### Phase 1 残タスク (AST 移行と独立)
 - [x] Iter10: `WHERE <pred>` (FROM source / synthetic single row の行フィルタリング)
-- [ ] Iter11: `SELECT *` 展開 (FROM source の全列を Result に展開)
+- [x] Iter11: `SELECT *` 展開 (FROM source の全列を Result に展開、SELECT *,expr 混在可)
 - [ ] Iter9: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
 - [ ] Iter12: `SELECT <expr> AS <alias>` (列リネーム — Result の列名表示用)
 - [ ] Iter13: `LIKE` / `GLOB` / `REGEXP` 演算子

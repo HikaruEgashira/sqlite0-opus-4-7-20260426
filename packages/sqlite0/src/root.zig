@@ -9,6 +9,7 @@ pub const funcs_text = @import("funcs_text.zig");
 pub const ast = @import("ast.zig");
 pub const eval = @import("eval.zig");
 pub const parser = @import("parser.zig");
+pub const select = @import("select.zig");
 pub const stmt = @import("stmt.zig");
 pub const exec = @import("exec.zig");
 
