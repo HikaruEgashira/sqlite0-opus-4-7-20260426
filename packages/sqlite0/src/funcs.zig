@@ -2,6 +2,7 @@ const std = @import("std");
 const ops = @import("ops.zig");
 const util = @import("func_util.zig");
 const text = @import("funcs_text.zig");
+const fmt_mod = @import("funcs_format.zig");
 
 const Value = util.Value;
 const Error = util.Error;
@@ -32,6 +33,7 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "char")) return text.fnChar(allocator, args);
     if (util.eqlIgnoreCase(name, "unicode")) return text.fnUnicode(allocator, args);
     if (util.eqlIgnoreCase(name, "random")) return fnRandom(args);
+    if (util.eqlIgnoreCase(name, "printf") or util.eqlIgnoreCase(name, "format")) return fmt_mod.fnPrintf(allocator, args);
     return Error.UnknownFunction;
 }
 
