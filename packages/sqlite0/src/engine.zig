@@ -92,7 +92,12 @@ fn postProcessFromParsed(alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) !s
             .descending = term.dir == .desc,
         };
     }
-    return .{ .order_by = order, .limit = ps.limit, .offset = ps.offset };
+    return .{
+        .distinct = ps.distinct,
+        .order_by = order,
+        .limit = ps.limit,
+        .offset = ps.offset,
+    };
 }
 
 /// Append rows from a parsed INSERT into the target table. Source rows come

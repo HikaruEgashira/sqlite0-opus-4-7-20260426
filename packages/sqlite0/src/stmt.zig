@@ -30,6 +30,7 @@ pub const ParsedSelect = struct {
     items: []select.SelectItem,
     from: ?ParsedFrom,
     where: ?*ast.Expr,
+    distinct: bool = false,
     order_by: []OrderTerm = &.{},
     limit: ?*ast.Expr = null,
     offset: ?*ast.Expr = null,
@@ -63,6 +64,12 @@ pub const ParsedFrom = union(enum) {
 
 pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
     try p.expect(.keyword_select);
+
+    var distinct = false;
+    if (p.cur.kind == .keyword_distinct) {
+        distinct = true;
+        p.advance();
+    }
 
     const items = try select.parseSelectList(p);
     errdefer select.freeSelectList(p.allocator, items);
@@ -110,6 +117,7 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
         .items = items,
         .from = from,
         .where = where_ast,
+        .distinct = distinct,
         .order_by = order_by,
         .limit = limit_ast,
         .offset = offset_ast,

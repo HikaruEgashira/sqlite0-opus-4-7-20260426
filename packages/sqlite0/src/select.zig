@@ -193,7 +193,8 @@ pub fn executeWithFrom(
         sort_keys = .empty;
     }
 
-    const all_rows = try rows.toOwnedSlice(allocator);
+    var all_rows = try rows.toOwnedSlice(allocator);
+    if (pp.distinct) all_rows = post.dedupeRows(allocator, all_rows);
     return post.applyLimitOffset(allocator, all_rows, pp);
 }
 

@@ -27,10 +27,73 @@ pub const OrderTerm = struct {
 };
 
 pub const PostProcess = struct {
+    distinct: bool = false,
     order_by: []const OrderTerm = &.{},
     limit: ?*ast.Expr = null,
     offset: ?*ast.Expr = null,
 };
+
+/// In-place deduplication of `rows` by projected-row equality, keeping the
+/// first occurrence (so behavior is stable when called after `sortRowsByKeys`
+/// or unsorted). Frees dropped rows. Returns a slice into `rows[0..kept]`.
+///
+/// Equality is sqlite3 DISTINCT semantics: NULL == NULL, all other classes
+/// require same class + bytewise/numeric equality.
+pub fn dedupeRows(allocator: std.mem.Allocator, rows: [][]Value) [][]Value {
+    if (rows.len <= 1) return rows;
+    var kept: usize = 1;
+    var i: usize = 1;
+    while (i < rows.len) : (i += 1) {
+        const candidate = rows[i];
+        if (rowsContains(rows[0..kept], candidate)) {
+            for (candidate) |v| ops.freeValue(allocator, v);
+            allocator.free(candidate);
+        } else {
+            rows[kept] = candidate;
+            kept += 1;
+        }
+    }
+    return rows[0..kept];
+}
+
+fn rowsContains(rows: []const []Value, candidate: []const Value) bool {
+    for (rows) |row| {
+        if (rowsEqual(row, candidate)) return true;
+    }
+    return false;
+}
+
+fn rowsEqual(a: []const Value, b: []const Value) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |va, vb| {
+        if (!valuesEqualForDistinct(va, vb)) return false;
+    }
+    return true;
+}
+
+fn valuesEqualForDistinct(a: Value, b: Value) bool {
+    return switch (a) {
+        .null => b == .null,
+        .integer => |ai| switch (b) {
+            .integer => |bi| ai == bi,
+            .real => |br| @as(f64, @floatFromInt(ai)) == br,
+            else => false,
+        },
+        .real => |ar| switch (b) {
+            .integer => |bi| ar == @as(f64, @floatFromInt(bi)),
+            .real => |br| ar == br,
+            else => false,
+        },
+        .text => |at| switch (b) {
+            .text => |bt| std.mem.eql(u8, at, bt),
+            else => false,
+        },
+        .blob => |ab| switch (b) {
+            .blob => |bb| std.mem.eql(u8, ab, bb),
+            else => false,
+        },
+    };
+}
 
 /// Stable sort of `rows` by parallel `keys`, applying per-term direction.
 /// Uses an indirection array so the (larger) projected rows aren't swapped
