@@ -41,6 +41,7 @@ pub const TokenKind = enum {
     le,
     gt,
     ge,
+    concat,
 };
 
 pub const Token = struct {
@@ -109,6 +110,16 @@ pub const Lexer = struct {
                     if (next_c == '=') {
                         self.pos += 1;
                         return .{ .kind = .ne, .start = start, .end = self.pos };
+                    }
+                }
+                return .{ .kind = .invalid, .start = start, .end = self.pos };
+            },
+            '|' => {
+                self.pos += 1;
+                if (self.peek()) |next_c| {
+                    if (next_c == '|') {
+                        self.pos += 1;
+                        return .{ .kind = .concat, .start = start, .end = self.pos };
                     }
                 }
                 return .{ .kind = .invalid, .start = start, .end = self.pos };
@@ -281,6 +292,13 @@ test "Lexer: comparison operators" {
     try std.testing.expectEqual(TokenKind.ge, lx.next().kind);
     try std.testing.expectEqual(TokenKind.lt, lx.next().kind);
     try std.testing.expectEqual(TokenKind.gt, lx.next().kind);
+}
+
+test "Lexer: concat operator ||" {
+    var lx = Lexer.init("'a' || 'b'");
+    try std.testing.expectEqual(TokenKind.string, lx.next().kind);
+    try std.testing.expectEqual(TokenKind.concat, lx.next().kind);
+    try std.testing.expectEqual(TokenKind.string, lx.next().kind);
 }
 
 test "Lexer: line comment" {

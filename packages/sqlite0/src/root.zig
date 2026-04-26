@@ -3,6 +3,7 @@ const std = @import("std");
 pub const value = @import("value.zig");
 pub const lex = @import("lex.zig");
 pub const ops = @import("ops.zig");
+pub const funcs = @import("funcs.zig");
 pub const parser = @import("parser.zig");
 pub const exec = @import("exec.zig");
 

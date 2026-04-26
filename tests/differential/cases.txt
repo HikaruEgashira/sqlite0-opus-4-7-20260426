@@ -135,3 +135,69 @@ SELECT CASE WHEN 1=1 THEN 1 WHEN 2=2 THEN 2 ELSE 3 END
 SELECT 1 + CASE WHEN 1=1 THEN 10 ELSE 0 END
 SELECT CASE WHEN 1<2 THEN 'lt' WHEN 1>2 THEN 'gt' ELSE 'eq' END
 SELECT CASE 3 WHEN 1+1 THEN 'two' WHEN 1+2 THEN 'three' END
+
+# Phase 1 / Iter5: || concatenation and built-in scalar functions
+SELECT 'a'||'b'
+SELECT 'a'||'b'||'c'
+SELECT 'foo'||'bar'||'baz'
+SELECT 'a'||1
+SELECT 1||2
+SELECT 'price: '||1.5
+SELECT 'a'||NULL
+SELECT NULL||'a'
+SELECT NULL||NULL
+SELECT ''||'x'
+SELECT 'x'||''
+SELECT 1+2||3+4
+SELECT 2*'1'||'2'
+SELECT length('hello')
+SELECT length('')
+SELECT length(123)
+SELECT length(1.5)
+SELECT length(NULL)
+SELECT lower('Hello World')
+SELECT upper('Hello World')
+SELECT lower('ABC123xyz')
+SELECT upper('abc123XYZ')
+SELECT lower(NULL)
+SELECT upper(NULL)
+SELECT substr('hello', 2)
+SELECT substr('hello', 2, 3)
+SELECT substr('hello', -3)
+SELECT substr('hello', -3, 2)
+SELECT substr('hello', 0)
+SELECT substr('hello', 1, 100)
+SELECT substr('hello', 10)
+SELECT substr('hello', 2, -1)
+SELECT substr('hello', 2, -2)
+SELECT substr('hello', 2, 0)
+SELECT substr('hello', -100)
+SELECT substr('hello', -100, 2)
+SELECT substr('hello', -100, 100)
+SELECT substr('hello', -100, 96)
+SELECT substr('hello', 0, 2)
+SELECT substr('hello', 0, 3)
+SELECT substr(NULL, 1, 2)
+SELECT abs(-5)
+SELECT abs(5)
+SELECT abs(0)
+SELECT abs(-3.14)
+SELECT abs(NULL)
+SELECT abs('foo')
+SELECT coalesce(NULL, 1)
+SELECT coalesce(NULL, NULL, 'a', 'b')
+SELECT coalesce(NULL, NULL)
+SELECT coalesce(1, 2, 3)
+SELECT ifnull(NULL, 'default')
+SELECT ifnull('value', 'default')
+SELECT nullif(1, 1)
+SELECT nullif(1, 2)
+SELECT nullif(NULL, 1)
+SELECT typeof(1)
+SELECT typeof(1.5)
+SELECT typeof('hello')
+SELECT typeof(NULL)
+SELECT length('hello')+1
+SELECT 'len: '||length('abc')
+SELECT upper(substr('hello', 2, 3))
+SELECT CASE WHEN length('a')=1 THEN 'yes' ELSE 'no' END

@@ -10,6 +10,9 @@ pub const Error = error{
     InvalidNumber,
     InvalidString,
     UnsupportedFeature,
+    UnknownFunction,
+    WrongArgumentCount,
+    IntegerOverflow,
     OutOfMemory,
 };
 
@@ -45,8 +48,10 @@ pub fn negateValue(v: Value) Error!Value {
     };
 }
 
-pub fn applyArith(op: TokenKind, lhs: Value, rhs: Value) Error!Value {
-    if (lhs == .null or rhs == .null) return Value.null;
+pub fn applyArith(op: TokenKind, lhs_raw: Value, rhs_raw: Value) Error!Value {
+    if (lhs_raw == .null or rhs_raw == .null) return Value.null;
+    const lhs = coerceToNumericValue(lhs_raw);
+    const rhs = coerceToNumericValue(rhs_raw);
     const both_int = (lhs == .integer and rhs == .integer);
     if (both_int) {
         const a = lhs.integer;
@@ -91,6 +96,23 @@ fn toReal(v: Value) ?f64 {
         .real => |f| f,
         else => null,
     };
+}
+
+/// SQLite "applyNumericAffinity": if the value already is INT/REAL, leave it.
+/// If TEXT/BLOB, parse the bytes — INTEGER if the result is a whole number
+/// without `.` or `e`, otherwise REAL. Bytes that don't parse become INTEGER 0.
+/// (This matches `SELECT typeof('foo' + 0)` returning `integer` in sqlite3.)
+fn coerceToNumericValue(v: Value) Value {
+    return switch (v) {
+        .integer, .real, .null => v,
+        .text, .blob => |bytes| coerceBytesToNumeric(bytes),
+    };
+}
+
+fn coerceBytesToNumeric(bytes: []const u8) Value {
+    if (std.fmt.parseInt(i64, bytes, 10)) |i| return Value{ .integer = i } else |_| {}
+    if (std.fmt.parseFloat(f64, bytes)) |f| return Value{ .real = f } else |_| {}
+    return Value{ .integer = 0 };
 }
 
 pub fn boolValue(b: bool) Value {
@@ -210,6 +232,48 @@ pub fn applyEquality(op: TokenKind, lhs: Value, rhs: Value) Value {
         .ne => !equal,
         else => unreachable,
     });
+}
+
+/// Render a Value into the canonical SQLite text representation, allocating
+/// a new buffer that the caller owns. For TEXT/BLOB we dupe the bytes; for
+/// INTEGER and REAL we format into a fixed-size scratch buffer (numeric
+/// renderings never exceed 32 bytes for f64). NULL has no text representation
+/// — concatenation/length/substr/etc. handle NULL by short-circuiting before
+/// reaching this function.
+pub fn valueToOwnedText(allocator: std.mem.Allocator, v: Value) error{ OutOfMemory, NotConvertible }![]u8 {
+    return switch (v) {
+        .text => |t| allocator.dupe(u8, t) catch error.OutOfMemory,
+        .blob => |b| allocator.dupe(u8, b) catch error.OutOfMemory,
+        .integer, .real => blk: {
+            var buf: [64]u8 = undefined;
+            var w = std.Io.Writer.fixed(&buf);
+            v.format(&w) catch return error.NotConvertible;
+            break :blk allocator.dupe(u8, w.buffered()) catch error.OutOfMemory;
+        },
+        .null => error.NotConvertible,
+    };
+}
+
+/// `||` concatenation. Coerces both sides to text, returning a freshly
+/// allocated TEXT Value. Either operand being NULL yields NULL.
+pub fn concatValues(allocator: std.mem.Allocator, lhs: Value, rhs: Value) Error!Value {
+    if (lhs == .null or rhs == .null) return Value.null;
+    if (lhs == .text and rhs == .text) {
+        const out = try std.mem.concat(allocator, u8, &.{ lhs.text, rhs.text });
+        return Value{ .text = out };
+    }
+    const lhs_text = valueToOwnedText(allocator, lhs) catch |err| switch (err) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        error.NotConvertible => return Error.UnsupportedFeature,
+    };
+    defer allocator.free(lhs_text);
+    const rhs_text = valueToOwnedText(allocator, rhs) catch |err| switch (err) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        error.NotConvertible => return Error.UnsupportedFeature,
+    };
+    defer allocator.free(rhs_text);
+    const out = try std.mem.concat(allocator, u8, &.{ lhs_text, rhs_text });
+    return Value{ .text = out };
 }
 
 /// `a IN (e1, e2, ...)` is three-valued OR over `a = ei`.

@@ -2,6 +2,7 @@ const std = @import("std");
 const lex = @import("lex.zig");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
+const funcs = @import("funcs.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -241,13 +242,29 @@ const Parser = struct {
     }
 
     fn parseMulDiv(self: *Parser) Error!Value {
-        var left = try self.parseUnary();
+        var left = try self.parseConcat();
         while (self.cur.kind == .star or self.cur.kind == .slash or self.cur.kind == .percent) {
             const op = self.cur.kind;
             self.advance();
-            const right = try self.parseUnary();
+            const right = try self.parseConcat();
             defer ops.freeValue(self.allocator, right);
             const new_left = try ops.applyArith(op, left, right);
+            ops.freeValue(self.allocator, left);
+            left = new_left;
+        }
+        return left;
+    }
+
+    /// `||` string concatenation. Sits between *,/,% and unary +,- in the
+    /// precedence chain (see SQLite "Operators, expressions, and parsed
+    /// elements" docs § 3 Order of Operations). Left-associative.
+    fn parseConcat(self: *Parser) Error!Value {
+        var left = try self.parseUnary();
+        while (self.cur.kind == .concat) {
+            self.advance();
+            const right = try self.parseUnary();
+            defer ops.freeValue(self.allocator, right);
+            const new_left = try ops.concatValues(self.allocator, left, right);
             ops.freeValue(self.allocator, left);
             left = new_left;
         }
@@ -303,9 +320,33 @@ const Parser = struct {
                 self.advance();
                 return v;
             },
+            .identifier => return self.parseFunctionCall(),
             .keyword_case => return self.parseCase(),
             else => return Error.SyntaxError,
         }
+    }
+
+    fn parseFunctionCall(self: *Parser) Error!Value {
+        const name_tok = self.cur;
+        const name = name_tok.slice(self.src);
+        self.advance();
+        if (self.cur.kind != .lparen) return Error.SyntaxError;
+        self.advance();
+
+        var args: std.ArrayList(Value) = .empty;
+        defer {
+            for (args.items) |a| ops.freeValue(self.allocator, a);
+            args.deinit(self.allocator);
+        }
+        if (self.cur.kind != .rparen) {
+            try args.append(self.allocator, try self.parseExpr());
+            while (self.cur.kind == .comma) {
+                self.advance();
+                try args.append(self.allocator, try self.parseExpr());
+            }
+        }
+        try self.expect(.rparen);
+        return try funcs.call(self.allocator, name, args.items);
     }
 
     /// SQL CASE expression. Two forms:
