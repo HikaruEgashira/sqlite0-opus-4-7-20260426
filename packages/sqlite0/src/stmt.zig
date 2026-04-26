@@ -44,9 +44,30 @@ pub const ParsedSelect = struct {
     /// aggregates not in the SELECT list (sqlite3 allows this). Null when
     /// absent.
     having: ?*ast.Expr = null,
+    /// Set-operation chain (Iter20). Empty when this SELECT is standalone.
+    /// Each branch holds another ParsedSelect whose `branches`, `order_by`,
+    /// `limit`, and `offset` are guaranteed empty — sqlite3 attaches
+    /// post-clauses to the whole UNION chain, not per branch.
+    branches: []SetopBranch = &.{},
     order_by: []OrderTerm = &.{},
     limit: ?*ast.Expr = null,
     offset: ?*ast.Expr = null,
+};
+
+/// Set-operator chained against the preceding SELECT. `union_distinct`
+/// applies dedup-replace-last; `union_all` is plain concatenation;
+/// `intersect` keeps left rows whose key appears in right (then dedup);
+/// `except` keeps left rows whose key does NOT appear in right (then dedup).
+pub const SetopKind = enum { union_all, union_distinct, intersect, except };
+
+pub const SetopBranch = struct {
+    kind: SetopKind,
+    /// Inner select. Always parsed via the same parseSelectStatement
+    /// machinery, but with a recursion guard (`allow_post = false`) that
+    /// rejects ORDER BY/LIMIT/OFFSET inside the branch — those bind to the
+    /// outer chain in sqlite3. As a result, `branches`, `order_by`, `limit`,
+    /// and `offset` on this struct are always empty.
+    select: ParsedSelect,
 };
 
 pub const OrderDirection = enum { asc, desc };
@@ -71,12 +92,24 @@ pub const JoinKind = stmt_from.JoinKind;
 pub const freeParsedFrom = stmt_from.freeParsedFrom;
 pub const freeFromList = stmt_from.freeFromList;
 
-pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
+pub fn parseSelectStatement(p: *Parser) Error!ParsedSelect {
+    return parseSelectInner(p, true);
+}
+
+/// Iter20 set-op support: `allow_post = true` is the outer call (parses
+/// branches and the chain-level ORDER BY / LIMIT / OFFSET). `false` is used
+/// recursively for each setop branch — those branches must NOT consume
+/// post-clauses, since sqlite3 errors on `... ORDER BY ... UNION ...` and on
+/// `... LIMIT ... UNION ...`.
+fn parseSelectInner(p: *Parser, allow_post: bool) Error!ParsedSelect {
     try p.expect(.keyword_select);
 
     var distinct = false;
     if (p.cur.kind == .keyword_distinct) {
         distinct = true;
+        p.advance();
+    } else if (p.cur.kind == .keyword_all) {
+        // sqlite3 accepts `SELECT ALL ...` as the explicit non-distinct form.
         p.advance();
     }
 
@@ -111,31 +144,43 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
         having_ast = try p.parseExpr();
     }
 
+    var branches: []SetopBranch = &.{};
+    errdefer freeSetopBranches(p.allocator, branches);
     var order_by: []OrderTerm = &.{};
     errdefer freeOrderTerms(p.allocator, order_by);
-    if (p.cur.kind == .keyword_order) {
-        order_by = try parseOrderBy(p);
-    }
-
     var limit_ast: ?*ast.Expr = null;
     errdefer if (limit_ast) |e| e.deinit(p.allocator);
     var offset_ast: ?*ast.Expr = null;
     errdefer if (offset_ast) |e| e.deinit(p.allocator);
-    if (p.cur.kind == .keyword_limit) {
-        p.advance();
-        limit_ast = try p.parseExpr();
-        // sqlite3 quirk: `LIMIT a, b` means "skip a, take b" — the comma
-        // form flips arg order. The lhs (already parsed into limit_ast) is
-        // actually the offset; the rhs is the row count.
-        if (p.cur.kind == .comma) {
+
+    if (allow_post) {
+        branches = try parseSetopBranches(p);
+
+        if (p.cur.kind == .keyword_order) {
+            order_by = try parseOrderBy(p);
+        }
+
+        if (p.cur.kind == .keyword_limit) {
             p.advance();
-            offset_ast = limit_ast;
             limit_ast = try p.parseExpr();
-        } else if (p.cur.kind == .keyword_offset) {
-            p.advance();
-            offset_ast = try p.parseExpr();
+            // sqlite3 quirk: `LIMIT a, b` means "skip a, take b" — the comma
+            // form flips arg order. The lhs (already parsed into limit_ast) is
+            // actually the offset; the rhs is the row count.
+            if (p.cur.kind == .comma) {
+                p.advance();
+                offset_ast = limit_ast;
+                limit_ast = try p.parseExpr();
+            } else if (p.cur.kind == .keyword_offset) {
+                p.advance();
+                offset_ast = try p.parseExpr();
+            }
         }
     }
+    // sqlite3 rejects ORDER BY / LIMIT before a setop keyword
+    // ("ORDER BY clause should come after UNION not before"). With
+    // allow_post = false we never advance past these, so they remain on
+    // the cursor; the outer caller will see them as misplaced and the
+    // surrounding statement-level dispatch will surface a SyntaxError.
 
     return .{
         .items = items,
@@ -144,10 +189,71 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
         .distinct = distinct,
         .group_by = group_by,
         .having = having_ast,
+        .branches = branches,
         .order_by = order_by,
         .limit = limit_ast,
         .offset = offset_ast,
     };
+}
+
+/// Loop on UNION / UNION ALL / INTERSECT / EXCEPT and parse the trailing
+/// SELECT for each. Returns an empty slice when no setop keyword follows.
+fn parseSetopBranches(p: *Parser) Error![]SetopBranch {
+    var list: std.ArrayList(SetopBranch) = .empty;
+    errdefer freeSetopBranches(p.allocator, list.items);
+    errdefer list.deinit(p.allocator);
+
+    while (matchSetopKind(p)) |kind| {
+        const inner = try parseSelectInner(p, false);
+        list.append(p.allocator, .{ .kind = kind, .select = inner }) catch |err| {
+            freeParsedSelectFields(p.allocator, inner);
+            return err;
+        };
+    }
+    return list.toOwnedSlice(p.allocator);
+}
+
+fn matchSetopKind(p: *Parser) ?SetopKind {
+    switch (p.cur.kind) {
+        .keyword_union => {
+            p.advance();
+            if (p.cur.kind == .keyword_all) {
+                p.advance();
+                return .union_all;
+            }
+            return .union_distinct;
+        },
+        .keyword_intersect => {
+            p.advance();
+            return .intersect;
+        },
+        .keyword_except => {
+            p.advance();
+            return .except;
+        },
+        else => return null,
+    }
+}
+
+pub fn freeSetopBranches(allocator: std.mem.Allocator, list: []SetopBranch) void {
+    for (list) |b| freeParsedSelectFields(allocator, b.select);
+    allocator.free(list);
+}
+
+/// Free the AST nodes inside a ParsedSelect. Used both by errdefer paths in
+/// the parser (when constructing a setop branch fails partway) and by the
+/// engine if a downstream step rejects the query. Mirrors the field-by-field
+/// cleanup that errdefer would do inside `parseSelectInner`.
+pub fn freeParsedSelectFields(allocator: std.mem.Allocator, ps: ParsedSelect) void {
+    select.freeSelectList(allocator, ps.items);
+    freeFromList(allocator, ps.from);
+    if (ps.where) |w| w.deinit(allocator);
+    freeExprList(allocator, ps.group_by);
+    if (ps.having) |h| h.deinit(allocator);
+    freeSetopBranches(allocator, ps.branches);
+    freeOrderTerms(allocator, ps.order_by);
+    if (ps.limit) |e| e.deinit(allocator);
+    if (ps.offset) |e| e.deinit(allocator);
 }
 
 /// Parse `<expr> [, <expr>]*`. Used by GROUP BY (and trivially extensible

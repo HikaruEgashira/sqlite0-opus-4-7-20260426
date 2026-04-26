@@ -56,6 +56,37 @@ pub fn dedupeRows(allocator: std.mem.Allocator, rows: [][]Value) [][]Value {
     return rows[0..kept];
 }
 
+/// Variant of `dedupeRows` for set operators (UNION/INTERSECT/EXCEPT). When
+/// a duplicate is encountered, the earlier slot's row content is freed and
+/// replaced by the new occurrence's row. Position is determined by FIRST
+/// occurrence; content is the LAST. This matches sqlite3's UNION dedup
+/// (verified against 3.51.0: `SELECT 1 UNION SELECT 1.0` returns `1.0`,
+/// `SELECT 1.0 UNION SELECT 1` returns `1` — last seen wins).
+pub fn dedupeRowsKeepLast(allocator: std.mem.Allocator, rows: [][]Value) [][]Value {
+    if (rows.len == 0) return rows;
+    var kept: usize = 0;
+    var i: usize = 0;
+    while (i < rows.len) : (i += 1) {
+        const candidate = rows[i];
+        var matched_at: ?usize = null;
+        for (rows[0..kept], 0..) |existing, idx| {
+            if (rowsEqual(existing, candidate)) {
+                matched_at = idx;
+                break;
+            }
+        }
+        if (matched_at) |idx| {
+            for (rows[idx]) |v| ops.freeValue(allocator, v);
+            allocator.free(rows[idx]);
+            rows[idx] = candidate;
+        } else {
+            rows[kept] = candidate;
+            kept += 1;
+        }
+    }
+    return rows[0..kept];
+}
+
 fn rowsContains(rows: []const []Value, candidate: []const Value) bool {
     for (rows) |row| {
         if (rowsEqual(row, candidate)) return true;
@@ -63,7 +94,10 @@ fn rowsContains(rows: []const []Value, candidate: []const Value) bool {
     return false;
 }
 
-fn rowsEqual(a: []const Value, b: []const Value) bool {
+/// True when `a` and `b` would compare equal under sqlite3 DISTINCT / UNION
+/// semantics: NULL matches NULL, INTEGER and REAL are compared numerically
+/// (1 == 1.0), TEXT/BLOB by exact bytes, mixed types never match.
+pub fn rowsEqual(a: []const Value, b: []const Value) bool {
     if (a.len != b.len) return false;
     for (a, b) |va, vb| {
         if (!valuesEqualForDistinct(va, vb)) return false;

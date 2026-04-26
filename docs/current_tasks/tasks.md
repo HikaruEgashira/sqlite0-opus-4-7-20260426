@@ -23,10 +23,12 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter19.A: comma-FROM (Cartesian) + qualified column refs (`t.x` / `t.*`) + table aliases
 - [x] Iter19.B: `CROSS JOIN` / `INNER JOIN ... ON` / `JOIN ... ON` keywords
 - [x] Iter19.C: `LEFT [OUTER] JOIN` (per-boundary ON + NULL padding for unmatched left rows)
+- [x] Iter20: `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` (chain-level ORDER BY/LIMIT, dedup-replace-last semantics, column-count mismatch error)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
 - [ ] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t`)
+- [ ] Iter20 拡張: setop chain での ORDER BY <name>/<expr> 対応 (現在は position-only)
 
 ## Backlog (Phase 3以降)
 

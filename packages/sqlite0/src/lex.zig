@@ -52,6 +52,10 @@ pub const TokenKind = enum {
     keyword_left,
     keyword_outer,
     keyword_on,
+    keyword_union,
+    keyword_all,
+    keyword_intersect,
+    keyword_except,
     plus,
     minus,
     star,
@@ -305,6 +309,10 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "left")) return .keyword_left;
     if (eqlIgnoreCase(text, "outer")) return .keyword_outer;
     if (eqlIgnoreCase(text, "on")) return .keyword_on;
+    if (eqlIgnoreCase(text, "union")) return .keyword_union;
+    if (eqlIgnoreCase(text, "all")) return .keyword_all;
+    if (eqlIgnoreCase(text, "intersect")) return .keyword_intersect;
+    if (eqlIgnoreCase(text, "except")) return .keyword_except;
     return null;
 }
 

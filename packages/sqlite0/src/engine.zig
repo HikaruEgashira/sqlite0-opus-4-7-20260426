@@ -20,6 +20,7 @@ const aggregate = @import("aggregate.zig");
 const eval = @import("eval.zig");
 const database = @import("database.zig");
 const engine_from = @import("engine_from.zig");
+const engine_setop = @import("engine_setop.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -204,9 +205,38 @@ fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.Parse
 /// (verified against sqlite3 3.51.0); without this check the non-aggregate
 /// path would silently drop the predicate.
 pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
-    const pp = postProcessFromParsed(alloc, ps) catch |err| return err;
-    defer alloc.free(pp.order_by);
+    if (ps.branches.len == 0) {
+        const pp = try postProcessFromParsed(alloc, ps);
+        return executeOneSelect(db, alloc, ps, pp);
+    }
 
+    // Setop chain: every branch (and the leftmost SELECT) executes WITHOUT
+    // chain-level ORDER BY/LIMIT/OFFSET — those bind to the combined result
+    // and are applied last. Per-branch DISTINCT inside a SELECT still goes
+    // through (`SELECT DISTINCT x ... UNION ...`).
+    var current = try executeOneSelect(db, alloc, ps, postProcessForBranch(ps));
+    var left_arity = arityOf(ps, current);
+    for (ps.branches) |branch| {
+        const right = try executeOneSelect(db, alloc, branch.select, postProcessForBranch(branch.select));
+        const right_arity = arityOf(branch.select, right);
+        if (left_arity != null and right_arity != null and left_arity.? != right_arity.?) {
+            return Error.ColumnCountMismatch;
+        }
+        current = try engine_setop.combine(alloc, branch.kind, current, right);
+        if (left_arity == null) left_arity = right_arity;
+    }
+    return engine_setop.applySetopPostProcess(alloc, current, ps.order_by, ps.limit, ps.offset);
+}
+
+/// Execute one ParsedSelect with the given PostProcess. Stripped out of
+/// `executeSelect` so the setop path (Iter20) can run each branch with the
+/// per-branch DISTINCT but no chain-level ORDER BY / LIMIT / OFFSET.
+fn executeOneSelect(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    ps: stmt_mod.ParsedSelect,
+    pp: select_mod.PostProcess,
+) ![][]Value {
     const has_aggregates = aggregate.selectHasAggregates(ps.items, ps.having, pp.order_by);
     if (ps.having != null and ps.group_by.len == 0 and !has_aggregates) return Error.SyntaxError;
     const wants_grouping = ps.group_by.len > 0 or has_aggregates;
@@ -230,6 +260,32 @@ pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.Parse
     const rows_const = try alloc.alloc([]const Value, cart.rows.len);
     for (cart.rows, rows_const) |src, *slot| slot.* = src;
     return select_mod.executeWithFrom(alloc, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp);
+}
+
+/// PostProcess for one branch of a setop chain: keep the per-branch DISTINCT
+/// but drop ORDER BY/LIMIT/OFFSET (those attach at chain level). The branch
+/// shouldn't have any of those anyway — the parser rejects them via the
+/// `allow_post = false` recursion guard — but we strip them defensively.
+fn postProcessForBranch(ps: stmt_mod.ParsedSelect) select_mod.PostProcess {
+    return .{ .distinct = ps.distinct, .order_by = &.{}, .limit = null, .offset = null };
+}
+
+/// Determine projected-row arity for the column-count-mismatch check.
+/// Prefers an actual row's length when rows exist; otherwise falls back to
+/// counting non-`*` items (returns null when only `*` items are present and
+/// no rows are available — in that case we skip the check, matching what
+/// sqlite3 catches at parse time but we can't determine without resolving
+/// FROM-side columns).
+fn arityOf(ps: stmt_mod.ParsedSelect, rows: [][]Value) ?usize {
+    if (rows.len > 0) return rows[0].len;
+    var n: usize = 0;
+    for (ps.items) |item| {
+        switch (item) {
+            .star => return null,
+            .expr => n += 1,
+        }
+    }
+    return n;
 }
 
 /// Translate stmt-level OrderTerm/limit/offset into the select-module's

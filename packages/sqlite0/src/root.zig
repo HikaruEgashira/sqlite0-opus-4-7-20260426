@@ -25,6 +25,7 @@ pub const exec = @import("exec.zig");
 pub const database = @import("database.zig");
 pub const engine = @import("engine.zig");
 pub const engine_from = @import("engine_from.zig");
+pub const engine_setop = @import("engine_setop.zig");
 
 pub const Value = value.Value;
 pub const Result = exec.Result;

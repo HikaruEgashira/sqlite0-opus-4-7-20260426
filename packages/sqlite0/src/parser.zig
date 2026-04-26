@@ -380,10 +380,14 @@ pub const Parser = struct {
             args.deinit(self.allocator);
         }
         // Optional DISTINCT modifier (sqlite3 allows this on any function call;
-        // aggregate dispatch enforces the "exactly one argument" rule).
+        // aggregate dispatch enforces the "exactly one argument" rule). `ALL`
+        // is accepted as the explicit non-distinct counterpart to keep parity
+        // with sqlite3 (`count(ALL x)`).
         var distinct = false;
         if (self.cur.kind == .keyword_distinct) {
             distinct = true;
+            self.advance();
+        } else if (self.cur.kind == .keyword_all) {
             self.advance();
         }
         if (self.cur.kind == .star) {
