@@ -13,8 +13,9 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 
 ### Phase 1 残タスク (Phase 2 と並行可)
-- [ ] Iter9: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
-- [ ] Iter12: `SELECT <expr> AS <alias>` (列リネーム — Result の列名表示用)
+- [ ] Iter9.A: `random()` (引数なし、64bit 整数)
+- [ ] Iter9.B: `printf(fmt, ...)` / `format(fmt, ...)`  (sprintf 互換)
+- [ ] Iter9.C: `strftime(fmt, time, ...)` (時刻書式化、Phase 1 の最後)
 
 ## Backlog (Phase 3以降)
 

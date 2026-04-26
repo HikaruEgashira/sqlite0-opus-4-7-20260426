@@ -31,7 +31,32 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "instr")) return text.fnInstr(allocator, args);
     if (util.eqlIgnoreCase(name, "char")) return text.fnChar(allocator, args);
     if (util.eqlIgnoreCase(name, "unicode")) return text.fnUnicode(allocator, args);
+    if (util.eqlIgnoreCase(name, "random")) return fnRandom(args);
     return Error.UnknownFunction;
+}
+
+/// Process-wide PRNG state for `random()`. Lazily initialized on first call.
+/// The seed is derived from `&random_prng`'s ASLR-randomized address — this
+/// gives run-to-run variation without depending on `std.Io` (Zig 0.16.0 moved
+/// time/random APIs behind an Io vtable that we'd otherwise have to thread
+/// through the function-dispatch ABI). Within a single process subsequent
+/// calls produce a fresh PRNG sequence.
+///
+/// Differential tests can't byte-compare `random()` output across engines;
+/// they only check `typeof(random()) = 'integer'` and per-call freshness.
+var random_prng: ?std.Random.DefaultPrng = null;
+
+/// `random()` — return a uniformly-distributed pseudo-random 64-bit signed
+/// integer (sqlite3 compat). Each invocation produces a fresh value, mirroring
+/// sqlite3's per-call re-evaluation. sqlite3 errors on `random(1)` (no args).
+fn fnRandom(args: []const Value) Error!Value {
+    if (args.len != 0) return Error.WrongArgumentCount;
+    if (random_prng == null) {
+        const seed = @intFromPtr(&random_prng) ^ 0xdeadbeefcafebabe;
+        random_prng = std.Random.DefaultPrng.init(seed);
+    }
+    const bits = random_prng.?.random().int(u64);
+    return Value{ .integer = @bitCast(bits) };
 }
 
 fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {

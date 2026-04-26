@@ -464,3 +464,9 @@ SELECT 1 foo
 SELECT 1 a, 2 b
 CREATE TABLE t(x, y); INSERT INTO t VALUES (10, 20); SELECT x + y AS total FROM t
 CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT x AS n FROM t WHERE x > 1
+
+# random() (Iter9.A) — values differ each run, so only shape can be diffed
+SELECT typeof(random())
+SELECT typeof(random()) = 'integer'
+SELECT random() <> random()
+SELECT random() IS NOT NULL
