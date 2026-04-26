@@ -16,15 +16,17 @@
 - [x] Iter6: `round`/`min`/`max` (scalar variadic), `replace`/`hex`/`quote`/`trim`/`ltrim`/`rtrim`/`instr`/`char`/`unicode`
 - [x] Iter7: top-level `VALUES (e, ...) [, (...)]` で複数行Result
 - [x] ADR-0001: nostd解釈・Zig 0.16.0採用
+- [x] ADR-0002: AST移行計画 (Phase 2準備, eager parseExpr→ Expr tree-walker)
 - [x] `ops.zig` / `parser.zig` / `funcs.zig` / `func_util.zig` / `funcs_text.zig` / `stmt.zig` 抽出 (500行ルール遵守の継続的分割)
 
-### 次の縦スライス
-- [ ] Iter8: `SELECT * FROM (VALUES ...)` — 副問合せをFROM句で受ける、テーブルエイリアス、`*`展開
+### 次の縦スライス (ADR-0002 の AST 移行)
+- [ ] Iter8.A: `ast.zig` / `eval.zig` 新設、`parsePrimary` / `parseAddSub` を AST 化 (他は literal でラップ継続)
+- [ ] Iter8.B: `parseMulDiv` / `parseConcat` / `parseUnary` / `parseEquality` / `parseComparison` を AST 化
+- [ ] Iter8.C: `parseNot` / `parseAnd` / `parseOr` / `parseCase` / `parseBetween` / `parseInList` / `parseFunctionCall` を AST 化、parser.zig から ops.zig 呼び出しが消える
+- [ ] Iter8.D: `column_ref` + `EvalContext.current_row` 実装、`SELECT x FROM (VALUES ...)` / `SELECT x+1 FROM (VALUES ...)` を通す
+
+### Phase 1 残タスク (AST 移行と独立)
 - [ ] Iter9: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
-- [ ] Iter3: CASE式 / IS NULL / BETWEEN / IN
-- [ ] Iter4: 文字列関数 `length()`, `substr()`, `lower()`, `upper()`, `||` 連結
-- [ ] Iter5: 数値関数 `abs()`, `round()`, `min()`, `max()`
-- [ ] Iter6: `printf` / `format` 関数
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 
