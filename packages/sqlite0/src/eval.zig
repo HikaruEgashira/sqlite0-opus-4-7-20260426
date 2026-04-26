@@ -18,8 +18,8 @@ const value_mod = @import("value.zig");
 const funcs = @import("funcs.zig");
 const func_util = @import("func_util.zig");
 const database = @import("database.zig");
-const stmt_mod = @import("stmt.zig");
 const eval_match = @import("eval_match.zig");
+const eval_subquery = @import("eval_subquery.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -83,31 +83,10 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .case_expr => |ce| try evalCaseExpr(ctx, ce),
         .func_call => |fc| try evalFuncCall(ctx, expr, fc),
         .like => |l| try eval_match.evalLike(ctx, l),
-        .subquery => |sq| try evalScalarSubquery(ctx, sq),
+        .subquery => |sq| try eval_subquery.evalScalarSubquery(ctx, sq),
+        .in_subquery => |is| try eval_subquery.evalInSubquery(ctx, is),
+        .exists => |sq| try eval_subquery.evalExists(ctx, sq),
     };
-}
-
-/// Run a scalar subquery (`(SELECT ...)`) and reduce it to a single Value.
-/// Semantics match sqlite3 (verified against 3.51.0 on 2026-04-26):
-/// - 0 rows                         → NULL
-/// - any rows × exactly 1 column    → first row's value (multi-row does
-///                                    NOT error; sqlite3 silently picks
-///                                    the first row produced)
-/// - rows × ≠1 columns              → `Error.ColumnCountMismatch`
-///   (sqlite3 catches this at parse time; our tree-walking impl catches
-///   it at execute time with the same observable outcome)
-///
-/// Requires `ctx.db` to be non-null. The only reachable null path is
-/// `stmt.parseValuesTuple` (parse-time VALUES); subqueries there return
-/// `Error.SyntaxError` since we have no Database to recurse through.
-fn evalScalarSubquery(ctx: EvalContext, sq: *const stmt_mod.ParsedSelect) Error!Value {
-    const db = ctx.db orelse return Error.SyntaxError;
-    const engine = @import("engine.zig");
-    const rows = try engine.executeSelect(db, ctx.allocator, sq.*);
-    if (rows.len == 0) return Value.null;
-    const first = rows[0];
-    if (first.len != 1) return Error.ColumnCountMismatch;
-    return func_util.dupeValue(ctx.allocator, first[0]);
 }
 
 fn evalBinaryArith(ctx: EvalContext, b: Expr.BinaryArith) Error!Value {

@@ -4,6 +4,7 @@ const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const eval = @import("eval.zig");
+const parser_predicate = @import("parser_predicate.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -121,35 +122,35 @@ pub const Parser = struct {
                 },
                 .keyword_between => {
                     self.advance();
-                    left = try self.parseBetween(left, false);
+                    left = try parser_predicate.parseBetween(self, left, false);
                 },
                 .keyword_in => {
                     self.advance();
-                    left = try self.parseInList(left, false);
+                    left = try parser_predicate.parseInList(self, left, false);
                 },
                 .keyword_like => {
                     self.advance();
-                    left = try self.parseLike(left, .like, false);
+                    left = try parser_predicate.parseLike(self, left, .like, false);
                 },
                 .keyword_glob => {
                     self.advance();
-                    left = try self.parseLike(left, .glob, false);
+                    left = try parser_predicate.parseLike(self, left, .glob, false);
                 },
                 .keyword_not => {
                     const snap = self.snapshot();
                     self.advance();
                     if (self.cur.kind == .keyword_between) {
                         self.advance();
-                        left = try self.parseBetween(left, true);
+                        left = try parser_predicate.parseBetween(self, left, true);
                     } else if (self.cur.kind == .keyword_in) {
                         self.advance();
-                        left = try self.parseInList(left, true);
+                        left = try parser_predicate.parseInList(self, left, true);
                     } else if (self.cur.kind == .keyword_like) {
                         self.advance();
-                        left = try self.parseLike(left, .like, true);
+                        left = try parser_predicate.parseLike(self, left, .like, true);
                     } else if (self.cur.kind == .keyword_glob) {
                         self.advance();
-                        left = try self.parseLike(left, .glob, true);
+                        left = try parser_predicate.parseLike(self, left, .glob, true);
                     } else {
                         self.restore(snap);
                         break;
@@ -161,65 +162,7 @@ pub const Parser = struct {
         return left;
     }
 
-    /// `value BETWEEN lo AND hi` — takes ownership of `value` and frees it
-    /// on any error before returning.
-    fn parseBetween(self: *Parser, value: *ast.Expr, negated: bool) Error!*ast.Expr {
-        errdefer value.deinit(self.allocator);
-        const lo = try self.parseComparison();
-        errdefer lo.deinit(self.allocator);
-        try self.expect(.keyword_and);
-        const hi = try self.parseComparison();
-        errdefer hi.deinit(self.allocator);
-        return ast.makeBetween(self.allocator, value, lo, hi, negated);
-    }
-
-    /// `value LIKE pattern [ESCAPE <expr>]` / `value GLOB pattern`. ESCAPE
-    /// is only valid after LIKE; following GLOB it is reported as a syntax
-    /// error to match sqlite3 ("near \"ESCAPE\": syntax error"). Takes
-    /// ownership of `value` and frees it on any error before returning.
-    fn parseLike(self: *Parser, value: *ast.Expr, op: ast.LikeOp, negated: bool) Error!*ast.Expr {
-        errdefer value.deinit(self.allocator);
-        const pattern = try self.parseAddSub();
-        errdefer pattern.deinit(self.allocator);
-        var escape: ?*ast.Expr = null;
-        errdefer if (escape) |e| e.deinit(self.allocator);
-        if (self.cur.kind == .keyword_escape) {
-            if (op != .like) return Error.SyntaxError;
-            self.advance();
-            escape = try self.parseAddSub();
-        }
-        return ast.makeLike(self.allocator, op, value, pattern, escape, negated);
-    }
-
-    /// `value IN (e1, e2, ...)` — takes ownership of `value` and frees it
-    /// on any error before returning.
-    fn parseInList(self: *Parser, value: *ast.Expr, negated: bool) Error!*ast.Expr {
-        errdefer value.deinit(self.allocator);
-        try self.expect(.lparen);
-        var items: std.ArrayList(*ast.Expr) = .empty;
-        errdefer {
-            for (items.items) |it| it.deinit(self.allocator);
-            items.deinit(self.allocator);
-        }
-        if (self.cur.kind != .rparen) {
-            try items.ensureUnusedCapacity(self.allocator, 1);
-            items.appendAssumeCapacity(try self.parseExpr());
-            while (self.cur.kind == .comma) {
-                self.advance();
-                try items.ensureUnusedCapacity(self.allocator, 1);
-                items.appendAssumeCapacity(try self.parseExpr());
-            }
-        }
-        try self.expect(.rparen);
-        const items_slice = try items.toOwnedSlice(self.allocator);
-        return ast.makeInList(self.allocator, value, items_slice, negated) catch |err| {
-            for (items_slice) |it| it.deinit(self.allocator);
-            self.allocator.free(items_slice);
-            return err;
-        };
-    }
-
-    fn parseComparison(self: *Parser) Error!*ast.Expr {
+    pub fn parseComparison(self: *Parser) Error!*ast.Expr {
         var left = try self.parseAddSub();
         errdefer left.deinit(self.allocator);
         while (self.cur.kind == .lt or self.cur.kind == .le or self.cur.kind == .gt or self.cur.kind == .ge) {
@@ -238,7 +181,7 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseAddSub(self: *Parser) Error!*ast.Expr {
+    pub fn parseAddSub(self: *Parser) Error!*ast.Expr {
         var left = try self.parseMulDiv();
         errdefer left.deinit(self.allocator);
         while (self.cur.kind == .plus or self.cur.kind == .minus) {
@@ -347,6 +290,10 @@ pub const Parser = struct {
             },
             .identifier => return self.parseIdentifierExpr(),
             .keyword_case => return self.parseCase(),
+            .keyword_exists => {
+                self.advance();
+                return parser_predicate.parseExists(self);
+            },
             else => return Error.SyntaxError,
         }
     }

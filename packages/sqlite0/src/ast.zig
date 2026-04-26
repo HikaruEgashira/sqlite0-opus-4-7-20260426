@@ -56,6 +56,16 @@ pub const Expr = union(enum) {
     /// `Expr.deinit` recurses through `stmt.freeParsedSelectFields` and
     /// frees the box.
     subquery: *stmt.ParsedSelect,
+    /// `value [NOT] IN (SELECT ...)` — Iter22.C. Subquery must produce
+    /// exactly one column; eval applies SQL three-valued logic with the
+    /// empty case returning concrete 0/1 (not NULL), matching sqlite3.
+    in_subquery: InSubquery,
+    /// `EXISTS (SELECT ...)` — Iter22.C. Returns 1 when the subquery
+    /// produces ≥1 row, 0 otherwise. Column count is ignored (unlike
+    /// scalar/IN), so `EXISTS (SELECT 1, 2)` is legal. `NOT EXISTS` is
+    /// modelled as `logical_not(exists)`; EXISTS never returns NULL,
+    /// so the wrapped form is observationally identical.
+    exists: *stmt.ParsedSelect,
 
     pub const BinaryArith = struct { op: BinaryOp, left: *Expr, right: *Expr };
     pub const BinaryConcat = struct { left: *Expr, right: *Expr };
@@ -90,6 +100,7 @@ pub const Expr = union(enum) {
     /// `ESCAPE <expr>`. The expression is evaluated per-row; its result must
     /// coerce to a 1-byte text value or runtime returns `InvalidEscape`.
     pub const Like = struct { op: LikeOp, value: *Expr, pattern: *Expr, escape: ?*Expr, negated: bool };
+    pub const InSubquery = struct { value: *Expr, subquery: *stmt.ParsedSelect, negated: bool };
 
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -151,6 +162,15 @@ pub const Expr = union(enum) {
                 if (l.escape) |e| e.deinit(allocator);
             },
             .subquery => |sq| {
+                stmt.freeParsedSelectFields(allocator, sq.*);
+                allocator.destroy(sq);
+            },
+            .in_subquery => |is| {
+                is.value.deinit(allocator);
+                stmt.freeParsedSelectFields(allocator, is.subquery.*);
+                allocator.destroy(is.subquery);
+            },
+            .exists => |sq| {
                 stmt.freeParsedSelectFields(allocator, sq.*);
                 allocator.destroy(sq);
             },
@@ -287,6 +307,37 @@ pub fn makeSubquery(allocator: std.mem.Allocator, ps: stmt.ParsedSelect) !*Expr 
     errdefer allocator.destroy(box);
     const node = try allocator.create(Expr);
     node.* = .{ .subquery = box };
+    return node;
+}
+
+/// `value [NOT] IN (SELECT ...)`. Same ownership contract as
+/// `makeSubquery` for the boxed ParsedSelect; on allocation failure
+/// the caller's errdefer must free both `value` and the ParsedSelect
+/// inner fields.
+pub fn makeInSubquery(
+    allocator: std.mem.Allocator,
+    value: *Expr,
+    ps: stmt.ParsedSelect,
+    negated: bool,
+) !*Expr {
+    const box = try allocator.create(stmt.ParsedSelect);
+    box.* = ps;
+    errdefer allocator.destroy(box);
+    const node = try allocator.create(Expr);
+    node.* = .{ .in_subquery = .{ .value = value, .subquery = box, .negated = negated } };
+    return node;
+}
+
+/// `EXISTS (SELECT ...)`. Boxes the ParsedSelect identically to
+/// `makeSubquery`; the caller's errdefer must call
+/// `freeParsedSelectFields` on the inner if construction fails. The
+/// `NOT EXISTS` form is wrapped in `logical_not` by the caller.
+pub fn makeExists(allocator: std.mem.Allocator, ps: stmt.ParsedSelect) !*Expr {
+    const box = try allocator.create(stmt.ParsedSelect);
+    box.* = ps;
+    errdefer allocator.destroy(box);
+    const node = try allocator.create(Expr);
+    node.* = .{ .exists = box };
     return node;
 }
 

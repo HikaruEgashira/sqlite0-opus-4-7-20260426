@@ -282,12 +282,14 @@ pub fn concatValues(allocator: std.mem.Allocator, lhs: Value, rhs: Value) Error!
 }
 
 /// `a IN (e1, e2, ...)` is three-valued OR over `a = ei`.
-/// - left is NULL → NULL
+/// - empty list → 0 (sqlite3 short-circuits empty before NULL-left check;
+///   verified `NULL IN ()` → 0 and `NULL IN (SELECT … WHERE 1=0)` → 0)
+/// - left is NULL (non-empty list) → NULL
 /// - any e matches → 1 (short-circuit)
 /// - no match but some `a = ei` was NULL → NULL
 /// - no match and no NULLs → 0
-/// - empty list → 0
 pub fn applyIn(left: Value, list: []const Value) Value {
+    if (list.len == 0) return boolValue(false);
     if (left == .null) return Value.null;
     var saw_null = false;
     for (list) |item| {

@@ -27,13 +27,13 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter21: `FROM (SELECT ...) [AS alias]` 部分問合せ (column-name 由来は alias > bare-ref > columnN; star は内側 cartesian 展開; nested / setop / aggregate / LEFT JOIN 連動を確認)
 - [x] Iter22.A: `EvalContext` に `?*Database` を追加し、SELECT/DML 全 evalExpr 経路に通す (refactor only)
 - [x] Iter22.B: スカラサブクエリ `(SELECT ...)` を式位置で受理 (空→NULL / 多列→error / 多行→先頭行; sqlite3 互換)
+- [x] Iter22.C: `IN (SELECT ...)` / `EXISTS (SELECT ...)` (空→ left 無視 0 / NULL 三値論理 / EXISTS は column-count 無視; `applyIn` の empty 早期 0 化は既存 `NULL IN ()` バグの修正も兼ねる)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
 - [ ] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t`)
 - [ ] Iter20 拡張: setop chain での ORDER BY <name>/<expr> 対応 (現在は position-only)
 - [ ] Iter21 拡張: 任意 expression 列の合成名は現在 `columnN` を使用 (sqlite3 はソーステキストを使用); 仕様乖離あり、`alias` または bare ref で命名するワークアラウンド要
-- [ ] Iter22 拡張: `IN (SELECT ...)` / `EXISTS (SELECT ...)` (subquery in WHERE)
 - [ ] Iter22 拡張: `INSERT INTO t VALUES ((SELECT ...))` (parser-time VALUES に Database を渡す要)
 - [ ] Iter22 拡張: correlated subquery (外側 row への参照 — EvalContext から outer rows を流す要)
 
