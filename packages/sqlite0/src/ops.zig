@@ -15,6 +15,8 @@ pub const Error = error{
     IntegerOverflow,
     OutOfMemory,
     TableAlreadyExists,
+    NoSuchTable,
+    ColumnCountMismatch,
 };
 
 pub fn unescapeStringLiteral(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {

@@ -1,9 +1,9 @@
 //! `Database` — state-holding execution context (ADR-0003).
 //!
-//! Single source of truth for tables and other persistent state. Phase 2 will
-//! grow an in-memory `tables` map; Iter14.A only delivers the multi-statement
-//! execution shell so the dispatch / arena / Value-dupe boundaries are in
-//! place before storage lands.
+//! Single source of truth for tables and other persistent state. Iter14.A
+//! delivered the multi-statement shell + arena boundaries; Iter14.B added
+//! `CREATE TABLE` schema registration; Iter14.C wires `INSERT INTO t VALUES`
+//! and `SELECT ... FROM t` so a full round-trip is observable end-to-end.
 //!
 //! Each `execute` call accepts one or more `;`-separated statements, runs
 //! them in order against `self`, and returns one `StatementResult` per
@@ -21,24 +21,28 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
+const ast = @import("ast.zig");
 const stmt_mod = @import("stmt.zig");
 const parser_mod = @import("parser.zig");
+const select_mod = @import("select.zig");
 
 const Value = value_mod.Value;
 pub const Error = ops.Error;
 
 /// One executed statement's outcome. Row-producing statements carry their
-/// rows; `create_table` carries no payload (the side effect is recorded on
-/// the `Database` itself).
+/// rows; `create_table` and `insert` carry no rows (their effect is on
+/// `Database` state). `insert` reports the rowcount for symmetry with sqlite3
+/// but the CLI doesn't print it (sqlite3 stays silent too).
 pub const StatementResult = union(enum) {
     select: [][]Value,
     values: [][]Value,
     create_table,
+    insert: struct { rowcount: u64 },
 
     pub fn deinit(self: StatementResult, allocator: std.mem.Allocator) void {
         switch (self) {
             .select, .values => |rows| freeRows(allocator, rows),
-            .create_table => {},
+            .create_table, .insert => {},
         }
     }
 };
@@ -155,7 +159,8 @@ fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
 
     switch (p.cur.kind) {
         .keyword_select => {
-            const arena_rows = try stmt_mod.parseSelectStatement(p);
+            const parsed = try stmt_mod.parseSelectStatement(p);
+            const arena_rows = try executeSelect(db, p.allocator, parsed);
             const long_rows = try dupeRowsToLongLived(db.allocator, arena_rows);
             return .{ .select = long_rows };
         },
@@ -169,8 +174,75 @@ fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             try db.registerTable(parsed);
             return .create_table;
         },
+        .keyword_insert => {
+            const parsed = try stmt_mod.parseInsertStatement(p);
+            const rowcount = try executeInsert(db, parsed);
+            return .{ .insert = .{ .rowcount = rowcount } };
+        },
         else => return Error.SyntaxError,
     }
+}
+
+/// Run a parsed SELECT against `db` state. Result rows are allocated in
+/// `alloc` (the per-statement arena); `dupeRowsToLongLived` later moves them
+/// to long-lived memory.
+fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
+    if (ps.from) |from| switch (from) {
+        .inline_values => |iv| return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where),
+        .table_ref => |name| {
+            const t = try lookupTable(db, alloc, name);
+            return select_mod.executeWithFrom(alloc, ps.items, t.rows.items, t.columns, ps.where);
+        },
+    };
+    if (select_mod.containsStar(ps.items)) return Error.SyntaxError;
+    return select_mod.executeWithoutFrom(alloc, ps.items, ps.where);
+}
+
+/// Append rows from a parsed INSERT into the target table. The Values in
+/// `parsed.rows` live in arena memory; this helper deep-dupes each Value to
+/// `db.allocator` before storing in the table.
+fn executeInsert(db: *Database, parsed: stmt_mod.ParsedInsert) !u64 {
+    const t = try lookupTable(db, db.allocator, parsed.table);
+    for (parsed.rows) |row| {
+        if (row.len != t.columns.len) return Error.ColumnCountMismatch;
+    }
+    try t.rows.ensureUnusedCapacity(db.allocator, parsed.rows.len);
+    var inserted: u64 = 0;
+    errdefer {
+        // Roll back any rows already appended in this call. (Schema state
+        // changes are durable but row-level partial writes shouldn't survive
+        // the all-or-nothing error contract — undo the partial append here.)
+        var i: u64 = 0;
+        while (i < inserted) : (i += 1) {
+            const last_idx = t.rows.items.len - 1;
+            const undone_row = t.rows.items[last_idx];
+            t.rows.items.len = last_idx;
+            for (undone_row) |v| ops.freeValue(db.allocator, v);
+            db.allocator.free(undone_row);
+        }
+    }
+    for (parsed.rows) |row| {
+        const new_row = try db.allocator.alloc(Value, row.len);
+        var k: usize = 0;
+        errdefer {
+            for (new_row[0..k]) |v| ops.freeValue(db.allocator, v);
+            db.allocator.free(new_row);
+        }
+        while (k < row.len) : (k += 1) {
+            new_row[k] = try dupeValueDeep(db.allocator, row[k]);
+        }
+        t.rows.appendAssumeCapacity(new_row);
+        inserted += 1;
+    }
+    return inserted;
+}
+
+/// Look up a table by user-supplied (possibly mixed-case) name. `scratch` is
+/// used for the temporary lower-cased key buffer.
+fn lookupTable(db: *Database, scratch: std.mem.Allocator, name: []const u8) !*Table {
+    const lower = try lowerCaseDupe(scratch, name);
+    defer scratch.free(lower);
+    return db.tables.getPtr(lower) orelse Error.NoSuchTable;
 }
 
 fn lowerCaseDupe(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
@@ -395,4 +467,32 @@ test "Database.execute: CREATE persists across execute calls" {
     var er2 = try db.execute("SELECT 1");
     defer er2.deinit();
     try std.testing.expect(db.tables.contains("t"));
+}
+
+test "Database.execute: INSERT + SELECT * FROM t roundtrip with TEXT" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE t(x, y); INSERT INTO t VALUES (1, 'hello'); SELECT * FROM t");
+    defer er.deinit();
+    try std.testing.expectEqual(@as(usize, 3), er.statements.len);
+    try std.testing.expectEqual(@as(u64, 1), er.statements[1].insert.rowcount);
+    const rows = er.statements[2].select;
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(@as(i64, 1), rows[0][0].integer);
+    try std.testing.expectEqualStrings("hello", rows[0][1].text);
+}
+
+test "Database.execute: INSERT into nonexistent table → NoSuchTable" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(Error.NoSuchTable, db.execute("INSERT INTO nope VALUES (1)"));
+}
+
+test "Database.execute: INSERT arity mismatch → ColumnCountMismatch" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(Error.ColumnCountMismatch, db.execute("CREATE TABLE t(x); INSERT INTO t VALUES (1, 2)"));
 }
