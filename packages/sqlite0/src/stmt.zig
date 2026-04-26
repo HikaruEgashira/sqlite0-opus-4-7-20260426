@@ -54,21 +54,13 @@ pub const ParsedSelect = struct {
     offset: ?*ast.Expr = null,
 };
 
-/// Set-operator chained against the preceding SELECT. `union_distinct`
-/// applies dedup-replace-last; `union_all` is plain concatenation;
-/// `intersect` keeps left rows whose key appears in right (then dedup);
-/// `except` keeps left rows whose key does NOT appear in right (then dedup).
-pub const SetopKind = enum { union_all, union_distinct, intersect, except };
-
-pub const SetopBranch = struct {
-    kind: SetopKind,
-    /// Inner select. Always parsed via the same parseSelectStatement
-    /// machinery, but with a recursion guard (`allow_post = false`) that
-    /// rejects ORDER BY/LIMIT/OFFSET inside the branch — those bind to the
-    /// outer chain in sqlite3. As a result, `branches`, `order_by`, `limit`,
-    /// and `offset` on this struct are always empty.
-    select: ParsedSelect,
-};
+// Set-op types and the kind recogniser live in stmt_setop.zig (see Module
+// Splitting Rules). Re-exported so existing call sites that read
+// `stmt.SetopKind` / `stmt.SetopBranch` keep working.
+const stmt_setop = @import("stmt_setop.zig");
+pub const SetopKind = stmt_setop.SetopKind;
+pub const SetopBranch = stmt_setop.SetopBranch;
+pub const freeSetopBranches = stmt_setop.freeSetopBranches;
 
 pub const OrderDirection = enum { asc, desc };
 
@@ -198,12 +190,14 @@ fn parseSelectInner(p: *Parser, allow_post: bool) Error!ParsedSelect {
 
 /// Loop on UNION / UNION ALL / INTERSECT / EXCEPT and parse the trailing
 /// SELECT for each. Returns an empty slice when no setop keyword follows.
+/// Lives here (not in stmt_setop.zig) because each iteration recurses into
+/// the private `parseSelectInner`.
 fn parseSetopBranches(p: *Parser) Error![]SetopBranch {
     var list: std.ArrayList(SetopBranch) = .empty;
     errdefer freeSetopBranches(p.allocator, list.items);
     errdefer list.deinit(p.allocator);
 
-    while (matchSetopKind(p)) |kind| {
+    while (stmt_setop.matchSetopKind(p)) |kind| {
         const inner = try parseSelectInner(p, false);
         list.append(p.allocator, .{ .kind = kind, .select = inner }) catch |err| {
             freeParsedSelectFields(p.allocator, inner);
@@ -211,33 +205,6 @@ fn parseSetopBranches(p: *Parser) Error![]SetopBranch {
         };
     }
     return list.toOwnedSlice(p.allocator);
-}
-
-fn matchSetopKind(p: *Parser) ?SetopKind {
-    switch (p.cur.kind) {
-        .keyword_union => {
-            p.advance();
-            if (p.cur.kind == .keyword_all) {
-                p.advance();
-                return .union_all;
-            }
-            return .union_distinct;
-        },
-        .keyword_intersect => {
-            p.advance();
-            return .intersect;
-        },
-        .keyword_except => {
-            p.advance();
-            return .except;
-        },
-        else => return null,
-    }
-}
-
-pub fn freeSetopBranches(allocator: std.mem.Allocator, list: []SetopBranch) void {
-    for (list) |b| freeParsedSelectFields(allocator, b.select);
-    allocator.free(list);
 }
 
 /// Free the AST nodes inside a ParsedSelect. Used both by errdefer paths in
