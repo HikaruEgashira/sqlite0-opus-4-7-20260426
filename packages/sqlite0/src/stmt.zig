@@ -30,6 +30,21 @@ pub const ParsedSelect = struct {
     items: []select.SelectItem,
     from: ?ParsedFrom,
     where: ?*ast.Expr,
+    order_by: []OrderTerm = &.{},
+    limit: ?*ast.Expr = null,
+    offset: ?*ast.Expr = null,
+};
+
+pub const OrderDirection = enum { asc, desc };
+
+pub const OrderTerm = struct {
+    /// When `position` is non-null, the ORDER BY term is a 1-based column
+    /// position into the SELECT list (sqlite3 quirk: `ORDER BY 2` sorts by
+    /// the second projected column). When position is null, evaluate `expr`
+    /// against the source row.
+    expr: *ast.Expr,
+    position: ?usize = null,
+    dir: OrderDirection,
 };
 
 pub const ParsedFrom = union(enum) {
@@ -65,7 +80,85 @@ pub fn parseSelectStatement(p: *Parser) !ParsedSelect {
         where_ast = try p.parseExpr();
     }
 
-    return .{ .items = items, .from = from, .where = where_ast };
+    var order_by: []OrderTerm = &.{};
+    errdefer freeOrderTerms(p.allocator, order_by);
+    if (p.cur.kind == .keyword_order) {
+        order_by = try parseOrderBy(p);
+    }
+
+    var limit_ast: ?*ast.Expr = null;
+    errdefer if (limit_ast) |e| e.deinit(p.allocator);
+    var offset_ast: ?*ast.Expr = null;
+    errdefer if (offset_ast) |e| e.deinit(p.allocator);
+    if (p.cur.kind == .keyword_limit) {
+        p.advance();
+        limit_ast = try p.parseExpr();
+        // sqlite3 quirk: `LIMIT a, b` means "skip a, take b" — the comma
+        // form flips arg order. The lhs (already parsed into limit_ast) is
+        // actually the offset; the rhs is the row count.
+        if (p.cur.kind == .comma) {
+            p.advance();
+            offset_ast = limit_ast;
+            limit_ast = try p.parseExpr();
+        } else if (p.cur.kind == .keyword_offset) {
+            p.advance();
+            offset_ast = try p.parseExpr();
+        }
+    }
+
+    return .{
+        .items = items,
+        .from = from,
+        .where = where_ast,
+        .order_by = order_by,
+        .limit = limit_ast,
+        .offset = offset_ast,
+    };
+}
+
+fn parseOrderBy(p: *Parser) ![]OrderTerm {
+    try p.expect(.keyword_order);
+    try p.expect(.keyword_by);
+    var terms: std.ArrayList(OrderTerm) = .empty;
+    errdefer freeOrderTerms(p.allocator, terms.items);
+    errdefer terms.deinit(p.allocator);
+    try parseOrderTerm(p, &terms);
+    while (p.cur.kind == .comma) {
+        p.advance();
+        try parseOrderTerm(p, &terms);
+    }
+    return terms.toOwnedSlice(p.allocator);
+}
+
+fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
+    const expr = try p.parseExpr();
+    // sqlite3 quirk: a bare integer literal in ORDER BY refers to the
+    // SELECT-list column position (1-based), not its evaluated value. Detect
+    // that case here so the engine can look up `projected_row[N-1]` at sort
+    // time. Any non-literal expression (including `1+0`) keeps expression
+    // semantics — sqlite3 also distinguishes "literal vs. expression".
+    var position: ?usize = null;
+    if (expr.* == .literal) {
+        switch (expr.*.literal) {
+            .integer => |n| if (n > 0) {
+                position = @intCast(n);
+            },
+            else => {},
+        }
+    }
+    var dir: OrderDirection = .asc;
+    if (p.cur.kind == .keyword_asc) {
+        p.advance();
+    } else if (p.cur.kind == .keyword_desc) {
+        dir = .desc;
+        p.advance();
+    }
+    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir });
+}
+
+pub fn freeOrderTerms(allocator: std.mem.Allocator, terms: []OrderTerm) void {
+    for (terms) |t| t.expr.deinit(allocator);
+    allocator.free(terms);
 }
 
 /// Free arena-owned content of a `ParsedFrom`. Safe to call on either variant

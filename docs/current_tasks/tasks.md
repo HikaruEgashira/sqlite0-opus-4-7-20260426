@@ -12,10 +12,16 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 
-### Phase 1 残タスク (Phase 2 と並行可)
-- [ ] Iter9.A: `random()` (引数なし、64bit 整数)
-- [ ] Iter9.B: `printf(fmt, ...)` / `format(fmt, ...)`  (sprintf 互換)
-- [ ] Iter9.C: `strftime(fmt, time, ...)` (時刻書式化、Phase 1 の最後)
+### Phase 2 拡張 (実用 SQL の縦串)
+- [ ] Iter15: `ORDER BY <expr> [ASC|DESC]` + `LIMIT N [OFFSET M]`
+- [ ] Iter16: `DISTINCT`
+- [ ] Iter17: 集約関数 (count, sum, min, max, avg) + `GROUP BY` / `HAVING`
+- [ ] Iter18: `DELETE FROM t [WHERE ...]` / `UPDATE t SET col = expr [WHERE ...]`
+
+### Phase 1 既知の取り残し (低優先)
+- [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
+- [ ] strftime の `'+N days'` 等の date math modifier
+- [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
 
 ## Backlog (Phase 3以降)
 

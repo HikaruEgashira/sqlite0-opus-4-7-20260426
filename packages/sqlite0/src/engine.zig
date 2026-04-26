@@ -66,15 +66,33 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
 /// SELECT ...`, in which case the rows are deep-duped into the target table
 /// rather than the long-lived ExecResult.
 pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
+    const pp = postProcessFromParsed(alloc, ps) catch |err| return err;
+    defer alloc.free(pp.order_by);
     if (ps.from) |from| switch (from) {
-        .inline_values => |iv| return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where),
+        .inline_values => |iv| return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where, pp),
         .table_ref => |name| {
             const t = try lookupTable(db, alloc, name);
-            return select_mod.executeWithFrom(alloc, ps.items, t.rows.items, t.columns, ps.where);
+            return select_mod.executeWithFrom(alloc, ps.items, t.rows.items, t.columns, ps.where, pp);
         },
     };
     if (select_mod.containsStar(ps.items)) return Error.SyntaxError;
-    return select_mod.executeWithoutFrom(alloc, ps.items, ps.where);
+    return select_mod.executeWithoutFrom(alloc, ps.items, ps.where, pp);
+}
+
+/// Translate stmt-level OrderTerm/limit/offset into the select-module's
+/// `PostProcess` shape. The translated `order_by` slice is allocated in
+/// `alloc` (per-statement arena) — the original AST nodes are still owned
+/// by `ps`.
+fn postProcessFromParsed(alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) !select_mod.PostProcess {
+    const order = try alloc.alloc(select_mod.OrderTerm, ps.order_by.len);
+    for (ps.order_by, order) |term, *out| {
+        out.* = .{
+            .expr = term.expr,
+            .position = term.position,
+            .descending = term.dir == .desc,
+        };
+    }
+    return .{ .order_by = order, .limit = ps.limit, .offset = ps.offset };
 }
 
 /// Append rows from a parsed INSERT into the target table. Source rows come
