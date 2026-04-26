@@ -21,6 +21,11 @@ pub const TokenKind = enum {
     keyword_between,
     keyword_in,
     keyword_distinct,
+    keyword_case,
+    keyword_when,
+    keyword_then,
+    keyword_else,
+    keyword_end,
     plus,
     minus,
     star,
@@ -223,6 +228,11 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "between")) return .keyword_between;
     if (eqlIgnoreCase(text, "in")) return .keyword_in;
     if (eqlIgnoreCase(text, "distinct")) return .keyword_distinct;
+    if (eqlIgnoreCase(text, "case")) return .keyword_case;
+    if (eqlIgnoreCase(text, "when")) return .keyword_when;
+    if (eqlIgnoreCase(text, "then")) return .keyword_then;
+    if (eqlIgnoreCase(text, "else")) return .keyword_else;
+    if (eqlIgnoreCase(text, "end")) return .keyword_end;
     return null;
 }
 
