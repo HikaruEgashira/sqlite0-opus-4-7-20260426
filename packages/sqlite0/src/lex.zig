@@ -14,6 +14,10 @@ pub const TokenKind = enum {
     keyword_null,
     keyword_true,
     keyword_false,
+    keyword_and,
+    keyword_or,
+    keyword_not,
+    keyword_is,
     plus,
     minus,
     star,
@@ -209,6 +213,10 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "null")) return .keyword_null;
     if (eqlIgnoreCase(text, "true")) return .keyword_true;
     if (eqlIgnoreCase(text, "false")) return .keyword_false;
+    if (eqlIgnoreCase(text, "and")) return .keyword_and;
+    if (eqlIgnoreCase(text, "or")) return .keyword_or;
+    if (eqlIgnoreCase(text, "not")) return .keyword_not;
+    if (eqlIgnoreCase(text, "is")) return .keyword_is;
     return null;
 }
 

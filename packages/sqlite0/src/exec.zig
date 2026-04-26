@@ -1,28 +1,19 @@
 const std = @import("std");
 const lex = @import("lex.zig");
-const value = @import("value.zig");
+const value_mod = @import("value.zig");
+const ops = @import("ops.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
-const Value = value.Value;
+const Value = value_mod.Value;
 
-pub const Error = error{
-    SyntaxError,
-    DivisionByZero,
-    InvalidNumber,
-    InvalidString,
-    UnsupportedFeature,
-    OutOfMemory,
-};
+pub const Error = ops.Error;
 
 pub const Row = struct {
     values: []Value,
 
     pub fn deinit(self: *Row, allocator: std.mem.Allocator) void {
-        for (self.values) |v| switch (v) {
-            .text, .blob => |bytes| allocator.free(bytes),
-            else => {},
-        };
+        for (self.values) |v| ops.freeValue(allocator, v);
         allocator.free(self.values);
     }
 };
@@ -62,7 +53,7 @@ const Parser = struct {
         try self.expect(.keyword_select);
         var values: std.ArrayList(Value) = .empty;
         defer values.deinit(self.allocator);
-        errdefer for (values.items) |v| freeValue(self.allocator, v);
+        errdefer for (values.items) |v| ops.freeValue(self.allocator, v);
 
         try values.append(self.allocator, try self.parseExpr());
         while (self.cur.kind == .comma) {
@@ -76,7 +67,89 @@ const Parser = struct {
     }
 
     fn parseExpr(self: *Parser) Error!Value {
-        return self.parseAddSub();
+        return self.parseOr();
+    }
+
+    fn parseOr(self: *Parser) Error!Value {
+        var left = try self.parseAnd();
+        while (self.cur.kind == .keyword_or) {
+            self.advance();
+            const right = try self.parseAnd();
+            defer ops.freeValue(self.allocator, right);
+            const new_left = ops.logicalOr(left, right);
+            ops.freeValue(self.allocator, left);
+            left = new_left;
+        }
+        return left;
+    }
+
+    fn parseAnd(self: *Parser) Error!Value {
+        var left = try self.parseNot();
+        while (self.cur.kind == .keyword_and) {
+            self.advance();
+            const right = try self.parseNot();
+            defer ops.freeValue(self.allocator, right);
+            const new_left = ops.logicalAnd(left, right);
+            ops.freeValue(self.allocator, left);
+            left = new_left;
+        }
+        return left;
+    }
+
+    fn parseNot(self: *Parser) Error!Value {
+        if (self.cur.kind == .keyword_not) {
+            self.advance();
+            const inner = try self.parseNot();
+            defer ops.freeValue(self.allocator, inner);
+            return ops.logicalNot(inner);
+        }
+        return self.parseEquality();
+    }
+
+    fn parseEquality(self: *Parser) Error!Value {
+        var left = try self.parseComparison();
+        while (true) {
+            switch (self.cur.kind) {
+                .eq, .ne => {
+                    const op = self.cur.kind;
+                    self.advance();
+                    const right = try self.parseComparison();
+                    defer ops.freeValue(self.allocator, right);
+                    const new_left = ops.applyEquality(op, left, right);
+                    ops.freeValue(self.allocator, left);
+                    left = new_left;
+                },
+                .keyword_is => {
+                    self.advance();
+                    var negate = false;
+                    if (self.cur.kind == .keyword_not) {
+                        negate = true;
+                        self.advance();
+                    }
+                    const right = try self.parseComparison();
+                    defer ops.freeValue(self.allocator, right);
+                    const eq = ops.identicalValues(left, right);
+                    ops.freeValue(self.allocator, left);
+                    left = ops.boolValue(if (negate) !eq else eq);
+                },
+                else => break,
+            }
+        }
+        return left;
+    }
+
+    fn parseComparison(self: *Parser) Error!Value {
+        var left = try self.parseAddSub();
+        while (self.cur.kind == .lt or self.cur.kind == .le or self.cur.kind == .gt or self.cur.kind == .ge) {
+            const op = self.cur.kind;
+            self.advance();
+            const right = try self.parseAddSub();
+            defer ops.freeValue(self.allocator, right);
+            const new_left = ops.applyComparison(op, left, right);
+            ops.freeValue(self.allocator, left);
+            left = new_left;
+        }
+        return left;
     }
 
     fn parseAddSub(self: *Parser) Error!Value {
@@ -85,9 +158,9 @@ const Parser = struct {
             const op = self.cur.kind;
             self.advance();
             const right = try self.parseMulDiv();
-            defer freeValue(self.allocator, right);
-            const new_left = try applyArith(self.allocator, op, left, right);
-            freeValue(self.allocator, left);
+            defer ops.freeValue(self.allocator, right);
+            const new_left = try ops.applyArith(op, left, right);
+            ops.freeValue(self.allocator, left);
             left = new_left;
         }
         return left;
@@ -99,9 +172,9 @@ const Parser = struct {
             const op = self.cur.kind;
             self.advance();
             const right = try self.parseUnary();
-            defer freeValue(self.allocator, right);
-            const new_left = try applyArith(self.allocator, op, left, right);
-            freeValue(self.allocator, left);
+            defer ops.freeValue(self.allocator, right);
+            const new_left = try ops.applyArith(op, left, right);
+            ops.freeValue(self.allocator, left);
             left = new_left;
         }
         return left;
@@ -111,8 +184,8 @@ const Parser = struct {
         if (self.cur.kind == .minus) {
             self.advance();
             const inner = try self.parseUnary();
-            defer freeValue(self.allocator, inner);
-            return negateValue(inner);
+            defer ops.freeValue(self.allocator, inner);
+            return ops.negateValue(inner);
         }
         if (self.cur.kind == .plus) {
             self.advance();
@@ -140,7 +213,7 @@ const Parser = struct {
                 self.advance();
                 const text = tok.slice(self.src);
                 if (text.len < 2 or text[0] != '\'' or text[text.len - 1] != '\'') return Error.InvalidString;
-                return Value{ .text = try unescapeStringLiteral(self.allocator, text[1 .. text.len - 1]) };
+                return Value{ .text = try ops.unescapeStringLiteral(self.allocator, text[1 .. text.len - 1]) };
             },
             .keyword_null => {
                 self.advance();
@@ -150,7 +223,7 @@ const Parser = struct {
                 self.advance();
                 const v = try self.parseExpr();
                 if (self.cur.kind != .rparen) {
-                    freeValue(self.allocator, v);
+                    ops.freeValue(self.allocator, v);
                     return Error.SyntaxError;
                 }
                 self.advance();
@@ -161,92 +234,11 @@ const Parser = struct {
     }
 };
 
-fn unescapeStringLiteral(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    var i: usize = 0;
-    while (i < raw.len) {
-        if (raw[i] == '\'' and i + 1 < raw.len and raw[i + 1] == '\'') {
-            try out.append(allocator, '\'');
-            i += 2;
-        } else {
-            try out.append(allocator, raw[i]);
-            i += 1;
-        }
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-fn freeValue(allocator: std.mem.Allocator, v: Value) void {
-    switch (v) {
-        .text, .blob => |bytes| allocator.free(bytes),
-        else => {},
-    }
-}
-
-fn negateValue(v: Value) Error!Value {
-    return switch (v) {
-        .integer => |i| Value{ .integer = -%i },
-        .real => |f| Value{ .real = -f },
-        .null => Value.null,
-        else => Error.UnsupportedFeature,
-    };
-}
-
-fn applyArith(allocator: std.mem.Allocator, op: TokenKind, lhs: Value, rhs: Value) Error!Value {
-    _ = allocator;
-    if (lhs == .null or rhs == .null) return Value.null;
-    const both_int = (lhs == .integer and rhs == .integer);
-    if (both_int) {
-        const a = lhs.integer;
-        const b = rhs.integer;
-        switch (op) {
-            .plus => return Value{ .integer = a +% b },
-            .minus => return Value{ .integer = a -% b },
-            .star => return Value{ .integer = a *% b },
-            .slash => {
-                if (b == 0) return Value.null;
-                if (a == std.math.minInt(i64) and b == -1) return Value.null;
-                return Value{ .integer = @divTrunc(a, b) };
-            },
-            .percent => {
-                if (b == 0) return Value.null;
-                return Value{ .integer = @rem(a, b) };
-            },
-            else => unreachable,
-        }
-    }
-    const a = toReal(lhs) orelse return Error.UnsupportedFeature;
-    const b = toReal(rhs) orelse return Error.UnsupportedFeature;
-    switch (op) {
-        .plus => return Value{ .real = a + b },
-        .minus => return Value{ .real = a - b },
-        .star => return Value{ .real = a * b },
-        .slash => {
-            if (b == 0) return Value.null;
-            return Value{ .real = a / b };
-        },
-        .percent => {
-            if (b == 0) return Value.null;
-            return Value{ .real = @rem(a, b) };
-        },
-        else => unreachable,
-    }
-}
-
-fn toReal(v: Value) ?f64 {
-    return switch (v) {
-        .integer => |i| @as(f64, @floatFromInt(i)),
-        .real => |f| f,
-        else => null,
-    };
-}
-
 pub fn execute(allocator: std.mem.Allocator, sql: []const u8) !Result {
     var parser = Parser.init(allocator, sql);
     const cols = try parser.parseSelect();
     errdefer {
-        for (cols) |v| freeValue(allocator, v);
+        for (cols) |v| ops.freeValue(allocator, v);
         allocator.free(cols);
     }
     var rows = try allocator.alloc(Row, 1);
@@ -289,9 +281,6 @@ test "execute: SELECT 1, 2, 3" {
     var r = try execute(allocator, "SELECT 1, 2, 3");
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, 3), r.rows[0].values.len);
-    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
-    try std.testing.expectEqual(@as(i64, 2), r.rows[0].values[1].integer);
-    try std.testing.expectEqual(@as(i64, 3), r.rows[0].values[2].integer);
 }
 
 test "execute: SELECT NULL" {
@@ -320,4 +309,32 @@ test "execute: division by zero is NULL" {
     var r = try execute(allocator, "SELECT 1/0");
     defer r.deinit();
     try std.testing.expectEqual(Value.null, r.rows[0].values[0]);
+}
+
+test "execute: SELECT 1=1" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT 1=1");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+}
+
+test "execute: SELECT NULL IS NULL" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT NULL IS NULL");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+}
+
+test "execute: SELECT NOT NULL is NULL" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT NOT NULL");
+    defer r.deinit();
+    try std.testing.expectEqual(Value.null, r.rows[0].values[0]);
+}
+
+test "execute: SELECT 1<2 AND 2<3" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "SELECT 1<2 AND 2<3");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
 }

@@ -9,10 +9,12 @@
 ### 完了
 - [x] Iter1: `SELECT <int>`, 算術演算, `NULL`, 文字列リテラル
 - [x] Iter1.5: SQLite互換 `%g` float formatting (15 sig digits, scientific境界 `[-4, 14]`)
+- [x] Iter2: 比較・論理演算 (`=`, `!=`, `<>`, `<`, `<=`, `>`, `>=`, `AND`, `OR`, `NOT`, `IS [NOT]`)
 - [x] ADR-0001: nostd解釈・Zig 0.16.0採用
+- [x] `ops.zig` 抽出 (型変換・算術・比較ヘルパーを `exec.zig` から分離)
 
 ### 次の縦スライス
-- [ ] Iter2: 比較・論理演算 (`=`, `<>`, `<`, `>`, `AND`, `OR`, `NOT`, `IS NULL`)
+- [ ] Iter3: `CASE WHEN ... THEN ... ELSE ... END`, `BETWEEN`, `IN (...)`, `IS [NOT] DISTINCT FROM`
 - [ ] Iter3: CASE式 / IS NULL / BETWEEN / IN
 - [ ] Iter4: 文字列関数 `length()`, `substr()`, `lower()`, `upper()`, `||` 連結
 - [ ] Iter5: 数値関数 `abs()`, `round()`, `min()`, `max()`
