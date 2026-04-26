@@ -2,7 +2,6 @@ const std = @import("std");
 const lex = @import("lex.zig");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
-const funcs = @import("funcs.zig");
 const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 
@@ -11,11 +10,10 @@ const TokenKind = lex.TokenKind;
 const Value = value_mod.Value;
 const Error = ops.Error;
 
-/// Recursive-descent SQL expression parser. ADR-0002 Iter8.A/B migrates the
-/// bottom of the precedence stack (parsePrimary, parseUnary, parseConcat,
-/// parseMulDiv, parseAddSub, parseComparison) to return `*ast.Expr`. The
-/// remaining levels (parseEquality and above) still return `Value` and use
-/// `eval.evalExpr` as a shim until Iter8.C completes the migration.
+/// Recursive-descent SQL expression parser. Per ADR-0002 (Iter8.A → C) the
+/// entire expression grammar is now AST-driven: every `parse*` method
+/// returns `*ast.Expr`. The previous eager-evaluation paths are gone, and
+/// `eval.evalExpr` is the sole consumer that lowers an AST to a `Value`.
 /// Statement-level dispatch lives in `stmt.zig`.
 pub const Parser = struct {
     src: []const u8,
@@ -53,58 +51,55 @@ pub const Parser = struct {
         self.advance();
     }
 
-    pub fn parseExpr(self: *Parser) Error!Value {
+    pub fn parseExpr(self: *Parser) Error!*ast.Expr {
         return self.parseOr();
     }
 
-    fn parseOr(self: *Parser) Error!Value {
+    fn parseOr(self: *Parser) Error!*ast.Expr {
         var left = try self.parseAnd();
+        errdefer left.deinit(self.allocator);
         while (self.cur.kind == .keyword_or) {
             self.advance();
             const right = try self.parseAnd();
-            defer ops.freeValue(self.allocator, right);
-            const new_left = ops.logicalOr(left, right);
-            ops.freeValue(self.allocator, left);
-            left = new_left;
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeLogicalOr(self.allocator, left, right);
         }
         return left;
     }
 
-    fn parseAnd(self: *Parser) Error!Value {
+    fn parseAnd(self: *Parser) Error!*ast.Expr {
         var left = try self.parseNot();
+        errdefer left.deinit(self.allocator);
         while (self.cur.kind == .keyword_and) {
             self.advance();
             const right = try self.parseNot();
-            defer ops.freeValue(self.allocator, right);
-            const new_left = ops.logicalAnd(left, right);
-            ops.freeValue(self.allocator, left);
-            left = new_left;
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeLogicalAnd(self.allocator, left, right);
         }
         return left;
     }
 
-    fn parseNot(self: *Parser) Error!Value {
+    fn parseNot(self: *Parser) Error!*ast.Expr {
         if (self.cur.kind == .keyword_not) {
             self.advance();
             const inner = try self.parseNot();
-            defer ops.freeValue(self.allocator, inner);
-            return ops.logicalNot(inner);
+            errdefer inner.deinit(self.allocator);
+            return ast.makeLogicalNot(self.allocator, inner);
         }
         return self.parseEquality();
     }
 
-    fn parseEquality(self: *Parser) Error!Value {
-        var left = try self.parseComparisonAsValue();
+    fn parseEquality(self: *Parser) Error!*ast.Expr {
+        var left = try self.parseComparison();
+        errdefer left.deinit(self.allocator);
         while (true) {
             switch (self.cur.kind) {
                 .eq, .ne => {
-                    const op = self.cur.kind;
+                    const op: ast.EqOp = if (self.cur.kind == .eq) .eq else .ne;
                     self.advance();
-                    const right = try self.parseComparisonAsValue();
-                    defer ops.freeValue(self.allocator, right);
-                    const new_left = ops.applyEquality(op, left, right);
-                    ops.freeValue(self.allocator, left);
-                    left = new_left;
+                    const right = try self.parseComparison();
+                    errdefer right.deinit(self.allocator);
+                    left = try ast.makeEqCheck(self.allocator, op, left, right);
                 },
                 .keyword_is => {
                     self.advance();
@@ -119,12 +114,10 @@ pub const Parser = struct {
                         try self.expect(.keyword_from);
                         has_distinct = true;
                     }
-                    const right = try self.parseComparisonAsValue();
-                    defer ops.freeValue(self.allocator, right);
-                    const eq = ops.identicalValues(left, right);
-                    ops.freeValue(self.allocator, left);
-                    const negate = has_not != has_distinct; // XOR
-                    left = ops.boolValue(if (negate) !eq else eq);
+                    const right = try self.parseComparison();
+                    errdefer right.deinit(self.allocator);
+                    const negated = has_not != has_distinct;
+                    left = try ast.makeIsCheck(self.allocator, left, right, negated);
                 },
                 .keyword_between => {
                     self.advance();
@@ -154,50 +147,44 @@ pub const Parser = struct {
         return left;
     }
 
-    fn parseBetween(self: *Parser, left: Value, negate: bool) Error!Value {
-        const lo = try self.parseComparisonAsValue();
-        defer ops.freeValue(self.allocator, lo);
+    /// `value BETWEEN lo AND hi` — takes ownership of `value` and frees it
+    /// on any error before returning.
+    fn parseBetween(self: *Parser, value: *ast.Expr, negated: bool) Error!*ast.Expr {
+        errdefer value.deinit(self.allocator);
+        const lo = try self.parseComparison();
+        errdefer lo.deinit(self.allocator);
         try self.expect(.keyword_and);
-        const hi = try self.parseComparisonAsValue();
-        defer ops.freeValue(self.allocator, hi);
-
-        const ge = ops.applyComparison(.ge, left, lo);
-        const le = ops.applyComparison(.le, left, hi);
-        ops.freeValue(self.allocator, left);
-        const conj = ops.logicalAnd(ge, le);
-        if (negate) return ops.logicalNot(conj);
-        return conj;
+        const hi = try self.parseComparison();
+        errdefer hi.deinit(self.allocator);
+        return ast.makeBetween(self.allocator, value, lo, hi, negated);
     }
 
-    fn parseInList(self: *Parser, left: Value, negate: bool) Error!Value {
+    /// `value IN (e1, e2, ...)` — takes ownership of `value` and frees it
+    /// on any error before returning.
+    fn parseInList(self: *Parser, value: *ast.Expr, negated: bool) Error!*ast.Expr {
+        errdefer value.deinit(self.allocator);
         try self.expect(.lparen);
-        var items: std.ArrayList(Value) = .empty;
-        defer {
-            for (items.items) |v| ops.freeValue(self.allocator, v);
+        var items: std.ArrayList(*ast.Expr) = .empty;
+        errdefer {
+            for (items.items) |it| it.deinit(self.allocator);
             items.deinit(self.allocator);
         }
         if (self.cur.kind != .rparen) {
-            try items.append(self.allocator, try self.parseExpr());
+            try items.ensureUnusedCapacity(self.allocator, 1);
+            items.appendAssumeCapacity(try self.parseExpr());
             while (self.cur.kind == .comma) {
                 self.advance();
-                try items.append(self.allocator, try self.parseExpr());
+                try items.ensureUnusedCapacity(self.allocator, 1);
+                items.appendAssumeCapacity(try self.parseExpr());
             }
         }
         try self.expect(.rparen);
-
-        defer ops.freeValue(self.allocator, left);
-        const result = ops.applyIn(left, items.items);
-        if (negate) return ops.logicalNot(result);
-        return result;
-    }
-
-    /// Iter8.B migration shim — drives the AST-returning `parseComparison`
-    /// and lowers it back to a `Value` for `parseEquality`. Removed in
-    /// Iter8.C once `parseEquality` itself returns `*ast.Expr`.
-    fn parseComparisonAsValue(self: *Parser) Error!Value {
-        const expr = try self.parseComparison();
-        defer expr.deinit(self.allocator);
-        return eval.evalExpr(.{ .allocator = self.allocator }, expr);
+        const items_slice = try items.toOwnedSlice(self.allocator);
+        return ast.makeInList(self.allocator, value, items_slice, negated) catch |err| {
+            for (items_slice) |it| it.deinit(self.allocator);
+            self.allocator.free(items_slice);
+            return err;
+        };
     }
 
     fn parseComparison(self: *Parser) Error!*ast.Expr {
@@ -310,56 +297,45 @@ pub const Parser = struct {
             },
             .lparen => {
                 self.advance();
-                const v = try self.parseExpr();
-                if (self.cur.kind != .rparen) {
-                    ops.freeValue(self.allocator, v);
-                    return Error.SyntaxError;
-                }
-                self.advance();
-                return ast.makeLiteral(self.allocator, v) catch |err| {
-                    ops.freeValue(self.allocator, v);
-                    return err;
-                };
+                const inner = try self.parseExpr();
+                errdefer inner.deinit(self.allocator);
+                try self.expect(.rparen);
+                return inner;
             },
-            .identifier => {
-                const v = try self.parseFunctionCall();
-                return ast.makeLiteral(self.allocator, v) catch |err| {
-                    ops.freeValue(self.allocator, v);
-                    return err;
-                };
-            },
-            .keyword_case => {
-                const v = try self.parseCase();
-                return ast.makeLiteral(self.allocator, v) catch |err| {
-                    ops.freeValue(self.allocator, v);
-                    return err;
-                };
-            },
+            .identifier => return self.parseFunctionCall(),
+            .keyword_case => return self.parseCase(),
             else => return Error.SyntaxError,
         }
     }
 
-    fn parseFunctionCall(self: *Parser) Error!Value {
+    fn parseFunctionCall(self: *Parser) Error!*ast.Expr {
         const name_tok = self.cur;
         const name = name_tok.slice(self.src);
         self.advance();
         if (self.cur.kind != .lparen) return Error.SyntaxError;
         self.advance();
 
-        var args: std.ArrayList(Value) = .empty;
-        defer {
-            for (args.items) |a| ops.freeValue(self.allocator, a);
+        var args: std.ArrayList(*ast.Expr) = .empty;
+        errdefer {
+            for (args.items) |a| a.deinit(self.allocator);
             args.deinit(self.allocator);
         }
         if (self.cur.kind != .rparen) {
-            try args.append(self.allocator, try self.parseExpr());
+            try args.ensureUnusedCapacity(self.allocator, 1);
+            args.appendAssumeCapacity(try self.parseExpr());
             while (self.cur.kind == .comma) {
                 self.advance();
-                try args.append(self.allocator, try self.parseExpr());
+                try args.ensureUnusedCapacity(self.allocator, 1);
+                args.appendAssumeCapacity(try self.parseExpr());
             }
         }
         try self.expect(.rparen);
-        return try funcs.call(self.allocator, name, args.items);
+        const args_slice = try args.toOwnedSlice(self.allocator);
+        return ast.makeFuncCall(self.allocator, name, args_slice) catch |err| {
+            for (args_slice) |a| a.deinit(self.allocator);
+            self.allocator.free(args_slice);
+            return err;
+        };
     }
 
     /// SQL CASE expression. Two forms:
@@ -369,79 +345,72 @@ pub const Parser = struct {
     ///   searched: CASE WHEN c1 THEN r1 ... [ELSE rd] END
     ///             — first WHEN whose condition is truthy wins
     /// Returns NULL when no WHEN matches and no ELSE is provided.
-    fn parseCase(self: *Parser) Error!Value {
-        self.advance();
-        var subject_opt: ?Value = null;
-        defer if (subject_opt) |s| ops.freeValue(self.allocator, s);
+    fn parseCase(self: *Parser) Error!*ast.Expr {
+        self.advance(); // consume CASE
+
+        var scrutinee: ?*ast.Expr = null;
+        errdefer if (scrutinee) |s| s.deinit(self.allocator);
 
         if (self.cur.kind != .keyword_when) {
-            subject_opt = try self.parseExpr();
+            scrutinee = try self.parseExpr();
         }
 
-        var result: ?Value = null;
-        errdefer if (result) |r| ops.freeValue(self.allocator, r);
-        var matched = false;
+        var branches: std.ArrayList(ast.Expr.CaseBranch) = .empty;
+        errdefer {
+            for (branches.items) |b| {
+                b.when.deinit(self.allocator);
+                b.then.deinit(self.allocator);
+            }
+            branches.deinit(self.allocator);
+        }
 
         if (self.cur.kind != .keyword_when) return Error.SyntaxError;
 
         while (self.cur.kind == .keyword_when) {
             self.advance();
-            const cond = try self.parseExpr();
+            const when = try self.parseExpr();
+            errdefer when.deinit(self.allocator);
             try self.expect(.keyword_then);
-            const branch_val = try self.parseExpr();
-
-            if (matched) {
-                ops.freeValue(self.allocator, cond);
-                ops.freeValue(self.allocator, branch_val);
-                continue;
-            }
-
-            const is_match = blk: {
-                if (subject_opt) |s| {
-                    const eq = ops.applyEquality(.eq, s, cond);
-                    ops.freeValue(self.allocator, cond);
-                    break :blk ops.truthy(eq) orelse false;
-                }
-                const t = ops.truthy(cond) orelse false;
-                ops.freeValue(self.allocator, cond);
-                break :blk t;
-            };
-
-            if (is_match) {
-                result = branch_val;
-                matched = true;
-            } else {
-                ops.freeValue(self.allocator, branch_val);
-            }
+            const then_expr = try self.parseExpr();
+            errdefer then_expr.deinit(self.allocator);
+            try branches.ensureUnusedCapacity(self.allocator, 1);
+            branches.appendAssumeCapacity(.{ .when = when, .then = then_expr });
         }
 
+        var else_branch: ?*ast.Expr = null;
+        errdefer if (else_branch) |eb| eb.deinit(self.allocator);
         if (self.cur.kind == .keyword_else) {
             self.advance();
-            const else_val = try self.parseExpr();
-            if (!matched) {
-                result = else_val;
-                matched = true;
-            } else {
-                ops.freeValue(self.allocator, else_val);
-            }
+            else_branch = try self.parseExpr();
         }
-
         try self.expect(.keyword_end);
 
-        return result orelse Value.null;
+        const branches_slice = try branches.toOwnedSlice(self.allocator);
+        return ast.makeCaseExpr(self.allocator, scrutinee, branches_slice, else_branch) catch |err| {
+            for (branches_slice) |b| {
+                b.when.deinit(self.allocator);
+                b.then.deinit(self.allocator);
+            }
+            self.allocator.free(branches_slice);
+            return err;
+        };
     }
 };
 
 test "Parser: parseExpr literal" {
     const allocator = std.testing.allocator;
     var p = Parser.init(allocator, "42");
-    const v = try p.parseExpr();
+    const expr = try p.parseExpr();
+    defer expr.deinit(allocator);
+    const v = try eval.evalExpr(.{ .allocator = allocator }, expr);
     try std.testing.expectEqual(@as(i64, 42), v.integer);
 }
 
 test "Parser: parseExpr arithmetic" {
     const allocator = std.testing.allocator;
     var p = Parser.init(allocator, "1+2*3");
-    const v = try p.parseExpr();
+    const expr = try p.parseExpr();
+    defer expr.deinit(allocator);
+    const v = try eval.evalExpr(.{ .allocator = allocator }, expr);
     try std.testing.expectEqual(@as(i64, 7), v.integer);
 }

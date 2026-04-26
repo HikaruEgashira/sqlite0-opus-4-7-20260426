@@ -1,10 +1,14 @@
 //! Top-level statement dispatch (`SELECT`, `VALUES`). Calls into the Parser
-//! defined in `parser.zig` for expression-level work.
+//! defined in `parser.zig` to build the expression AST, then `eval.evalExpr`
+//! lowers each AST to a row of `Value`. Per ADR-0002 Iter8.C, this is the
+//! consumer-side boundary that turns `*ast.Expr` back into the `[][]Value`
+//! interface `exec.zig` expects.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const parser_mod = @import("parser.zig");
+const eval = @import("eval.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -116,12 +120,26 @@ fn parseExpressionList(p: *Parser) ![]Value {
     defer values.deinit(p.allocator);
     errdefer for (values.items) |v| ops.freeValue(p.allocator, v);
 
-    try values.append(p.allocator, try p.parseExpr());
+    try appendOneEvaluated(p, &values);
     while (p.cur.kind == .comma) {
         p.advance();
-        try values.append(p.allocator, try p.parseExpr());
+        try appendOneEvaluated(p, &values);
     }
     return values.toOwnedSlice(p.allocator);
+}
+
+/// Parse one expression, evaluate it against an empty row context, and
+/// push the resulting `Value` onto `values`. The AST is freed before
+/// return; allocation failure on `append` releases the just-evaluated
+/// `Value` instead of leaking it.
+fn appendOneEvaluated(p: *Parser, values: *std.ArrayList(Value)) Error!void {
+    const expr = try p.parseExpr();
+    defer expr.deinit(p.allocator);
+    const v = try eval.evalExpr(.{ .allocator = p.allocator }, expr);
+    values.append(p.allocator, v) catch |err| {
+        ops.freeValue(p.allocator, v);
+        return err;
+    };
 }
 
 test "stmt: SELECT 1 returns one row" {

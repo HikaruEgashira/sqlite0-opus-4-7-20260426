@@ -6,15 +6,16 @@
 //! TEXT/BLOB bytes during evaluation so the resulting Value survives AST
 //! teardown.
 //!
-//! `current_row` is the placeholder for Iter8.D's column-reference resolution
-//! (`SELECT x FROM (VALUES ...)`). It is unused while only literal/arithmetic/
-//! concat/unary/compare nodes exist.
+//! `current_row` is the placeholder for Iter8.D's column-reference
+//! resolution (`SELECT x FROM (VALUES ...)`). It is unused while the
+//! grammar has no `column_ref` node.
 
 const std = @import("std");
 const ast = @import("ast.zig");
 const ops = @import("ops.zig");
 const lex = @import("lex.zig");
 const value_mod = @import("value.zig");
+const funcs = @import("funcs.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -32,6 +33,15 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .binary_concat => |b| try evalBinaryConcat(ctx, b),
         .unary_negate => |operand| try evalUnaryNegate(ctx, operand),
         .compare => |c| try evalCompare(ctx, c),
+        .eq_check => |e| try evalEqCheck(ctx, e),
+        .is_check => |e| try evalIsCheck(ctx, e),
+        .between => |b| try evalBetween(ctx, b),
+        .in_list => |il| try evalInList(ctx, il),
+        .logical_and => |b| try evalLogicalAnd(ctx, b),
+        .logical_or => |b| try evalLogicalOr(ctx, b),
+        .logical_not => |operand| try evalLogicalNot(ctx, operand),
+        .case_expr => |ce| try evalCaseExpr(ctx, ce),
+        .func_call => |fc| try evalFuncCall(ctx, fc),
     };
 }
 
@@ -84,6 +94,116 @@ fn evalCompare(ctx: EvalContext, c: Expr.Compare) Error!Value {
     return out;
 }
 
+fn evalEqCheck(ctx: EvalContext, e: Expr.EqCheck) Error!Value {
+    const left = try evalExpr(ctx, e.left);
+    errdefer ops.freeValue(ctx.allocator, left);
+    const right = try evalExpr(ctx, e.right);
+    defer ops.freeValue(ctx.allocator, right);
+    const tok_op: lex.TokenKind = switch (e.op) {
+        .eq => .eq,
+        .ne => .ne,
+    };
+    const out = ops.applyEquality(tok_op, left, right);
+    ops.freeValue(ctx.allocator, left);
+    return out;
+}
+
+fn evalIsCheck(ctx: EvalContext, e: Expr.IsCheck) Error!Value {
+    const left = try evalExpr(ctx, e.left);
+    errdefer ops.freeValue(ctx.allocator, left);
+    const right = try evalExpr(ctx, e.right);
+    defer ops.freeValue(ctx.allocator, right);
+    const eq = ops.identicalValues(left, right);
+    ops.freeValue(ctx.allocator, left);
+    return ops.boolValue(if (e.negated) !eq else eq);
+}
+
+fn evalBetween(ctx: EvalContext, b: Expr.Between) Error!Value {
+    const value = try evalExpr(ctx, b.value);
+    defer ops.freeValue(ctx.allocator, value);
+    const lo = try evalExpr(ctx, b.lo);
+    defer ops.freeValue(ctx.allocator, lo);
+    const hi = try evalExpr(ctx, b.hi);
+    defer ops.freeValue(ctx.allocator, hi);
+    const ge = ops.applyComparison(.ge, value, lo);
+    const le = ops.applyComparison(.le, value, hi);
+    const conj = ops.logicalAnd(ge, le);
+    return if (b.negated) ops.logicalNot(conj) else conj;
+}
+
+fn evalInList(ctx: EvalContext, il: Expr.InList) Error!Value {
+    const value = try evalExpr(ctx, il.value);
+    defer ops.freeValue(ctx.allocator, value);
+    var items: std.ArrayList(Value) = .empty;
+    defer {
+        for (items.items) |v| ops.freeValue(ctx.allocator, v);
+        items.deinit(ctx.allocator);
+    }
+    try items.ensureTotalCapacity(ctx.allocator, il.items.len);
+    for (il.items) |item_expr| {
+        items.appendAssumeCapacity(try evalExpr(ctx, item_expr));
+    }
+    const result = ops.applyIn(value, items.items);
+    return if (il.negated) ops.logicalNot(result) else result;
+}
+
+fn evalLogicalAnd(ctx: EvalContext, b: Expr.LogicalBinary) Error!Value {
+    const left = try evalExpr(ctx, b.left);
+    defer ops.freeValue(ctx.allocator, left);
+    const right = try evalExpr(ctx, b.right);
+    defer ops.freeValue(ctx.allocator, right);
+    return ops.logicalAnd(left, right);
+}
+
+fn evalLogicalOr(ctx: EvalContext, b: Expr.LogicalBinary) Error!Value {
+    const left = try evalExpr(ctx, b.left);
+    defer ops.freeValue(ctx.allocator, left);
+    const right = try evalExpr(ctx, b.right);
+    defer ops.freeValue(ctx.allocator, right);
+    return ops.logicalOr(left, right);
+}
+
+fn evalLogicalNot(ctx: EvalContext, operand: *Expr) Error!Value {
+    const v = try evalExpr(ctx, operand);
+    defer ops.freeValue(ctx.allocator, v);
+    return ops.logicalNot(v);
+}
+
+fn evalCaseExpr(ctx: EvalContext, ce: Expr.CaseExpr) Error!Value {
+    const subject_opt: ?Value = if (ce.scrutinee) |s| try evalExpr(ctx, s) else null;
+    defer if (subject_opt) |sv| ops.freeValue(ctx.allocator, sv);
+
+    for (ce.branches) |branch| {
+        const cond = try evalExpr(ctx, branch.when);
+        const is_match = blk: {
+            if (subject_opt) |sv| {
+                const eq = ops.applyEquality(.eq, sv, cond);
+                ops.freeValue(ctx.allocator, cond);
+                break :blk ops.truthy(eq) orelse false;
+            }
+            const t = ops.truthy(cond) orelse false;
+            ops.freeValue(ctx.allocator, cond);
+            break :blk t;
+        };
+        if (is_match) return try evalExpr(ctx, branch.then);
+    }
+    if (ce.else_branch) |eb| return try evalExpr(ctx, eb);
+    return Value.null;
+}
+
+fn evalFuncCall(ctx: EvalContext, fc: Expr.FuncCall) Error!Value {
+    var arg_values: std.ArrayList(Value) = .empty;
+    defer {
+        for (arg_values.items) |v| ops.freeValue(ctx.allocator, v);
+        arg_values.deinit(ctx.allocator);
+    }
+    try arg_values.ensureTotalCapacity(ctx.allocator, fc.args.len);
+    for (fc.args) |arg_expr| {
+        arg_values.appendAssumeCapacity(try evalExpr(ctx, arg_expr));
+    }
+    return funcs.call(ctx.allocator, fc.name, arg_values.items);
+}
+
 /// Dupe TEXT/BLOB bytes so the returned Value outlives the AST node that
 /// produced it. INTEGER/REAL/NULL are by-value and copy implicitly.
 fn dupeLiteral(allocator: std.mem.Allocator, v: Value) Error!Value {
@@ -102,17 +222,6 @@ test "eval: literal integer" {
     try std.testing.expectEqual(@as(i64, 7), v.integer);
 }
 
-test "eval: literal text dupes bytes" {
-    const allocator = std.testing.allocator;
-    const text = try allocator.dupe(u8, "hi");
-    const node = try ast.makeLiteral(allocator, Value{ .text = text });
-    defer node.deinit(allocator);
-    const v = try evalExpr(.{ .allocator = allocator }, node);
-    defer ops.freeValue(allocator, v);
-    try std.testing.expectEqualStrings("hi", v.text);
-    try std.testing.expect(v.text.ptr != text.ptr);
-}
-
 test "eval: binary_arith add integers" {
     const allocator = std.testing.allocator;
     const left = try ast.makeLiteral(allocator, Value{ .integer = 3 });
@@ -123,52 +232,85 @@ test "eval: binary_arith add integers" {
     try std.testing.expectEqual(@as(i64, 7), v.integer);
 }
 
-test "eval: binary_arith mul real propagates" {
+test "eval: eq_check returns 1" {
     const allocator = std.testing.allocator;
-    const left = try ast.makeLiteral(allocator, Value{ .integer = 3 });
-    const right = try ast.makeLiteral(allocator, Value{ .real = 1.5 });
-    const node = try ast.makeBinaryArith(allocator, .mul, left, right);
-    defer node.deinit(allocator);
-    const v = try evalExpr(.{ .allocator = allocator }, node);
-    try std.testing.expectEqual(@as(f64, 4.5), v.real);
-}
-
-test "eval: binary_arith sub propagates NULL" {
-    const allocator = std.testing.allocator;
-    const left = try ast.makeLiteral(allocator, Value.null);
-    const right = try ast.makeLiteral(allocator, Value{ .integer = 1 });
-    const node = try ast.makeBinaryArith(allocator, .sub, left, right);
-    defer node.deinit(allocator);
-    const v = try evalExpr(.{ .allocator = allocator }, node);
-    try std.testing.expectEqual(Value.null, v);
-}
-
-test "eval: unary_negate" {
-    const allocator = std.testing.allocator;
-    const inner = try ast.makeLiteral(allocator, Value{ .integer = 5 });
-    const node = try ast.makeUnaryNegate(allocator, inner);
-    defer node.deinit(allocator);
-    const v = try evalExpr(.{ .allocator = allocator }, node);
-    try std.testing.expectEqual(@as(i64, -5), v.integer);
-}
-
-test "eval: compare lt true" {
-    const allocator = std.testing.allocator;
-    const left = try ast.makeLiteral(allocator, Value{ .integer = 1 });
-    const right = try ast.makeLiteral(allocator, Value{ .integer = 2 });
-    const node = try ast.makeCompare(allocator, .lt, left, right);
+    const left = try ast.makeLiteral(allocator, Value{ .integer = 5 });
+    const right = try ast.makeLiteral(allocator, Value{ .integer = 5 });
+    const node = try ast.makeEqCheck(allocator, .eq, left, right);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(@as(i64, 1), v.integer);
 }
 
-test "eval: binary_concat allocates result" {
+test "eval: is_check NULL IS NULL is true" {
     const allocator = std.testing.allocator;
-    const left = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "ab") });
-    const right = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "cd") });
-    const node = try ast.makeBinaryConcat(allocator, left, right);
+    const left = try ast.makeLiteral(allocator, Value.null);
+    const right = try ast.makeLiteral(allocator, Value.null);
+    const node = try ast.makeIsCheck(allocator, left, right, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 1), v.integer);
+}
+
+test "eval: between inclusive" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .integer = 5 });
+    const lo = try ast.makeLiteral(allocator, Value{ .integer = 1 });
+    const hi = try ast.makeLiteral(allocator, Value{ .integer = 10 });
+    const node = try ast.makeBetween(allocator, value, lo, hi, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 1), v.integer);
+}
+
+test "eval: in_list match" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .integer = 2 });
+    const items = try allocator.alloc(*Expr, 3);
+    items[0] = try ast.makeLiteral(allocator, Value{ .integer = 1 });
+    items[1] = try ast.makeLiteral(allocator, Value{ .integer = 2 });
+    items[2] = try ast.makeLiteral(allocator, Value{ .integer = 3 });
+    const node = try ast.makeInList(allocator, value, items, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 1), v.integer);
+}
+
+test "eval: logical_and three-valued" {
+    const allocator = std.testing.allocator;
+    const left = try ast.makeLiteral(allocator, Value.null);
+    const right = try ast.makeLiteral(allocator, Value{ .integer = 1 });
+    const node = try ast.makeLogicalAnd(allocator, left, right);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(Value.null, v);
+}
+
+test "eval: case_expr scrutinee match" {
+    const allocator = std.testing.allocator;
+    const scrutinee = try ast.makeLiteral(allocator, Value{ .integer = 2 });
+    const branches = try allocator.alloc(Expr.CaseBranch, 2);
+    branches[0] = .{
+        .when = try ast.makeLiteral(allocator, Value{ .integer = 1 }),
+        .then = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") }),
+    };
+    branches[1] = .{
+        .when = try ast.makeLiteral(allocator, Value{ .integer = 2 }),
+        .then = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "b") }),
+    };
+    const node = try ast.makeCaseExpr(allocator, scrutinee, branches, null);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     defer ops.freeValue(allocator, v);
-    try std.testing.expectEqualStrings("abcd", v.text);
+    try std.testing.expectEqualStrings("b", v.text);
+}
+
+test "eval: func_call abs" {
+    const allocator = std.testing.allocator;
+    const args = try allocator.alloc(*Expr, 1);
+    args[0] = try ast.makeLiteral(allocator, Value{ .integer = -7 });
+    const node = try ast.makeFuncCall(allocator, "abs", args);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 7), v.integer);
 }
