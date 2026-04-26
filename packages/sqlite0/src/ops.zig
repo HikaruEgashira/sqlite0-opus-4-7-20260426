@@ -17,6 +17,7 @@ pub const Error = error{
     TableAlreadyExists,
     NoSuchTable,
     ColumnCountMismatch,
+    InvalidEscape,
 };
 
 pub fn unescapeStringLiteral(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {

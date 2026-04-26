@@ -70,7 +70,11 @@ pub const Expr = union(enum) {
         else_branch: ?*Expr,
     };
     pub const FuncCall = struct { name: []const u8, args: []*Expr };
-    pub const Like = struct { op: LikeOp, value: *Expr, pattern: *Expr, negated: bool };
+    /// `op == .glob` always has `escape == null` (GLOB has no ESCAPE clause).
+    /// For `.like`, `escape` is non-null only when the source contained
+    /// `ESCAPE <expr>`. The expression is evaluated per-row; its result must
+    /// coerce to a 1-byte text value or runtime returns `InvalidEscape`.
+    pub const Like = struct { op: LikeOp, value: *Expr, pattern: *Expr, escape: ?*Expr, negated: bool };
 
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -129,6 +133,7 @@ pub const Expr = union(enum) {
             .like => |l| {
                 l.value.deinit(allocator);
                 l.pattern.deinit(allocator);
+                if (l.escape) |e| e.deinit(allocator);
             },
         }
         allocator.destroy(self);
@@ -230,9 +235,16 @@ pub fn makeFuncCall(allocator: std.mem.Allocator, name: []const u8, args: []*Exp
     return node;
 }
 
-pub fn makeLike(allocator: std.mem.Allocator, op: LikeOp, value: *Expr, pattern: *Expr, negated: bool) !*Expr {
+pub fn makeLike(
+    allocator: std.mem.Allocator,
+    op: LikeOp,
+    value: *Expr,
+    pattern: *Expr,
+    escape: ?*Expr,
+    negated: bool,
+) !*Expr {
     const node = try allocator.create(Expr);
-    node.* = .{ .like = .{ .op = op, .value = value, .pattern = pattern, .negated = negated } };
+    node.* = .{ .like = .{ .op = op, .value = value, .pattern = pattern, .escape = escape, .negated = negated } };
     return node;
 }
 

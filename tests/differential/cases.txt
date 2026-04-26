@@ -418,3 +418,18 @@ SELECT ']' GLOB '[]]'
 SELECT 'a' GLOB 'a' AND 'b' GLOB 'b'
 SELECT 'abc' GLOB 'a*' = 1
 CREATE TABLE t(s); INSERT INTO t VALUES ('Apple'), ('apple'), ('banana'); SELECT * FROM t WHERE s GLOB 'a*'
+
+# LIKE ESCAPE clause (Iter13.C)
+SELECT '50%' LIKE '50\%' ESCAPE '\'
+SELECT '50%off' LIKE '50\%%' ESCAPE '\'
+SELECT 'a_b' LIKE 'a\_b' ESCAPE '\'
+SELECT 'aXb' LIKE 'a\_b' ESCAPE '\'
+SELECT 'aXb' LIKE 'aXb' ESCAPE '\'
+SELECT 'aXb' LIKE 'a\Xb' ESCAPE '\'
+SELECT '50' LIKE '50\%' ESCAPE '\'
+SELECT 'abc' LIKE 'a%' ESCAPE '\'
+SELECT 'a%b' LIKE 'a\%b' ESCAPE '\'
+SELECT 'aXb' LIKE 'a\%b' ESCAPE '\'
+SELECT NULL LIKE 'a' ESCAPE '\'
+SELECT 'a' LIKE NULL ESCAPE '\'
+CREATE TABLE t(s); INSERT INTO t VALUES ('50%'), ('50'), ('100%'); SELECT * FROM t WHERE s LIKE '%\%' ESCAPE '\'

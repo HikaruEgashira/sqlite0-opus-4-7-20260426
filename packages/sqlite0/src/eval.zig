@@ -220,8 +220,25 @@ fn evalLike(ctx: EvalContext, l: ast.Expr.Like) Error!Value {
     defer ops.freeValue(ctx.allocator, value);
     const pattern = try evalExpr(ctx, l.pattern);
     defer ops.freeValue(ctx.allocator, pattern);
+
+    var escape_byte: ?u8 = null;
+    var escape_value: Value = Value.null;
+    defer ops.freeValue(ctx.allocator, escape_value);
+    if (l.escape) |esc_expr| {
+        escape_value = try evalExpr(ctx, esc_expr);
+        // sqlite3: ESCAPE NULL → entire LIKE result is NULL.
+        if (escape_value == .null) return Value.null;
+        const bytes = switch (escape_value) {
+            .text => |t| t,
+            .blob => |b| b,
+            else => return Error.InvalidEscape,
+        };
+        if (bytes.len != 1) return Error.InvalidEscape;
+        escape_byte = bytes[0];
+    }
+
     const result = switch (l.op) {
-        .like => try match.applyLike(ctx.allocator, value, pattern, null),
+        .like => try match.applyLike(ctx.allocator, value, pattern, escape_byte),
         .glob => try match.applyGlob(ctx.allocator, value, pattern),
     };
     return if (l.negated) ops.logicalNot(result) else result;
@@ -354,7 +371,7 @@ test "eval: like matches" {
     const allocator = std.testing.allocator;
     const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "hello") });
     const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "h%o") });
-    const node = try ast.makeLike(allocator, .like, value, pattern, false);
+    const node = try ast.makeLike(allocator, .like, value, pattern, null, false);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(@as(i64, 1), v.integer);
@@ -364,7 +381,7 @@ test "eval: not like" {
     const allocator = std.testing.allocator;
     const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "abc") });
     const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "x%") });
-    const node = try ast.makeLike(allocator, .like, value, pattern, true);
+    const node = try ast.makeLike(allocator, .like, value, pattern, null, true);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(@as(i64, 1), v.integer);
@@ -374,7 +391,7 @@ test "eval: like NULL is NULL" {
     const allocator = std.testing.allocator;
     const value = try ast.makeLiteral(allocator, Value.null);
     const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") });
-    const node = try ast.makeLike(allocator, .like, value, pattern, false);
+    const node = try ast.makeLike(allocator, .like, value, pattern, null, false);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(Value.null, v);
@@ -384,8 +401,40 @@ test "eval: glob case sensitive" {
     const allocator = std.testing.allocator;
     const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "abc") });
     const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "A*") });
-    const node = try ast.makeLike(allocator, .glob, value, pattern, false);
+    const node = try ast.makeLike(allocator, .glob, value, pattern, null, false);
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(@as(i64, 0), v.integer);
+}
+
+test "eval: like ESCAPE single byte matches" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "50%") });
+    const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "50\\%") });
+    const escape = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "\\") });
+    const node = try ast.makeLike(allocator, .like, value, pattern, escape, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 1), v.integer);
+}
+
+test "eval: like ESCAPE multi-byte is InvalidEscape" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") });
+    const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") });
+    const escape = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "\\\\") });
+    const node = try ast.makeLike(allocator, .like, value, pattern, escape, false);
+    defer node.deinit(allocator);
+    try std.testing.expectError(ops.Error.InvalidEscape, evalExpr(.{ .allocator = allocator }, node));
+}
+
+test "eval: like ESCAPE NULL is NULL" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") });
+    const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") });
+    const escape = try ast.makeLiteral(allocator, Value.null);
+    const node = try ast.makeLike(allocator, .like, value, pattern, escape, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(Value.null, v);
 }

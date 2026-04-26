@@ -173,22 +173,22 @@ pub const Parser = struct {
         return ast.makeBetween(self.allocator, value, lo, hi, negated);
     }
 
-    /// `value LIKE pattern` / `value GLOB pattern` (Iter13.A/B). ESCAPE is
-    /// rejected for LIKE here to keep this iteration small; Iter13.C lifts
-    /// that restriction. Takes ownership of `value` and frees it on any
-    /// error before returning.
+    /// `value LIKE pattern [ESCAPE <expr>]` / `value GLOB pattern`. ESCAPE
+    /// is only valid after LIKE; following GLOB it is reported as a syntax
+    /// error to match sqlite3 ("near \"ESCAPE\": syntax error"). Takes
+    /// ownership of `value` and frees it on any error before returning.
     fn parseLike(self: *Parser, value: *ast.Expr, op: ast.LikeOp, negated: bool) Error!*ast.Expr {
         errdefer value.deinit(self.allocator);
         const pattern = try self.parseAddSub();
         errdefer pattern.deinit(self.allocator);
-        if (op == .like and self.cur.kind == .identifier) {
-            // ESCAPE is not yet a keyword; if it appears here, surface as
-            // unsupported rather than silently ignoring it (Iter13.C).
-            if (std.ascii.eqlIgnoreCase(self.cur.slice(self.src), "escape")) {
-                return Error.UnsupportedFeature;
-            }
+        var escape: ?*ast.Expr = null;
+        errdefer if (escape) |e| e.deinit(self.allocator);
+        if (self.cur.kind == .keyword_escape) {
+            if (op != .like) return Error.SyntaxError;
+            self.advance();
+            escape = try self.parseAddSub();
         }
-        return ast.makeLike(self.allocator, op, value, pattern, negated);
+        return ast.makeLike(self.allocator, op, value, pattern, escape, negated);
     }
 
     /// `value IN (e1, e2, ...)` — takes ownership of `value` and frees it
