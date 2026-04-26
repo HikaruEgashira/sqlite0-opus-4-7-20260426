@@ -1,32 +1,37 @@
 const std = @import("std");
-const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
+const util = @import("func_util.zig");
+const text = @import("funcs_text.zig");
 
-const Value = value_mod.Value;
-const Error = ops.Error;
+const Value = util.Value;
+const Error = util.Error;
 
 /// Built-in scalar function dispatch. `name` is matched case-insensitively.
 /// `args` are owned by the caller — implementations must not free them, but
 /// may dupe data into the returned Value, which the caller takes ownership of.
 /// Returns `Error.UnknownFunction` for names that aren't registered yet.
 pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value) Error!Value {
-    if (eqlIgnoreCase(name, "length")) return fnLength(allocator, args);
-    if (eqlIgnoreCase(name, "lower")) return fnLower(allocator, args);
-    if (eqlIgnoreCase(name, "upper")) return fnUpper(allocator, args);
-    if (eqlIgnoreCase(name, "substr") or eqlIgnoreCase(name, "substring")) return fnSubstr(allocator, args);
-    if (eqlIgnoreCase(name, "abs")) return fnAbs(allocator, args);
-    if (eqlIgnoreCase(name, "coalesce") or eqlIgnoreCase(name, "ifnull")) return fnCoalesce(allocator, args);
-    if (eqlIgnoreCase(name, "nullif")) return fnNullif(allocator, args);
-    if (eqlIgnoreCase(name, "typeof")) return fnTypeof(allocator, args);
+    if (util.eqlIgnoreCase(name, "length")) return fnLength(allocator, args);
+    if (util.eqlIgnoreCase(name, "lower")) return fnLower(allocator, args);
+    if (util.eqlIgnoreCase(name, "upper")) return fnUpper(allocator, args);
+    if (util.eqlIgnoreCase(name, "substr") or util.eqlIgnoreCase(name, "substring")) return fnSubstr(allocator, args);
+    if (util.eqlIgnoreCase(name, "abs")) return fnAbs(allocator, args);
+    if (util.eqlIgnoreCase(name, "coalesce") or util.eqlIgnoreCase(name, "ifnull")) return fnCoalesce(allocator, args);
+    if (util.eqlIgnoreCase(name, "nullif")) return fnNullif(allocator, args);
+    if (util.eqlIgnoreCase(name, "typeof")) return fnTypeof(allocator, args);
+    if (util.eqlIgnoreCase(name, "round")) return fnRound(allocator, args);
+    if (util.eqlIgnoreCase(name, "min")) return fnMinMax(allocator, args, .min);
+    if (util.eqlIgnoreCase(name, "max")) return fnMinMax(allocator, args, .max);
+    if (util.eqlIgnoreCase(name, "replace")) return text.fnReplace(allocator, args);
+    if (util.eqlIgnoreCase(name, "hex")) return text.fnHex(allocator, args);
+    if (util.eqlIgnoreCase(name, "quote")) return text.fnQuote(allocator, args);
+    if (util.eqlIgnoreCase(name, "trim")) return text.fnTrim(allocator, args, .both);
+    if (util.eqlIgnoreCase(name, "ltrim")) return text.fnTrim(allocator, args, .left);
+    if (util.eqlIgnoreCase(name, "rtrim")) return text.fnTrim(allocator, args, .right);
+    if (util.eqlIgnoreCase(name, "instr")) return text.fnInstr(allocator, args);
+    if (util.eqlIgnoreCase(name, "char")) return text.fnChar(allocator, args);
+    if (util.eqlIgnoreCase(name, "unicode")) return text.fnUnicode(allocator, args);
     return Error.UnknownFunction;
-}
-
-fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
-    }
-    return true;
 }
 
 fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
@@ -37,12 +42,12 @@ fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
         .text => |t| Value{ .integer = @intCast(t.len) },
         .blob => |b| Value{ .integer = @intCast(b.len) },
         .integer, .real => blk: {
-            const text = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
+            const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
                 error.OutOfMemory => return Error.OutOfMemory,
                 error.NotConvertible => return Error.UnsupportedFeature,
             };
-            defer allocator.free(text);
-            break :blk Value{ .integer = @intCast(text.len) };
+            defer allocator.free(t);
+            break :blk Value{ .integer = @intCast(t.len) };
         },
     };
 }
@@ -70,13 +75,13 @@ fn mapAscii(allocator: std.mem.Allocator, v: Value, comptime mapFn: fn (u8) u8) 
 }
 
 fn mapAsciiFromNumeric(allocator: std.mem.Allocator, v: Value, comptime mapFn: fn (u8) u8) Error!Value {
-    const text = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
-                error.OutOfMemory => return Error.OutOfMemory,
-                error.NotConvertible => return Error.UnsupportedFeature,
-            };
-    defer allocator.free(text);
-    const out = try allocator.alloc(u8, text.len);
-    for (text, 0..) |c, i| out[i] = mapFn(c);
+    const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
+        error.OutOfMemory => return Error.OutOfMemory,
+        error.NotConvertible => return Error.UnsupportedFeature,
+    };
+    defer allocator.free(t);
+    const out = try allocator.alloc(u8, t.len);
+    for (t, 0..) |c, i| out[i] = mapFn(c);
     return Value{ .text = out };
 }
 
@@ -100,9 +105,9 @@ fn fnSubstr(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     };
     defer allocator.free(subject_text);
 
-    const p_raw = try toIntCoerce(args[1]);
+    const p_raw = try util.toIntCoerce(args[1]);
     const has_n = args.len == 3;
-    var n: i64 = if (has_n) try toIntCoerce(args[2]) else 0;
+    var n: i64 = if (has_n) try util.toIntCoerce(args[2]) else 0;
 
     const len_i: i64 = @intCast(subject_text.len);
     var p: i64 = p_raw;
@@ -144,14 +149,14 @@ fn fnAbs(allocator: std.mem.Allocator, args: []const Value) Error!Value {
             break :blk Value{ .integer = if (i < 0) -i else i };
         },
         .real => |f| Value{ .real = @abs(f) },
-        .text, .blob => |bytes| Value{ .real = @abs(parseFloatLoose(bytes)) },
+        .text, .blob => |bytes| Value{ .real = @abs(util.parseFloatLoose(bytes)) },
     };
 }
 
 fn fnCoalesce(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len < 2) return Error.WrongArgumentCount;
     for (args) |a| {
-        if (a != .null) return try dupeValue(allocator, a);
+        if (a != .null) return try util.dupeValue(allocator, a);
     }
     return Value.null;
 }
@@ -161,7 +166,7 @@ fn fnNullif(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args[0] == .null) return Value.null;
     const eq = ops.applyEquality(.eq, args[0], args[1]);
     if (eq == .integer and eq.integer == 1) return Value.null;
-    return try dupeValue(allocator, args[0]);
+    return try util.dupeValue(allocator, args[0]);
 }
 
 fn fnTypeof(allocator: std.mem.Allocator, args: []const Value) Error!Value {
@@ -176,33 +181,42 @@ fn fnTypeof(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     return Value{ .text = try allocator.dupe(u8, tag) };
 }
 
-fn dupeValue(allocator: std.mem.Allocator, v: Value) Error!Value {
-    return switch (v) {
-        .text => |t| Value{ .text = try allocator.dupe(u8, t) },
-        .blob => |b| Value{ .blob = try allocator.dupe(u8, b) },
-        else => v,
-    };
+/// SQLite `round(X[, N])` — half-away-from-zero rounding to N decimals.
+/// Always returns REAL even for integer inputs (`typeof(round(3)) = real`).
+/// N defaults to 0; N is integer-coerced from any input type.
+fn fnRound(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    _ = allocator;
+    if (args.len < 1 or args.len > 2) return Error.WrongArgumentCount;
+    if (args[0] == .null) return Value.null;
+    if (args.len == 2 and args[1] == .null) return Value.null;
+
+    const x = util.numericAsReal(args[0]);
+    const d_raw: i64 = if (args.len == 2) try util.toIntCoerce(args[1]) else 0;
+    const d: i32 = @intCast(@max(@as(i64, -50), @min(@as(i64, 50), d_raw)));
+
+    if (d <= 0) return Value{ .real = @round(x) };
+    const factor = std.math.pow(f64, 10, @floatFromInt(d));
+    return Value{ .real = @round(x * factor) / factor };
 }
 
-fn toIntCoerce(v: Value) Error!i64 {
-    return switch (v) {
-        .integer => |i| i,
-        .real => |f| @intFromFloat(f),
-        .text, .blob => |bytes| @intFromFloat(parseFloatLoose(bytes)),
-        .null => Error.UnsupportedFeature,
-    };
-}
+const MinMax = enum { min, max };
 
-/// Parse the longest valid numeric prefix of `bytes`. Anything that doesn't
-/// parse cleanly returns 0 (matching SQLite's `CAST(...AS REAL)` semantics
-/// for non-numeric text).
-fn parseFloatLoose(bytes: []const u8) f64 {
-    if (std.fmt.parseFloat(f64, bytes)) |f| return f else |_| {}
-    var end = bytes.len;
-    while (end > 0) : (end -= 1) {
-        if (std.fmt.parseFloat(f64, bytes[0..end])) |f| return f else |_| {}
+/// Scalar `min(a, b, ...)` / `max(a, b, ...)`. ≥2 args required (1-arg is the
+/// aggregate form which we don't yet support). Any NULL argument forces NULL.
+fn fnMinMax(allocator: std.mem.Allocator, args: []const Value, dir: MinMax) Error!Value {
+    if (args.len < 2) return Error.WrongArgumentCount;
+    var best: Value = args[0];
+    if (best == .null) return Value.null;
+    for (args[1..]) |a| {
+        if (a == .null) return Value.null;
+        const order = ops.compareValues(best, a);
+        const replace_best = switch (dir) {
+            .min => order == .gt,
+            .max => order == .lt,
+        };
+        if (replace_best) best = a;
     }
-    return 0;
+    return try util.dupeValue(allocator, best);
 }
 
 test "funcs: length(text) byte count" {
@@ -278,4 +292,32 @@ test "funcs: typeof returns lowercase tag" {
     const r = try call(allocator, "typeof", &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("real", r.text);
+}
+
+test "funcs: round to integer always returns real" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .real = 3.5 }};
+    const r = try call(allocator, "round", &args);
+    try std.testing.expectEqual(@as(f64, 4.0), r.real);
+}
+
+test "funcs: round half-away-from-zero for negative" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .real = -2.5 }};
+    const r = try call(allocator, "round", &args);
+    try std.testing.expectEqual(@as(f64, -3.0), r.real);
+}
+
+test "funcs: min(NULL, ...) is NULL" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .null, .{ .integer = 1 }, .{ .integer = 2 } };
+    const r = try call(allocator, "min", &args);
+    try std.testing.expectEqual(Value.null, r);
+}
+
+test "funcs: max picks largest" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .integer = 1 }, .{ .integer = 3 }, .{ .integer = 2 } };
+    const r = try call(allocator, "max", &args);
+    try std.testing.expectEqual(@as(i64, 3), r.integer);
 }

@@ -13,14 +13,16 @@
 - [x] Iter3: `BETWEEN`, `[NOT] IN (...)`, `IS [NOT] DISTINCT FROM`
 - [x] Iter4: `CASE WHEN ... THEN ... ELSE ... END` (searched & simple form)
 - [x] Iter5: 文字列連結 `||`, 関数呼び出し構文, `length`/`lower`/`upper`/`substr`/`abs`/`coalesce`/`ifnull`/`nullif`/`typeof`, applyArithのテキスト→数値coerce
+- [x] Iter6: `round`/`min`/`max` (scalar variadic), `replace`/`hex`/`quote`/`trim`/`ltrim`/`rtrim`/`instr`/`char`/`unicode`
 - [x] ADR-0001: nostd解釈・Zig 0.16.0採用
 - [x] `ops.zig` 抽出 (型変換・算術・比較ヘルパーを `exec.zig` から分離)
 - [x] `parser.zig` 抽出 (Parser構造体を `exec.zig` から分離、500行ルール遵守)
 - [x] `funcs.zig` 抽出 (組込スカラ関数のディスパッチ)
+- [x] `func_util.zig` / `funcs_text.zig` 抽出 (Iter6で500行を超えたため分割)
 
 ### 次の縦スライス
-- [ ] Iter6: 数値関数 `round`, `min`, `max` (variadic), `random`, `printf`/`format`
-- [ ] Iter7: SELECT複数行ソース (VALUES句) — `SELECT * FROM (VALUES (1,'a'), (2,'b'))`
+- [ ] Iter7: VALUES句 — `SELECT * FROM (VALUES (1,'a'), (2,'b'))`、複数行Result
+- [ ] Iter8: `random()`, `printf()`/`format()`, `strftime()` (時刻関数の入口)
 - [ ] Iter3: CASE式 / IS NULL / BETWEEN / IN
 - [ ] Iter4: 文字列関数 `length()`, `substr()`, `lower()`, `upper()`, `||` 連結
 - [ ] Iter5: 数値関数 `abs()`, `round()`, `min()`, `max()`
