@@ -1,0 +1,27 @@
+# Differential test cases: each line is a SQL statement that sqlite0 and sqlite3 must agree on.
+# Empty lines and lines starting with # are ignored.
+
+# Phase 1: scalar SELECT (no FROM)
+SELECT 1
+SELECT 0
+SELECT -1
+SELECT 1+2
+SELECT 1+2*3
+SELECT (1+2)*3
+SELECT 10-3
+SELECT 7%3
+SELECT 100/4
+SELECT 1+2, 3+4, 5+6
+SELECT NULL
+SELECT 'hello'
+SELECT 'it''s'
+SELECT 1, 'two', 3
+SELECT 1+0
+SELECT -5
+SELECT 2147483647
+SELECT 9223372036854775807
+SELECT 1/0
+SELECT 1%0
+SELECT 3.14
+SELECT 1.5+1.5
+# TODO Iter2: SELECT 0.1+0.2 — needs SQLite-compatible %g formatting (15 sig digits)
