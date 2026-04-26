@@ -664,3 +664,16 @@ CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO 
 CREATE TABLE a(x); CREATE TABLE b(y); CREATE TABLE c(z); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); INSERT INTO c VALUES (3); SELECT * FROM a JOIN b ON 1 JOIN c ON 1
 # CROSS JOIN with ON (sqlite3 permits even though logically odd)
 CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10); SELECT * FROM a CROSS JOIN b ON x = 1
+
+# Iter19.C: LEFT [OUTER] JOIN — keeps every left row, NULL-pads unmatched right
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2),(3); INSERT INTO b VALUES (1),(3); SELECT * FROM a LEFT JOIN b ON x = y ORDER BY x
+# OUTER keyword is optional
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a LEFT OUTER JOIN b ON 0 ORDER BY x
+# empty right table → all left rows with NULL
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); SELECT * FROM a LEFT JOIN b ON 1 ORDER BY x
+# LEFT JOIN with no ON behaves like cross when right has rows
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1); INSERT INTO b VALUES (10),(20); SELECT * FROM a LEFT JOIN b ORDER BY y
+# nested LEFT JOINs preserve unmatched-row propagation
+CREATE TABLE a(x); CREATE TABLE b(y); CREATE TABLE c(z); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (1); INSERT INTO c VALUES (1); SELECT * FROM a LEFT JOIN b ON x = y LEFT JOIN c ON x = z ORDER BY x
+# LEFT JOIN with WHERE filtering NULL row → unmatched rows excluded by WHERE
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2),(3); INSERT INTO b VALUES (1); SELECT * FROM a LEFT JOIN b ON x = y WHERE y IS NULL ORDER BY x

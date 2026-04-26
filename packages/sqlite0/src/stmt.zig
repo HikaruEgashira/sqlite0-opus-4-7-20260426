@@ -67,6 +67,7 @@ pub const OrderTerm = struct {
 const stmt_from = @import("stmt_from.zig");
 pub const ParsedFromSource = stmt_from.ParsedFromSource;
 pub const FromTerm = stmt_from.FromTerm;
+pub const JoinKind = stmt_from.JoinKind;
 pub const freeParsedFrom = stmt_from.freeParsedFrom;
 pub const freeFromList = stmt_from.freeFromList;
 

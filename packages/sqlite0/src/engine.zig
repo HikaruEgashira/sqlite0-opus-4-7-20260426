@@ -222,44 +222,14 @@ pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.Parse
     }
 
     const cart = try engine_from.cartesianFromSources(db, alloc, ps.from);
-    const filter = try foldJoinOns(alloc, ps.where, ps.from);
     if (wants_grouping) {
         const inputs = try alloc.alloc([]const Value, cart.rows.len);
         for (cart.rows, inputs) |src, *slot| slot.* = src;
-        return aggregate.executeAggregated(alloc, ps.items, inputs, cart.columns, cart.qualifiers, filter, ps.group_by, ps.having, pp);
+        return aggregate.executeAggregated(alloc, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp);
     }
     const rows_const = try alloc.alloc([]const Value, cart.rows.len);
     for (cart.rows, rows_const) |src, *slot| slot.* = src;
-    return select_mod.executeWithFrom(alloc, ps.items, rows_const, cart.columns, cart.qualifiers, filter, pp);
-}
-
-/// AND-fold every JOIN ON predicate with the user-supplied WHERE into a
-/// single composite expression. Iter19.B treats `INNER JOIN ... ON p` as
-/// observationally equivalent to comma-FROM with `WHERE p` (sqlite3
-/// matches this for INNER); the engine's row loop applies the composite
-/// once per Cartesian row.
-///
-/// Synthesised `logical_and` nodes borrow their children — the caller's
-/// `?*ast.Expr` and each `term.join_on` — and live in `alloc` (the per-
-/// statement arena). They must never be passed to `Expr.deinit` (which
-/// would free the borrowed children); arena teardown reclaims them.
-fn foldJoinOns(
-    alloc: std.mem.Allocator,
-    base: ?*ast.Expr,
-    terms: []stmt_mod.FromTerm,
-) !?*ast.Expr {
-    var current = base;
-    for (terms) |term| {
-        const on = term.join_on orelse continue;
-        if (current) |cur| {
-            const node = try alloc.create(ast.Expr);
-            node.* = .{ .logical_and = .{ .left = cur, .right = on } };
-            current = node;
-        } else {
-            current = on;
-        }
-    }
-    return current;
+    return select_mod.executeWithFrom(alloc, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp);
 }
 
 /// Translate stmt-level OrderTerm/limit/offset into the select-module's

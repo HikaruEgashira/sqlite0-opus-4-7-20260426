@@ -21,19 +21,22 @@ const Value = value_mod.Value;
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
 
-/// One entry in the FROM list: a source plus the optional ON predicate
-/// from the JOIN keyword that introduced it. The first entry's `join_on`
-/// is always null (no preceding JOIN). Comma and `CROSS JOIN` produce
-/// entries with `join_on = null`; `JOIN` / `INNER JOIN` produce entries
-/// with `join_on` carrying the parsed predicate.
-///
-/// Iter19.B keeps the engine semantics identical to Iter19.A: ON
-/// predicates are AND-folded with the user WHERE before the row loop, so
-/// `INNER JOIN ... ON p` is observationally equivalent to comma-FROM with
-/// `WHERE p`. (LEFT JOIN, where ON applies at the join boundary, is
-/// Iter19.C.)
+/// How the term joins with the accumulated left side of the FROM list.
+/// `comma` and `cross` produce a Cartesian; `inner` adds the ON predicate
+/// at the join boundary (observationally equivalent to a Cartesian + WHERE
+/// for INNER); `left` keeps every left row and NULL-pads the right when no
+/// row of the right source satisfies ON.
+pub const JoinKind = enum { comma, cross, inner, left };
+
+/// One entry in the FROM list: a source, the join kind that introduced
+/// it, and the optional ON predicate. The first term's `kind` is `comma`
+/// (a no-op marker; nothing precedes it). Iter19.C is the first iteration
+/// to use `kind` non-trivially — for INNER/CROSS we still get the same
+/// rows as a Cartesian + WHERE, but the engine evaluates ON at the join
+/// boundary so LEFT can share the same code path.
 pub const FromTerm = struct {
     source: ParsedFromSource,
+    kind: JoinKind = .comma,
     join_on: ?*ast.Expr = null,
 };
 
@@ -108,34 +111,45 @@ pub fn parseFromClause(p: *Parser) ![]FromTerm {
             p.advance();
             join_on = try p.parseExpr();
         }
-        try terms.append(p.allocator, .{ .source = next_source, .join_on = join_on });
+        try terms.append(p.allocator, .{ .source = next_source, .kind = sep.kind, .join_on = join_on });
     }
     return terms.toOwnedSlice(p.allocator);
 }
 
 /// Recognise a join-list separator after the previous source. Returns null
-/// when the cursor sits on something else (FROM clause complete). The
-/// `allows_on` flag lets us reject ON after a comma — sqlite3 treats
-/// comma-FROM as a strict cartesian and "ON" wouldn't make grammatical
-/// sense there. CROSS / INNER JOIN both accept ON (verified against
-/// sqlite3 3.51.0 — `CROSS JOIN ... ON` is permitted even though the
-/// "ON" is logically a no-op for cross).
-const JoinSep = struct { allows_on: bool };
+/// when the cursor sits on something else (FROM clause complete). `comma`
+/// rejects a following ON; the JOIN keywords accept it (sqlite3 even
+/// allows `CROSS JOIN ... ON` — verified against 3.51.0).
+const JoinSep = struct { kind: JoinKind, allows_on: bool };
 
 fn matchJoinSeparator(p: *Parser) ?JoinSep {
     if (p.cur.kind == .comma) {
         p.advance();
-        return .{ .allows_on = false };
+        return .{ .kind = .comma, .allows_on = false };
     }
     if (p.cur.kind == .keyword_join) {
         p.advance();
-        return .{ .allows_on = true };
+        return .{ .kind = .inner, .allows_on = true };
     }
-    if (p.cur.kind == .keyword_inner or p.cur.kind == .keyword_cross) {
+    if (p.cur.kind == .keyword_inner) {
         p.advance();
-        if (p.cur.kind != .keyword_join) return null; // restored by caller? no — best-effort consume
+        if (p.cur.kind != .keyword_join) return null;
         p.advance();
-        return .{ .allows_on = true };
+        return .{ .kind = .inner, .allows_on = true };
+    }
+    if (p.cur.kind == .keyword_cross) {
+        p.advance();
+        if (p.cur.kind != .keyword_join) return null;
+        p.advance();
+        return .{ .kind = .cross, .allows_on = true };
+    }
+    if (p.cur.kind == .keyword_left) {
+        p.advance();
+        // OUTER is optional in `LEFT [OUTER] JOIN`.
+        if (p.cur.kind == .keyword_outer) p.advance();
+        if (p.cur.kind != .keyword_join) return null;
+        p.advance();
+        return .{ .kind = .left, .allows_on = true };
     }
     return null;
 }

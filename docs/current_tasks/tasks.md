@@ -22,7 +22,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter17.A: `count(DISTINCT x)` / `sum(DISTINCT x)` / `avg(DISTINCT x)` / min/max/total + DISTINCT
 - [x] Iter19.A: comma-FROM (Cartesian) + qualified column refs (`t.x` / `t.*`) + table aliases
 - [x] Iter19.B: `CROSS JOIN` / `INNER JOIN ... ON` / `JOIN ... ON` keywords
-- [ ] Iter19.C: `LEFT JOIN` (engine extension for unmatched rows)
+- [x] Iter19.C: `LEFT [OUTER] JOIN` (per-boundary ON + NULL padding for unmatched left rows)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
