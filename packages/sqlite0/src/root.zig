@@ -7,6 +7,7 @@ pub const func_util = @import("func_util.zig");
 pub const funcs = @import("funcs.zig");
 pub const funcs_text = @import("funcs_text.zig");
 pub const parser = @import("parser.zig");
+pub const stmt = @import("stmt.zig");
 pub const exec = @import("exec.zig");
 
 pub const Value = value.Value;

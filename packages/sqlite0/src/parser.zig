@@ -9,32 +9,23 @@ const TokenKind = lex.TokenKind;
 const Value = value_mod.Value;
 const Error = ops.Error;
 
-/// Parse a single `SELECT <expr-list>` statement and return the evaluated
-/// scalar values. The parser uses an eager tree-walking strategy: each
-/// `parse*` method both consumes tokens and folds the values it just parsed,
-/// so by the end of `parseSelect` we have a `[]Value` ready to ship to the
-/// caller. There is no AST.
-///
-/// Caller owns the returned slice and the heap memory inside each `Value`.
-/// Free with `ops.freeValue` per element and `allocator.free` for the slice.
-pub fn parseSelect(allocator: std.mem.Allocator, sql: []const u8) ![]Value {
-    var p = Parser.init(allocator, sql);
-    return p.parseSelectInternal();
-}
-
-const Parser = struct {
+/// Recursive-descent SQL expression parser. Each `parse*` method both consumes
+/// tokens and folds the values it just parsed (eager tree-walk evaluation —
+/// no AST). Statement-level dispatch lives in `stmt.zig`; this file owns the
+/// expression layer.
+pub const Parser = struct {
     src: []const u8,
     lx: lex.Lexer,
     cur: Token,
     allocator: std.mem.Allocator,
 
-    fn init(allocator: std.mem.Allocator, src: []const u8) Parser {
+    pub fn init(allocator: std.mem.Allocator, src: []const u8) Parser {
         var lxr = lex.Lexer.init(src);
         const first = lxr.next();
         return .{ .src = src, .lx = lxr, .cur = first, .allocator = allocator };
     }
 
-    fn advance(self: *Parser) void {
+    pub fn advance(self: *Parser) void {
         self.cur = self.lx.next();
     }
 
@@ -53,29 +44,12 @@ const Parser = struct {
         self.lx.pos = snap.pos;
     }
 
-    fn expect(self: *Parser, kind: TokenKind) !void {
+    pub fn expect(self: *Parser, kind: TokenKind) !void {
         if (self.cur.kind != kind) return Error.SyntaxError;
         self.advance();
     }
 
-    fn parseSelectInternal(self: *Parser) ![]Value {
-        try self.expect(.keyword_select);
-        var values: std.ArrayList(Value) = .empty;
-        defer values.deinit(self.allocator);
-        errdefer for (values.items) |v| ops.freeValue(self.allocator, v);
-
-        try values.append(self.allocator, try self.parseExpr());
-        while (self.cur.kind == .comma) {
-            self.advance();
-            try values.append(self.allocator, try self.parseExpr());
-        }
-        if (self.cur.kind == .semicolon) self.advance();
-        if (self.cur.kind != .eof) return Error.SyntaxError;
-
-        return values.toOwnedSlice(self.allocator);
-    }
-
-    fn parseExpr(self: *Parser) Error!Value {
+    pub fn parseExpr(self: *Parser) Error!Value {
         return self.parseOr();
     }
 
@@ -419,18 +393,16 @@ const Parser = struct {
     }
 };
 
-test "parser: SELECT 1 returns one Value" {
+test "Parser: parseExpr literal" {
     const allocator = std.testing.allocator;
-    const cols = try parseSelect(allocator, "SELECT 1");
-    defer {
-        for (cols) |v| ops.freeValue(allocator, v);
-        allocator.free(cols);
-    }
-    try std.testing.expectEqual(@as(usize, 1), cols.len);
-    try std.testing.expectEqual(@as(i64, 1), cols[0].integer);
+    var p = Parser.init(allocator, "42");
+    const v = try p.parseExpr();
+    try std.testing.expectEqual(@as(i64, 42), v.integer);
 }
 
-test "parser: trailing token after SELECT is a syntax error" {
+test "Parser: parseExpr arithmetic" {
     const allocator = std.testing.allocator;
-    try std.testing.expectError(Error.SyntaxError, parseSelect(allocator, "SELECT 1 garbage"));
+    var p = Parser.init(allocator, "1+2*3");
+    const v = try p.parseExpr();
+    try std.testing.expectEqual(@as(i64, 7), v.integer);
 }

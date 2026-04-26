@@ -26,6 +26,7 @@ pub const TokenKind = enum {
     keyword_then,
     keyword_else,
     keyword_end,
+    keyword_values,
     plus,
     minus,
     star,
@@ -244,6 +245,7 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "then")) return .keyword_then;
     if (eqlIgnoreCase(text, "else")) return .keyword_else;
     if (eqlIgnoreCase(text, "end")) return .keyword_end;
+    if (eqlIgnoreCase(text, "values")) return .keyword_values;
     return null;
 }
 

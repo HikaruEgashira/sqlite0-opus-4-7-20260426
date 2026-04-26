@@ -1,7 +1,7 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
-const parser = @import("parser.zig");
+const stmt = @import("stmt.zig");
 
 const Value = value_mod.Value;
 
@@ -27,13 +27,17 @@ pub const Result = struct {
 };
 
 pub fn execute(allocator: std.mem.Allocator, sql: []const u8) !Result {
-    const cols = try parser.parseSelect(allocator, sql);
+    const raw_rows = try stmt.parseStatement(allocator, sql);
     errdefer {
-        for (cols) |v| ops.freeValue(allocator, v);
-        allocator.free(cols);
+        for (raw_rows) |row| {
+            for (row) |v| ops.freeValue(allocator, v);
+            allocator.free(row);
+        }
+        allocator.free(raw_rows);
     }
-    var rows = try allocator.alloc(Row, 1);
-    rows[0] = .{ .values = cols };
+    var rows = try allocator.alloc(Row, raw_rows.len);
+    for (raw_rows, 0..) |row, i| rows[i] = .{ .values = row };
+    allocator.free(raw_rows);
     return .{ .rows = rows, .allocator = allocator };
 }
 
@@ -130,4 +134,27 @@ test "execute: CASE inside arithmetic" {
     var r = try execute(allocator, "SELECT 1 + CASE WHEN 1=1 THEN 10 ELSE 0 END");
     defer r.deinit();
     try std.testing.expectEqual(@as(i64, 11), r.rows[0].values[0].integer);
+}
+
+test "execute: VALUES emits one row" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "VALUES (1, 'a')");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.rows.len);
+    try std.testing.expectEqual(@as(i64, 1), r.rows[0].values[0].integer);
+    try std.testing.expectEqualStrings("a", r.rows[0].values[1].text);
+}
+
+test "execute: VALUES multi-row" {
+    const allocator = std.testing.allocator;
+    var r = try execute(allocator, "VALUES (1, 'a'), (2, 'b'), (3, 'c')");
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 3), r.rows.len);
+    try std.testing.expectEqual(@as(i64, 2), r.rows[1].values[0].integer);
+    try std.testing.expectEqualStrings("c", r.rows[2].values[1].text);
+}
+
+test "execute: VALUES with mismatched arity is SyntaxError" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(Error.SyntaxError, execute(allocator, "VALUES (1, 2), (3)"));
 }
