@@ -300,3 +300,18 @@ SELECT * FROM (VALUES (1), (2), (3)) WHERE column1 > 1
 SELECT * FROM (VALUES ('foo'), ('bar'), ('baz'))
 SELECT *, 'extra' FROM (VALUES (1, 2))
 SELECT column1, *, column2 FROM (VALUES (1, 'a'))
+
+# multi-statement (Iter14.A)
+SELECT 1; SELECT 2
+VALUES (1); SELECT 99
+SELECT 1; SELECT 'x'
+SELECT 1;;
+;SELECT 1
+VALUES (1, 'a'); VALUES (2, 'b')
+SELECT 1; SELECT 2; SELECT 3
+SELECT 1+1; SELECT 2*3
+SELECT column1 FROM (VALUES (1), (2)); SELECT column1 FROM (VALUES (3))
+SELECT * FROM (VALUES (1)); SELECT 'after'
+SELECT 1; ;SELECT 2
+SELECT NULL; SELECT 1
+SELECT 'a'||'b'; SELECT length('hi')

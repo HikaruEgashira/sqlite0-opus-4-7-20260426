@@ -35,12 +35,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    var db = sqlite0.Database.init(gpa);
+    defer db.deinit();
+
     if (sql_inline) |sql| {
-        try runSql(gpa, sql, stdout, stderr);
+        try runSql(&db, sql, stdout, stderr);
         return;
     }
 
-    try repl(gpa, io, stdout, stderr);
+    try repl(&db, io, stdout, stderr);
 }
 
 fn printHelp(w: *std.Io.Writer) !void {
@@ -56,7 +59,7 @@ fn printHelp(w: *std.Io.Writer) !void {
     );
 }
 
-fn repl(gpa: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+fn repl(db: *sqlite0.Database, io: std.Io, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     var stdin_buf: [4096]u8 = undefined;
     var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buf);
     const stdin = &stdin_reader.interface;
@@ -84,7 +87,7 @@ fn repl(gpa: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, stderr: *std
             try stdout.flush();
             continue;
         }
-        runSql(gpa, trimmed, stdout, stderr) catch |err| {
+        runSql(db, trimmed, stdout, stderr) catch |err| {
             try stderr.print("error: {s}\n", .{@errorName(err)});
         };
         try stdout.flush();
@@ -92,18 +95,23 @@ fn repl(gpa: std.mem.Allocator, io: std.Io, stdout: *std.Io.Writer, stderr: *std
     }
 }
 
-fn runSql(gpa: std.mem.Allocator, sql: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
-    var result = sqlite0.execute(gpa, sql) catch |err| {
+fn runSql(db: *sqlite0.Database, sql: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var result = db.execute(sql) catch |err| {
         try stderr.print("error: {s}\n", .{@errorName(err)});
         return;
     };
     defer result.deinit();
 
-    for (result.rows) |row| {
-        for (row.values, 0..) |v, i| {
-            if (i > 0) try stdout.writeByte('|');
-            try v.format(stdout);
+    for (result.statements) |s| {
+        const rows = switch (s) {
+            .select, .values => |r| r,
+        };
+        for (rows) |row| {
+            for (row, 0..) |v, i| {
+                if (i > 0) try stdout.writeByte('|');
+                try v.format(stdout);
+            }
+            try stdout.writeByte('\n');
         }
-        try stdout.writeByte('\n');
     }
 }

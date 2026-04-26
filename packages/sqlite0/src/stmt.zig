@@ -16,22 +16,31 @@ const Value = value_mod.Value;
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
 
-/// Parse a top-level statement and return its rows.
+/// Parse a single top-level statement and return its rows.
 ///
 /// Supported forms:
 ///   - `SELECT <expr-list> [FROM (VALUES ...) AS alias(c1,...)]` — N rows
 ///     (1 when no FROM, otherwise one per source row)
 ///   - `VALUES (e, ...) [, (...)]`                              — N rows
 ///
+/// Single-statement only: trailing tokens after `;` raise `SyntaxError`.
+/// Multi-statement input is the responsibility of `database.Database.execute`
+/// (ADR-0003 §3); this entry point exists for backward-compatible callers in
+/// `exec.zig` and unit tests.
+///
 /// Caller owns the returned outer slice and each inner slice; free each
 /// `Value` with `ops.freeValue` then free the slices.
 pub fn parseStatement(allocator: std.mem.Allocator, sql: []const u8) ![][]Value {
     var p = Parser.init(allocator, sql);
-    switch (p.cur.kind) {
-        .keyword_select => return parseSelectStatement(&p),
-        .keyword_values => return parseValuesStatement(&p),
+    const rows: [][]Value = switch (p.cur.kind) {
+        .keyword_select => try parseSelectStatement(&p),
+        .keyword_values => try parseValuesStatement(&p),
         else => return Error.SyntaxError,
-    }
+    };
+    errdefer freeRows(allocator, rows);
+    if (p.cur.kind == .semicolon) p.advance();
+    if (p.cur.kind != .eof) return Error.SyntaxError;
+    return rows;
 }
 
 /// Convenience wrapper retained for callers that only handle scalar SELECT.
@@ -56,7 +65,11 @@ fn freeRows(allocator: std.mem.Allocator, rows: [][]Value) void {
     allocator.free(rows);
 }
 
-fn parseSelectStatement(p: *Parser) ![][]Value {
+/// Parse and execute one SELECT statement against the parser's current token
+/// stream. The caller (exec.zig single-stmt path or database.zig multi-stmt
+/// loop) decides whether trailing tokens are an error or the next statement.
+/// On exit the parser cursor sits on `.semicolon` or `.eof`.
+pub fn parseSelectStatement(p: *Parser) ![][]Value {
     try p.expect(.keyword_select);
 
     const select_items = try select.parseSelectList(p);
@@ -76,9 +89,6 @@ fn parseSelectStatement(p: *Parser) ![][]Value {
         p.advance();
         where_ast = try p.parseExpr();
     }
-
-    if (p.cur.kind == .semicolon) p.advance();
-    if (p.cur.kind != .eof) return Error.SyntaxError;
 
     if (!source_owned) {
         if (select.containsStar(select_items)) return Error.SyntaxError;
@@ -152,22 +162,12 @@ fn synthesizeColumnNames(allocator: std.mem.Allocator, n: usize) ![][]const u8 {
 
 /// `VALUES (e1, e2, ...) [, (e1, e2, ...)] ...` — every tuple must have the
 /// same arity (sqlite raises "all VALUES must have the same number of terms"
-/// at parse time; we mirror that with `Error.SyntaxError`).
-fn parseValuesStatement(p: *Parser) ![][]Value {
+/// at parse time; we mirror that with `Error.SyntaxError`). Like
+/// `parseSelectStatement`, this leaves the cursor on `.semicolon` or `.eof`
+/// for the caller to decide what comes next.
+pub fn parseValuesStatement(p: *Parser) ![][]Value {
     try p.expect(.keyword_values);
-    const rows = try parseValuesBody(p);
-    errdefer {
-        for (rows) |row| {
-            for (row) |v| ops.freeValue(p.allocator, v);
-            p.allocator.free(row);
-        }
-        p.allocator.free(rows);
-    }
-
-    if (p.cur.kind == .semicolon) p.advance();
-    if (p.cur.kind != .eof) return Error.SyntaxError;
-
-    return rows;
+    return parseValuesBody(p);
 }
 
 /// VALUES tuple list (after the `VALUES` keyword has been consumed).

@@ -12,10 +12,12 @@ pub const parser = @import("parser.zig");
 pub const select = @import("select.zig");
 pub const stmt = @import("stmt.zig");
 pub const exec = @import("exec.zig");
+pub const database = @import("database.zig");
 
 pub const Value = value.Value;
 pub const Result = exec.Result;
 pub const execute = exec.execute;
+pub const Database = database.Database;
 
 pub const version = "0.0.0";
 

@@ -1,7 +1,13 @@
+//! Single-statement execution wrapper retained for legacy callers (unit
+//! tests, library consumers that haven't moved to `Database`). Implemented
+//! as a thin shim over `Database.execute` per ADR-0003 §1: input must be
+//! exactly one statement (a multi-statement string raises `SyntaxError`).
+//! New code should use `Database` directly.
+
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
-const stmt = @import("stmt.zig");
+const database = @import("database.zig");
 
 const Value = value_mod.Value;
 
@@ -27,7 +33,23 @@ pub const Result = struct {
 };
 
 pub fn execute(allocator: std.mem.Allocator, sql: []const u8) !Result {
-    const raw_rows = try stmt.parseStatement(allocator, sql);
+    var db = database.Database.init(allocator);
+    defer db.deinit();
+
+    var er = try db.execute(sql);
+    if (er.statements.len != 1) {
+        er.deinit();
+        return Error.SyntaxError;
+    }
+
+    // Steal the rows from the single StatementResult, then let er.deinit free
+    // the (now empty-payload) outer slice.
+    const raw_rows: [][]Value = switch (er.statements[0]) {
+        .select, .values => |r| r,
+    };
+    er.statements[0] = .{ .select = &.{} };
+    er.deinit();
+
     errdefer {
         for (raw_rows) |row| {
             for (row) |v| ops.freeValue(allocator, v);
