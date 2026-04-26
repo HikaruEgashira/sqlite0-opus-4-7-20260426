@@ -717,3 +717,34 @@ CREATE TABLE t(x); INSERT INTO t VALUES (1),(1),(2); SELECT x FROM t INTERSECT S
 CREATE TABLE t(x); INSERT INTO t SELECT 1 UNION SELECT 2; SELECT x FROM t ORDER BY 1
 # SELECT ALL (explicit non-distinct counterpart, sqlite3 quirk)
 SELECT ALL 1 UNION SELECT 2
+# Iter21: subqueries in FROM
+# bare subquery, single bare-ref column
+SELECT a FROM (SELECT 1 AS a)
+# star expansion of inline-aliased subquery
+SELECT * FROM (SELECT 1 AS a, 2 AS b)
+# subquery over a real table; outer projection
+CREATE TABLE t21(x INT, y INT); INSERT INTO t21 VALUES (1,10),(2,20),(3,30); SELECT x FROM (SELECT * FROM t21 WHERE y > 15) ORDER BY 1
+# qualified ref via subquery alias
+SELECT t.a FROM (SELECT 1 AS a, 2 AS b) AS t
+# multi-row subquery + WHERE on outer side
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(2),(3); SELECT x FROM (SELECT x FROM t21) WHERE x > 1 ORDER BY x
+# aggregate over a UNION subquery
+SELECT count(*), sum(x) FROM (SELECT 1 AS x UNION SELECT 2 UNION SELECT 3)
+# nested subquery (subquery inside subquery)
+SELECT * FROM (SELECT * FROM (SELECT 1 AS a, 2 AS b))
+# subquery with ORDER BY + LIMIT, outer projection
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (3),(1),(2),(4); SELECT x FROM (SELECT x FROM t21 ORDER BY x DESC LIMIT 2) ORDER BY x
+# subquery joined to a regular table via comma-FROM
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(2); SELECT s.v, t21.x FROM (SELECT 10 AS v) AS s, t21 ORDER BY t21.x
+# inner GROUP BY surfaced into outer projection
+CREATE TABLE t21(g INT, v INT); INSERT INTO t21 VALUES (1,10),(1,20),(2,30); SELECT g, total FROM (SELECT g, sum(v) AS total FROM t21 GROUP BY g) ORDER BY g
+# DISTINCT inside subquery, COUNT outside
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(1),(2),(2),(3); SELECT count(*) FROM (SELECT DISTINCT x FROM t21)
+# subquery returning no rows + outer projection (empty result)
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(2); SELECT x FROM (SELECT x FROM t21 WHERE x > 99)
+# LEFT JOIN against a subquery (verifies subquery+join interaction)
+CREATE TABLE a21(id INT); INSERT INTO a21 VALUES (1),(2),(3); SELECT a21.id, s.v FROM a21 LEFT JOIN (SELECT 1 AS id, 100 AS v) AS s ON a21.id = s.id ORDER BY a21.id
+# ORDER BY referencing a subquery's projected column name (not in outer SELECT list)
+SELECT 1 FROM (SELECT 'a' AS k) ORDER BY k
+# ORDER BY referencing a subquery-projected column from a multi-row source
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (3),(1),(2); SELECT 1 FROM (SELECT x AS sortkey FROM t21) ORDER BY sortkey

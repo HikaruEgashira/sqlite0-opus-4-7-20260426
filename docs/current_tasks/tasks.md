@@ -24,11 +24,13 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter19.B: `CROSS JOIN` / `INNER JOIN ... ON` / `JOIN ... ON` keywords
 - [x] Iter19.C: `LEFT [OUTER] JOIN` (per-boundary ON + NULL padding for unmatched left rows)
 - [x] Iter20: `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` (chain-level ORDER BY/LIMIT, dedup-replace-last semantics, column-count mismatch error)
+- [x] Iter21: `FROM (SELECT ...) [AS alias]` 部分問合せ (column-name 由来は alias > bare-ref > columnN; star は内側 cartesian 展開; nested / setop / aggregate / LEFT JOIN 連動を確認)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
 - [ ] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t`)
 - [ ] Iter20 拡張: setop chain での ORDER BY <name>/<expr> 対応 (現在は position-only)
+- [ ] Iter21 拡張: 任意 expression 列の合成名は現在 `columnN` を使用 (sqlite3 はソーステキストを使用); 仕様乖離あり、`alias` または bare ref で命名するワークアラウンド要
 
 ## Backlog (Phase 3以降)
 

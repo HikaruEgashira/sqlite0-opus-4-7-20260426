@@ -169,5 +169,20 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
                 .qualifier = tr.alias orelse tr.name,
             };
         },
+        .subquery => |sq| blk: {
+            // Run the inner SELECT and capture its projected column names.
+            // The qualifier is the explicit alias (if any); without an alias
+            // qualified refs into the subquery can't match — sqlite3 still
+            // accepts unqualified refs in that case, which is what an empty
+            // qualifier achieves here too.
+            const result = try engine.executeSelectWithColumns(db, alloc, sq.select);
+            const out = try alloc.alloc([]const Value, result.rows.len);
+            for (result.rows, out) |row, *slot| slot.* = row;
+            break :blk .{
+                .rows = out,
+                .columns = result.columns,
+                .qualifier = sq.alias orelse "",
+            };
+        },
     };
 }

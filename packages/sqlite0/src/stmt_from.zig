@@ -62,10 +62,22 @@ pub const ParsedFromSource = union(enum) {
         name: []const u8,
         alias: ?[]const u8 = null,
     },
+    /// `FROM (SELECT ...) [AS <alias>]` — subquery materialised at execute
+    /// time by `engine_from.resolveSource`. Output column names derive from
+    /// the inner SELECT items: explicit alias > bare column ref > `columnN`
+    /// for arbitrary expressions; `*` expands to the inner FROM's columns.
+    /// `alias` (when present) becomes the qualifier for qualified column
+    /// refs (`alias.col`); when absent, qualified refs cannot match this
+    /// source (sqlite3 lets unqualified refs still resolve).
+    subquery: struct {
+        select: stmt.ParsedSelect,
+        alias: ?[]const u8 = null,
+    },
 };
 
-/// Free arena-owned content of a single FROM source. Safe to call on either
-/// variant — `table_ref` borrows from `Parser.src` and owns nothing.
+/// Free arena-owned content of a single FROM source. Safe to call on any
+/// variant — `table_ref` borrows from `Parser.src` and owns nothing;
+/// `subquery` recurses through `freeParsedSelectFields` for the inner AST.
 pub fn freeParsedFrom(allocator: std.mem.Allocator, src: ParsedFromSource) void {
     switch (src) {
         .inline_values => |iv| {
@@ -78,6 +90,7 @@ pub fn freeParsedFrom(allocator: std.mem.Allocator, src: ParsedFromSource) void 
             allocator.free(iv.columns);
         },
         .table_ref => {},
+        .subquery => |sq| stmt.freeParsedSelectFields(allocator, sq.select),
     }
 }
 
@@ -91,7 +104,7 @@ pub fn freeFromList(allocator: std.mem.Allocator, list: []FromTerm) void {
     allocator.free(list);
 }
 
-pub fn parseFromClause(p: *Parser) ![]FromTerm {
+pub fn parseFromClause(p: *Parser) Error![]FromTerm {
     try p.expect(.keyword_from);
     var terms: std.ArrayList(FromTerm) = .empty;
     errdefer {
@@ -154,12 +167,22 @@ fn matchJoinSeparator(p: *Parser) ?JoinSep {
     return null;
 }
 
-/// Parse one source: `(VALUES ...)` or an identifier, each optionally
-/// followed by `[AS] alias`. Aliases are stored on the source so qualified
-/// column refs (`alias.col`) can resolve at execute time.
-fn parseFromSource(p: *Parser) !ParsedFromSource {
+/// Parse one source: `(VALUES ...)`, `(SELECT ...)`, or an identifier — each
+/// optionally followed by `[AS] alias`. Aliases are stored on the source so
+/// qualified column refs (`alias.col`) can resolve at execute time. The
+/// `lparen` dispatch peeks at the next token: `keyword_select` selects the
+/// subquery branch, `keyword_values` the inline-VALUES branch, anything else
+/// is a syntax error.
+fn parseFromSource(p: *Parser) Error!ParsedFromSource {
     if (p.cur.kind == .lparen) {
         p.advance();
+        if (p.cur.kind == .keyword_select) {
+            const ps = try stmt.parseSelectStatement(p);
+            errdefer stmt.freeParsedSelectFields(p.allocator, ps);
+            try p.expect(.rparen);
+            const alias = parseOptionalAlias(p);
+            return .{ .subquery = .{ .select = ps, .alias = alias } };
+        }
         try p.expect(.keyword_values);
         const rows = try stmt.parseValuesBody(p);
         errdefer {
