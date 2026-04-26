@@ -32,6 +32,7 @@ pub const TokenKind = enum {
     keyword_table,
     keyword_insert,
     keyword_into,
+    keyword_like,
     plus,
     minus,
     star,
@@ -256,6 +257,7 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "table")) return .keyword_table;
     if (eqlIgnoreCase(text, "insert")) return .keyword_insert;
     if (eqlIgnoreCase(text, "into")) return .keyword_into;
+    if (eqlIgnoreCase(text, "like")) return .keyword_like;
     return null;
 }
 

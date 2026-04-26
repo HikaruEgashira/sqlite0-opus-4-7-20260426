@@ -43,6 +43,9 @@ pub const Expr = union(enum) {
     logical_not: *Expr,
     case_expr: CaseExpr,
     func_call: FuncCall,
+    /// `value LIKE pattern` (Iter13.A). ESCAPE is deferred to Iter13.C; GLOB
+    /// will reuse this struct once Iter13.B adds a pattern-flavour field.
+    like: Like,
 
     pub const BinaryArith = struct { op: BinaryOp, left: *Expr, right: *Expr };
     pub const BinaryConcat = struct { left: *Expr, right: *Expr };
@@ -65,6 +68,7 @@ pub const Expr = union(enum) {
         else_branch: ?*Expr,
     };
     pub const FuncCall = struct { name: []const u8, args: []*Expr };
+    pub const Like = struct { value: *Expr, pattern: *Expr, negated: bool };
 
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -119,6 +123,10 @@ pub const Expr = union(enum) {
                 for (fc.args) |arg| arg.deinit(allocator);
                 allocator.free(fc.args);
                 // fc.name is borrowed from src; nothing to free.
+            },
+            .like => |l| {
+                l.value.deinit(allocator);
+                l.pattern.deinit(allocator);
             },
         }
         allocator.destroy(self);
@@ -217,6 +225,12 @@ pub fn makeCaseExpr(
 pub fn makeFuncCall(allocator: std.mem.Allocator, name: []const u8, args: []*Expr) !*Expr {
     const node = try allocator.create(Expr);
     node.* = .{ .func_call = .{ .name = name, .args = args } };
+    return node;
+}
+
+pub fn makeLike(allocator: std.mem.Allocator, value: *Expr, pattern: *Expr, negated: bool) !*Expr {
+    const node = try allocator.create(Expr);
+    node.* = .{ .like = .{ .value = value, .pattern = pattern, .negated = negated } };
     return node;
 }
 

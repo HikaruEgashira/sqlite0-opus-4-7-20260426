@@ -127,6 +127,10 @@ pub const Parser = struct {
                     self.advance();
                     left = try self.parseInList(left, false);
                 },
+                .keyword_like => {
+                    self.advance();
+                    left = try self.parseLike(left, false);
+                },
                 .keyword_not => {
                     const snap = self.snapshot();
                     self.advance();
@@ -136,6 +140,9 @@ pub const Parser = struct {
                     } else if (self.cur.kind == .keyword_in) {
                         self.advance();
                         left = try self.parseInList(left, true);
+                    } else if (self.cur.kind == .keyword_like) {
+                        self.advance();
+                        left = try self.parseLike(left, true);
                     } else {
                         self.restore(snap);
                         break;
@@ -157,6 +164,23 @@ pub const Parser = struct {
         const hi = try self.parseComparison();
         errdefer hi.deinit(self.allocator);
         return ast.makeBetween(self.allocator, value, lo, hi, negated);
+    }
+
+    /// `value LIKE pattern` (Iter13.A). ESCAPE is rejected here to keep this
+    /// iteration small; Iter13.C lifts that restriction. Takes ownership of
+    /// `value` and frees it on any error before returning.
+    fn parseLike(self: *Parser, value: *ast.Expr, negated: bool) Error!*ast.Expr {
+        errdefer value.deinit(self.allocator);
+        const pattern = try self.parseAddSub();
+        errdefer pattern.deinit(self.allocator);
+        if (self.cur.kind == .identifier) {
+            // ESCAPE is not yet a keyword; if it appears here, surface as
+            // unsupported rather than silently ignoring it (Iter13.C).
+            if (std.ascii.eqlIgnoreCase(self.cur.slice(self.src), "escape")) {
+                return Error.UnsupportedFeature;
+            }
+        }
+        return ast.makeLike(self.allocator, value, pattern, negated);
     }
 
     /// `value IN (e1, e2, ...)` — takes ownership of `value` and frees it

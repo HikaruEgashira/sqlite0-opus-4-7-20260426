@@ -51,6 +51,7 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .logical_not => |operand| try evalLogicalNot(ctx, operand),
         .case_expr => |ce| try evalCaseExpr(ctx, ce),
         .func_call => |fc| try evalFuncCall(ctx, fc),
+        .like => |l| try evalLike(ctx, l),
     };
 }
 
@@ -213,6 +214,15 @@ fn evalFuncCall(ctx: EvalContext, fc: Expr.FuncCall) Error!Value {
     return funcs.call(ctx.allocator, fc.name, arg_values.items);
 }
 
+fn evalLike(ctx: EvalContext, l: ast.Expr.Like) Error!Value {
+    const value = try evalExpr(ctx, l.value);
+    defer ops.freeValue(ctx.allocator, value);
+    const pattern = try evalExpr(ctx, l.pattern);
+    defer ops.freeValue(ctx.allocator, pattern);
+    const result = try ops.applyLike(ctx.allocator, value, pattern, null);
+    return if (l.negated) ops.logicalNot(result) else result;
+}
+
 /// Resolve a column reference against the current row. Case-insensitive
 /// match per SQL's identifier rules. Returns a fresh `Value` owned by
 /// `ctx.allocator` (TEXT/BLOB bytes duped). Unknown name → SyntaxError.
@@ -334,4 +344,34 @@ test "eval: func_call abs" {
     defer node.deinit(allocator);
     const v = try evalExpr(.{ .allocator = allocator }, node);
     try std.testing.expectEqual(@as(i64, 7), v.integer);
+}
+
+test "eval: like matches" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "hello") });
+    const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "h%o") });
+    const node = try ast.makeLike(allocator, value, pattern, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 1), v.integer);
+}
+
+test "eval: not like" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "abc") });
+    const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "x%") });
+    const node = try ast.makeLike(allocator, value, pattern, true);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(@as(i64, 1), v.integer);
+}
+
+test "eval: like NULL is NULL" {
+    const allocator = std.testing.allocator;
+    const value = try ast.makeLiteral(allocator, Value.null);
+    const pattern = try ast.makeLiteral(allocator, Value{ .text = try allocator.dupe(u8, "a") });
+    const node = try ast.makeLike(allocator, value, pattern, false);
+    defer node.deinit(allocator);
+    const v = try evalExpr(.{ .allocator = allocator }, node);
+    try std.testing.expectEqual(Value.null, v);
 }
