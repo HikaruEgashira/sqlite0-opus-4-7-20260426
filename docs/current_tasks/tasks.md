@@ -6,8 +6,9 @@
 
 ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-statement 実行 + `CREATE TABLE` / `INSERT` / `SELECT FROM t` の縦串を通す。
 
-### 次の縦スライス (ADR-0003 の Phase 2)
-- [ ] Iter14.D (任意): `INSERT INTO t (c1, c2) VALUES (...)` の column list 指定 + `INSERT INTO t SELECT ...`。着手前に database.zig (498 行) を engine.zig へ split する。
+### Phase 2 の状態
+- Iter14.A〜D は完了 (`Database` struct / multi-statement / `CREATE TABLE` / `INSERT` / `SELECT FROM t` / `INSERT (col-list)` / `INSERT ... SELECT` / `CREATE TABLE` の duplicate column 検出)。
+- 次は Phase 1 の残 (Iter9, Iter12) または Phase 3 (VDBE) のどちらかへ。
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 

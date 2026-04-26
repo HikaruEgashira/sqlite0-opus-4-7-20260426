@@ -93,11 +93,14 @@ pub const Database = struct {
     }
 
     /// Register a new empty table. Returns `Error.TableAlreadyExists` if a
-    /// table with the (case-insensitive) name is already in `tables`. Both
-    /// `name` and `cols` (and each entry of `cols`) are taken into ownership
-    /// by `self` on success and freed at `deinit`. On failure ownership of
-    /// the inputs returns to the caller (this function frees nothing it
-    /// didn't allocate itself).
+    /// table with the (case-insensitive) name is already in `tables`, or
+    /// `Error.DuplicateColumnName` if `parsed.columns` contains the same
+    /// (case-insensitive) name twice — sqlite3 rejects `CREATE TABLE t(a, A)`
+    /// at parse time with "duplicate column name". Both `name` and `cols`
+    /// (and each entry of `cols`) are taken into ownership by `self` on
+    /// success and freed at `deinit`. On failure ownership of the inputs
+    /// returns to the caller (this function frees nothing it didn't allocate
+    /// itself).
     pub fn registerTable(self: *Database, parsed: stmt_mod.ParsedCreateTable) !void {
         const key = try lowerCaseDupe(self.allocator, parsed.name);
         errdefer self.allocator.free(key);
@@ -111,7 +114,18 @@ pub const Database = struct {
             self.allocator.free(cols);
         }
         while (produced < parsed.columns.len) : (produced += 1) {
-            cols[produced] = try lowerCaseDupe(self.allocator, parsed.columns[produced]);
+            const lowered = try lowerCaseDupe(self.allocator, parsed.columns[produced]);
+            // Reject duplicates (case-insensitive). Compare against earlier
+            // entries which are already lower-cased; the lowered slice we
+            // just created is freed via the errdefer chain on the surrounding
+            // allocation if the error escapes.
+            for (cols[0..produced]) |existing| {
+                if (std.mem.eql(u8, existing, lowered)) {
+                    self.allocator.free(lowered);
+                    return Error.DuplicateColumnName;
+                }
+            }
+            cols[produced] = lowered;
         }
 
         try self.tables.put(self.allocator, key, .{ .columns = cols });
@@ -356,4 +370,20 @@ test "Database.execute: INSERT arity mismatch → ColumnCountMismatch" {
     var db = Database.init(allocator);
     defer db.deinit();
     try std.testing.expectError(Error.ColumnCountMismatch, db.execute("CREATE TABLE t(x); INSERT INTO t VALUES (1, 2)"));
+}
+
+test "Database.execute: CREATE TABLE duplicate column → DuplicateColumnName" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(Error.DuplicateColumnName, db.execute("CREATE TABLE t(a, a, b)"));
+    // Failed CREATE must not leave a partial table behind.
+    try std.testing.expect(!db.tables.contains("t"));
+}
+
+test "Database.execute: CREATE TABLE duplicate column case-insensitive" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(Error.DuplicateColumnName, db.execute("CREATE TABLE t(name TEXT, NAME INTEGER)"));
 }

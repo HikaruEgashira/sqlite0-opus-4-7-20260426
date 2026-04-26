@@ -17,6 +17,7 @@ pub const Error = error{
     TableAlreadyExists,
     NoSuchTable,
     ColumnCountMismatch,
+    DuplicateColumnName,
     InvalidEscape,
 };
 

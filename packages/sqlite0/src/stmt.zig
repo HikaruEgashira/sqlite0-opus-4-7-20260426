@@ -298,12 +298,24 @@ fn parseColumnDef(p: *Parser) ![]const u8 {
 
 // ── INSERT ──────────────────────────────────────────────────────────────────
 
-/// `INSERT INTO <name> VALUES (...) [, (...)]`. The `(c1, c2, ...)` column
-/// list form is deferred to Iter14.D and rejected here with
-/// `UnsupportedFeature`.
+/// `INSERT INTO <name> [(c1, c2, ...)] (VALUES (...) [, (...)] | SELECT ...)`
+///
+/// `columns == null` means "all table columns in declaration order" (the
+/// default). When non-null, each name borrows from `Parser.src` and the
+/// outer slice lives in the per-statement arena.
+///
+/// `source` holds either eagerly-evaluated VALUES rows or an unevaluated
+/// `ParsedSelect`; the engine resolves the SELECT path against `Database`
+/// state at execute time.
 pub const ParsedInsert = struct {
-    table: []const u8,    // borrowed from p.src
-    rows: [][]Value,       // arena-allocated; Values' TEXT/BLOB live in arena
+    table: []const u8,
+    columns: ?[][]const u8,
+    source: Source,
+
+    pub const Source = union(enum) {
+        values: [][]Value,
+        select: ParsedSelect,
+    };
 };
 
 pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
@@ -313,9 +325,39 @@ pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
     const table = p.cur.slice(p.src);
     p.advance();
 
-    if (p.cur.kind == .lparen) return Error.UnsupportedFeature;
+    var columns: ?[][]const u8 = null;
+    errdefer if (columns) |cs| p.allocator.free(cs);
+    if (p.cur.kind == .lparen) {
+        p.advance();
+        columns = try parseInsertColumnList(p);
+        try p.expect(.rparen);
+    }
 
-    try p.expect(.keyword_values);
-    const rows = try parseValuesBody(p);
-    return .{ .table = table, .rows = rows };
+    switch (p.cur.kind) {
+        .keyword_values => {
+            p.advance();
+            const rows = try parseValuesBody(p);
+            return .{ .table = table, .columns = columns, .source = .{ .values = rows } };
+        },
+        .keyword_select => {
+            const ps = try parseSelectStatement(p);
+            return .{ .table = table, .columns = columns, .source = .{ .select = ps } };
+        },
+        else => return Error.SyntaxError,
+    }
+}
+
+fn parseInsertColumnList(p: *Parser) ![][]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer names.deinit(p.allocator);
+    if (p.cur.kind != .identifier) return Error.SyntaxError;
+    try names.append(p.allocator, p.cur.slice(p.src));
+    p.advance();
+    while (p.cur.kind == .comma) {
+        p.advance();
+        if (p.cur.kind != .identifier) return Error.SyntaxError;
+        try names.append(p.allocator, p.cur.slice(p.src));
+        p.advance();
+    }
+    return names.toOwnedSlice(p.allocator);
 }

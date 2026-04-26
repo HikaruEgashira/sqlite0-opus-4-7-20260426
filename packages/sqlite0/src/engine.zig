@@ -53,7 +53,7 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_insert => {
             const parsed = try stmt_mod.parseInsertStatement(p);
-            const rowcount = try executeInsert(db, parsed);
+            const rowcount = try executeInsert(db, p.allocator, parsed);
             return .{ .insert = .{ .rowcount = rowcount } };
         },
         else => return Error.SyntaxError,
@@ -62,8 +62,10 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
 
 /// Run a parsed SELECT against `db` state. Result rows are allocated in
 /// `alloc` (the per-statement arena); `dupeRowsToLongLived` later moves them
-/// to long-lived memory.
-fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
+/// to long-lived memory. Also called by `executeInsert` for `INSERT INTO t
+/// SELECT ...`, in which case the rows are deep-duped into the target table
+/// rather than the long-lived ExecResult.
+pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) ![][]Value {
     if (ps.from) |from| switch (from) {
         .inline_values => |iv| return select_mod.executeWithFrom(alloc, ps.items, iv.rows, iv.columns, ps.where),
         .table_ref => |name| {
@@ -75,20 +77,37 @@ fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSel
     return select_mod.executeWithoutFrom(alloc, ps.items, ps.where);
 }
 
-/// Append rows from a parsed INSERT into the target table. The Values in
-/// `parsed.rows` live in arena memory; this helper deep-dupes each Value to
-/// `db.allocator` before storing in the table.
-fn executeInsert(db: *Database, parsed: stmt_mod.ParsedInsert) !u64 {
+/// Append rows from a parsed INSERT into the target table. Source rows come
+/// from either eagerly-evaluated VALUES tuples or a per-row SELECT result;
+/// both live in arena memory until `dupeValueDeep` moves them.
+///
+/// When `parsed.columns` is non-null, source-row columns are projected into
+/// the table-schema-shaped row by name (case-insensitive); table columns
+/// not mentioned in the column list become NULL. Unknown column names or
+/// arity mismatches return `SyntaxError`/`ColumnCountMismatch` before any
+/// rows are appended (validation precedes mutation).
+fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.ParsedInsert) !u64 {
     const t = try lookupTable(db, db.allocator, parsed.table);
-    for (parsed.rows) |row| {
-        if (row.len != t.columns.len) return Error.ColumnCountMismatch;
+
+    const source_rows: [][]Value = switch (parsed.source) {
+        .values => |rows| rows,
+        .select => |ps| try executeSelect(db, arena, ps),
+    };
+
+    // Map source-row position → table-row position. `null` means "this table
+    // column is not supplied by source" and should be NULL-padded.
+    const target_indices = try resolveColumnTargets(arena, t, parsed.columns);
+    const source_arity: usize = if (parsed.columns) |cs| cs.len else t.columns.len;
+    for (source_rows) |row| {
+        if (row.len != source_arity) return Error.ColumnCountMismatch;
     }
-    try t.rows.ensureUnusedCapacity(db.allocator, parsed.rows.len);
+
+    try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);
     var inserted: u64 = 0;
     errdefer {
-        // Roll back any rows already appended in this call. (Schema state
-        // changes are durable but row-level partial writes shouldn't survive
-        // the all-or-nothing error contract — undo the partial append here.)
+        // Roll back any rows already appended in this call (ADR-0003 §1
+        // all-or-nothing). Schema mutations from registerTable are not
+        // rolled back; only same-call row appends are.
         var i: u64 = 0;
         while (i < inserted) : (i += 1) {
             const last_idx = t.rows.items.len - 1;
@@ -98,20 +117,64 @@ fn executeInsert(db: *Database, parsed: stmt_mod.ParsedInsert) !u64 {
             db.allocator.free(undone_row);
         }
     }
-    for (parsed.rows) |row| {
-        const new_row = try db.allocator.alloc(Value, row.len);
+    for (source_rows) |row| {
+        const new_row = try db.allocator.alloc(Value, t.columns.len);
         var k: usize = 0;
         errdefer {
             for (new_row[0..k]) |v| ops.freeValue(db.allocator, v);
             db.allocator.free(new_row);
         }
-        while (k < row.len) : (k += 1) {
-            new_row[k] = try dupeValueDeep(db.allocator, row[k]);
+        while (k < t.columns.len) : (k += 1) {
+            new_row[k] = if (target_indices[k]) |src_idx|
+                try dupeValueDeep(db.allocator, row[src_idx])
+            else
+                Value.null;
         }
         t.rows.appendAssumeCapacity(new_row);
         inserted += 1;
     }
     return inserted;
+}
+
+/// Build a per-table-column slice mapping each table column index to either
+/// the source row position that provides it (`?usize`) or null (meaning
+/// "column omitted; use NULL"). When `cols` is null the mapping is the
+/// identity (`[0, 1, 2, ...]`).
+fn resolveColumnTargets(
+    arena: std.mem.Allocator,
+    t: *const Table,
+    cols: ?[][]const u8,
+) ![]?usize {
+    const targets = try arena.alloc(?usize, t.columns.len);
+    if (cols) |column_list| {
+        @memset(targets, null);
+        // Duplicate column names: sqlite3 silently keeps the FIRST mapping
+        // and ignores later occurrences. Match that behavior — verified
+        // against sqlite3 3.51.0 (`INSERT INTO t (a, a, b) VALUES (1, 2, 3)`
+        // → row `(1, 3)`).
+        for (column_list, 0..) |name, src_idx| {
+            const tcol_idx = findTableColumn(t, name) orelse return Error.SyntaxError;
+            if (targets[tcol_idx] == null) targets[tcol_idx] = src_idx;
+        }
+    } else {
+        for (targets, 0..) |*slot, i| slot.* = i;
+    }
+    return targets;
+}
+
+fn findTableColumn(t: *const Table, name: []const u8) ?usize {
+    for (t.columns, 0..) |col, i| {
+        if (eqlIgnoreCase(name, col)) return i;
+    }
+    return null;
+}
+
+fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    }
+    return true;
 }
 
 /// Look up a table by user-supplied (possibly mixed-case) name. `scratch` is
