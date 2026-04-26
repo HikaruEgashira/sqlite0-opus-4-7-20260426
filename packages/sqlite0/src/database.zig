@@ -27,17 +27,38 @@ const parser_mod = @import("parser.zig");
 const Value = value_mod.Value;
 pub const Error = ops.Error;
 
-/// One executed statement's outcome. Phase 2 only emits row-producing kinds
-/// (`select` / `values`); CREATE / INSERT join in Iter14.B/C with their own
-/// variants (no rows, just side effects).
+/// One executed statement's outcome. Row-producing statements carry their
+/// rows; `create_table` carries no payload (the side effect is recorded on
+/// the `Database` itself).
 pub const StatementResult = union(enum) {
     select: [][]Value,
     values: [][]Value,
+    create_table,
 
     pub fn deinit(self: StatementResult, allocator: std.mem.Allocator) void {
         switch (self) {
             .select, .values => |rows| freeRows(allocator, rows),
+            .create_table => {},
         }
+    }
+};
+
+/// In-memory table. All strings (name keys, column names) and `Value`
+/// payloads inside `rows` are owned by `Database.allocator`. ADR-0003 §2:
+/// no type affinity tracking in Phase 2; Iter14.B leaves `rows` empty and
+/// Iter14.C populates it via INSERT.
+pub const Table = struct {
+    columns: [][]const u8,
+    rows: std.ArrayListUnmanaged([]Value) = .empty,
+
+    pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
+        for (self.rows.items) |row| {
+            for (row) |v| ops.freeValue(allocator, v);
+            allocator.free(row);
+        }
+        self.rows.deinit(allocator);
+        for (self.columns) |c| allocator.free(c);
+        allocator.free(self.columns);
     }
 };
 
@@ -53,13 +74,44 @@ pub const ExecResult = struct {
 
 pub const Database = struct {
     allocator: std.mem.Allocator,
+    tables: std.StringHashMapUnmanaged(Table) = .{},
 
     pub fn init(allocator: std.mem.Allocator) Database {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *Database) void {
-        _ = self;
+        var it = self.tables.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.tables.deinit(self.allocator);
+    }
+
+    /// Register a new empty table. Returns `Error.TableAlreadyExists` if a
+    /// table with the (case-insensitive) name is already in `tables`. Both
+    /// `name` and `cols` (and each entry of `cols`) are taken into ownership
+    /// by `self` on success and freed at `deinit`. On failure ownership of
+    /// the inputs returns to the caller (this function frees nothing it
+    /// didn't allocate itself).
+    fn registerTable(self: *Database, parsed: stmt_mod.ParsedCreateTable) !void {
+        const key = try lowerCaseDupe(self.allocator, parsed.name);
+        errdefer self.allocator.free(key);
+
+        if (self.tables.contains(key)) return Error.TableAlreadyExists;
+
+        const cols = try self.allocator.alloc([]const u8, parsed.columns.len);
+        var produced: usize = 0;
+        errdefer {
+            for (cols[0..produced]) |c| self.allocator.free(c);
+            self.allocator.free(cols);
+        }
+        while (produced < parsed.columns.len) : (produced += 1) {
+            cols[produced] = try lowerCaseDupe(self.allocator, parsed.columns[produced]);
+        }
+
+        try self.tables.put(self.allocator, key, .{ .columns = cols });
     }
 
     /// Execute `sql` (one or more `;`-separated statements) against `self`.
@@ -112,8 +164,19 @@ fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             const long_rows = try dupeRowsToLongLived(db.allocator, arena_rows);
             return .{ .values = long_rows };
         },
+        .keyword_create => {
+            const parsed = try stmt_mod.parseCreateTableStatement(p);
+            try db.registerTable(parsed);
+            return .create_table;
+        },
         else => return Error.SyntaxError,
     }
+}
+
+fn lowerCaseDupe(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    const buf = try allocator.alloc(u8, src.len);
+    for (src, buf) |c, *out| out.* = std.ascii.toLower(c);
+    return buf;
 }
 
 /// Deep-copy `rows` from arena-backed memory into `long`. Each TEXT/BLOB
@@ -261,4 +324,75 @@ test "Database.execute: instances are independent" {
     defer er2.deinit();
     try std.testing.expectEqual(@as(i64, 1), er1.statements[0].select[0][0].integer);
     try std.testing.expectEqual(@as(i64, 2), er2.statements[0].select[0][0].integer);
+}
+
+test "Database.execute: CREATE TABLE registers schema, no rows" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE t(x, y)");
+    defer er.deinit();
+    try std.testing.expectEqual(@as(usize, 1), er.statements.len);
+    try std.testing.expect(er.statements[0] == .create_table);
+    try std.testing.expect(db.tables.contains("t"));
+    const t = db.tables.get("t").?;
+    try std.testing.expectEqual(@as(usize, 2), t.columns.len);
+    try std.testing.expectEqualStrings("x", t.columns[0]);
+    try std.testing.expectEqualStrings("y", t.columns[1]);
+}
+
+test "Database.execute: CREATE TABLE with type annotations" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE users(id INTEGER, name TEXT NOT NULL)");
+    defer er.deinit();
+    const t = db.tables.get("users").?;
+    try std.testing.expectEqualStrings("id", t.columns[0]);
+    try std.testing.expectEqualStrings("name", t.columns[1]);
+}
+
+test "Database.execute: CREATE TABLE name and column case-insensitive" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE T(X, Y)");
+    defer er.deinit();
+    try std.testing.expect(db.tables.contains("t"));
+    const t = db.tables.get("t").?;
+    try std.testing.expectEqualStrings("x", t.columns[0]);
+}
+
+test "Database.execute: duplicate CREATE TABLE → TableAlreadyExists" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(Error.TableAlreadyExists, db.execute("CREATE TABLE t(x); CREATE TABLE t(y)"));
+    // First CREATE was rolled back as part of all-or-nothing? No — schema
+    // changes aren't rolled back; the table from the first stmt persists on
+    // self even though the ExecResult is discarded. ADR-0003 §1 covers
+    // statement-level ExecResult rollback, not Database state. Verify:
+    try std.testing.expect(db.tables.contains("t"));
+}
+
+test "Database.execute: CREATE then SELECT in one batch" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE t(x); SELECT 42");
+    defer er.deinit();
+    try std.testing.expectEqual(@as(usize, 2), er.statements.len);
+    try std.testing.expect(er.statements[0] == .create_table);
+    try std.testing.expectEqual(@as(i64, 42), er.statements[1].select[0][0].integer);
+}
+
+test "Database.execute: CREATE persists across execute calls" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er1 = try db.execute("CREATE TABLE t(x)");
+    er1.deinit();
+    var er2 = try db.execute("SELECT 1");
+    defer er2.deinit();
+    try std.testing.expect(db.tables.contains("t"));
 }

@@ -43,9 +43,11 @@ pub fn execute(allocator: std.mem.Allocator, sql: []const u8) !Result {
     }
 
     // Steal the rows from the single StatementResult, then let er.deinit free
-    // the (now empty-payload) outer slice.
+    // the (now empty-payload) outer slice. Non-row statements (CREATE TABLE)
+    // produce no rows; the resulting Result has zero entries.
     const raw_rows: [][]Value = switch (er.statements[0]) {
         .select, .values => |r| r,
+        .create_table => &.{},
     };
     er.statements[0] = .{ .select = &.{} };
     er.deinit();

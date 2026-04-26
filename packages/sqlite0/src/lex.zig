@@ -28,6 +28,8 @@ pub const TokenKind = enum {
     keyword_end,
     keyword_values,
     keyword_as,
+    keyword_create,
+    keyword_table,
     plus,
     minus,
     star,
@@ -248,6 +250,8 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "end")) return .keyword_end;
     if (eqlIgnoreCase(text, "values")) return .keyword_values;
     if (eqlIgnoreCase(text, "as")) return .keyword_as;
+    if (eqlIgnoreCase(text, "create")) return .keyword_create;
+    if (eqlIgnoreCase(text, "table")) return .keyword_table;
     return null;
 }
 

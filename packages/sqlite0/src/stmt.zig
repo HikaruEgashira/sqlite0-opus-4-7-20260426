@@ -170,6 +170,75 @@ pub fn parseValuesStatement(p: *Parser) ![][]Value {
     return parseValuesBody(p);
 }
 
+/// Result of parsing a `CREATE TABLE` statement. All slices borrow from
+/// `Parser.src`, which the caller (`Database.execute`) holds for the entire
+/// `execute` call; the outer slices are allocated in `Parser.allocator`
+/// (typically the per-statement arena). The caller is expected to dupe
+/// `name` and `columns[*]` to long-lived memory before storing them.
+pub const ParsedCreateTable = struct {
+    name: []const u8,
+    columns: [][]const u8,
+};
+
+/// `CREATE TABLE <name> ( <col-def> [, <col-def> ...] )`
+///
+/// Iter14.B accepts the simple form where each column-def is a column name
+/// optionally followed by a type-name and column-constraints. Type/constraint
+/// tokens are consumed and discarded — SQLite3 stores them as schema strings
+/// but doesn't enforce them as types (dynamic typing). Phase 5 will revisit
+/// constraint enforcement.
+pub fn parseCreateTableStatement(p: *Parser) !ParsedCreateTable {
+    try p.expect(.keyword_create);
+    try p.expect(.keyword_table);
+
+    if (p.cur.kind != .identifier) return Error.SyntaxError;
+    const name = p.cur.slice(p.src);
+    p.advance();
+
+    try p.expect(.lparen);
+
+    var columns: std.ArrayList([]const u8) = .empty;
+    errdefer columns.deinit(p.allocator);
+
+    while (true) {
+        const col_name = try parseColumnDef(p);
+        try columns.append(p.allocator, col_name);
+        if (p.cur.kind == .comma) {
+            p.advance();
+            continue;
+        }
+        break;
+    }
+    try p.expect(.rparen);
+
+    return .{ .name = name, .columns = try columns.toOwnedSlice(p.allocator) };
+}
+
+/// Parse one column-def and return the column name. The type-name and any
+/// column-constraints are skipped by consuming all tokens up to the next
+/// `,` or `)` at paren-depth 0. This permits forms like
+/// `x INTEGER NOT NULL`, `x INT DEFAULT (1+1)`, `x VARCHAR(255)`, etc.,
+/// without committing to constraint validation in Iter14.B.
+fn parseColumnDef(p: *Parser) ![]const u8 {
+    if (p.cur.kind != .identifier) return Error.SyntaxError;
+    const name = p.cur.slice(p.src);
+    p.advance();
+    var depth: u32 = 0;
+    while (true) {
+        switch (p.cur.kind) {
+            .comma, .rparen => if (depth == 0) return name,
+            else => {},
+        }
+        switch (p.cur.kind) {
+            .lparen => depth += 1,
+            .rparen => depth -= 1,
+            .eof => return Error.SyntaxError,
+            else => {},
+        }
+        p.advance();
+    }
+}
+
 /// VALUES tuple list (after the `VALUES` keyword has been consumed).
 /// Used both at the top level (`parseValuesStatement`) and inside a FROM
 /// subquery (`parseFromClause`). Eagerly evaluates each tuple with empty

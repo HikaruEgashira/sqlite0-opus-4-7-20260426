@@ -39,7 +39,13 @@ pub fn main(init: std.process.Init) !void {
     defer db.deinit();
 
     if (sql_inline) |sql| {
-        try runSql(&db, sql, stdout, stderr);
+        runSql(&db, sql, stdout, stderr) catch {
+            // runSql already printed the error to stderr. Flush both streams
+            // before exit since `std.process.exit` skips defers.
+            stdout.flush() catch {};
+            stderr.flush() catch {};
+            std.process.exit(1);
+        };
         return;
     }
 
@@ -87,9 +93,10 @@ fn repl(db: *sqlite0.Database, io: std.Io, stdout: *std.Io.Writer, stderr: *std.
             try stdout.flush();
             continue;
         }
-        runSql(db, trimmed, stdout, stderr) catch |err| {
-            try stderr.print("error: {s}\n", .{@errorName(err)});
-        };
+        // runSql prints the error itself; the REPL just swallows so the
+        // session continues. The CLI -c path uses `try` to propagate so the
+        // process exits non-zero, matching sqlite3's behavior.
+        runSql(db, trimmed, stdout, stderr) catch {};
         try stdout.flush();
         try stderr.flush();
     }
@@ -98,13 +105,14 @@ fn repl(db: *sqlite0.Database, io: std.Io, stdout: *std.Io.Writer, stderr: *std.
 fn runSql(db: *sqlite0.Database, sql: []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     var result = db.execute(sql) catch |err| {
         try stderr.print("error: {s}\n", .{@errorName(err)});
-        return;
+        return err;
     };
     defer result.deinit();
 
     for (result.statements) |s| {
         const rows = switch (s) {
             .select, .values => |r| r,
+            .create_table => continue,
         };
         for (rows) |row| {
             for (row, 0..) |v, i| {
