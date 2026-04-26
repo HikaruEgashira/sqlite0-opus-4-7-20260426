@@ -17,6 +17,7 @@ const lex = @import("lex.zig");
 const value_mod = @import("value.zig");
 const funcs = @import("funcs.zig");
 const func_util = @import("func_util.zig");
+const match = @import("match.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -219,7 +220,7 @@ fn evalLike(ctx: EvalContext, l: ast.Expr.Like) Error!Value {
     defer ops.freeValue(ctx.allocator, value);
     const pattern = try evalExpr(ctx, l.pattern);
     defer ops.freeValue(ctx.allocator, pattern);
-    const result = try ops.applyLike(ctx.allocator, value, pattern, null);
+    const result = try match.applyLike(ctx.allocator, value, pattern, null);
     return if (l.negated) ops.logicalNot(result) else result;
 }
 
