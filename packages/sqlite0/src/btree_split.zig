@@ -290,11 +290,13 @@ pub fn balanceDeeperRoot(
 ///     INSERT rows merged by the caller).
 ///
 /// Sequence (parent-last invariant matches B.1):
-///   1. allocate L_new, R_new (bumps page 1 dbsize twice).
-///   2. classifyForInterior on the proposed new parent → if needs_split,
-///      bail with `Error.UnsupportedFeature` (Iter26.B.3 scope). The two
-///      newly-allocated pages stay zeroed and orphaned in this branch;
-///      acceptable for the same reason B.1 accepts orphans.
+///   1. classifyForInterior pre-check on the proposed new parent. If
+///      it would overflow, bail with `Error.UnsupportedFeature`
+///      (Iter26.B.3 scope) BEFORE allocating any new pages — avoids
+///      orphan + dbsize-bumped state on the failure path. Sentinel
+///      `left_child=0` is fine because classifyForInterior only
+///      consults each cell's key varint width.
+///   2. allocate L_new, R_new (bumps page 1 dbsize twice).
 ///   3. write children: L_new, then R_new.
 ///   4. write parent_root LAST (now pointing at L_new + R_new).
 ///   5. freePage(old_right_child) — the OLD leaf is now unreachable from
@@ -315,29 +317,30 @@ pub fn splitRightmostLeaf(
 
     const allocator = pager.allocator;
 
-    // Allocate the two new leaves up front so we know their page numbers
-    // when we build the new parent. allocatePage's own page-1 mutation
-    // is independent of the parent root we're about to rewrite.
-    const left_page_no = try pager.allocatePage();
-    const right_page_no = try pager.allocatePage();
-
-    // Compose the new parent's interior cell list = old cells +
-    // (left=L_new, key=divider). right_child becomes R_new.
+    // Compose the new parent's interior cell list with sentinel
+    // left_child=0 first so we can run the fit check BEFORE touching
+    // the pager. The real page number gets patched in after
+    // allocation succeeds.
     const new_parent_cells = try allocator.alloc(InteriorCell, parent_cells.len + 1);
     defer allocator.free(new_parent_cells);
     @memcpy(new_parent_cells[0..parent_cells.len], parent_cells);
     new_parent_cells[parent_cells.len] = .{
-        .left_child = left_page_no,
+        .left_child = 0,
         .key = split.divider_key,
     };
 
-    // Pre-check parent fit. root_page_no != 1 (rejected above) so
-    // header_offset = 0. If the new interior cell would push the parent
-    // past usable_size, this is recursive-interior-split territory
-    // (B.3); fail fast and let the caller surface UnsupportedFeature.
+    // Pre-check parent fit (root_page_no != 1, so header_offset = 0).
+    // Failing here means recursive interior split is needed (B.3) —
+    // surface UnsupportedFeature without leaving any orphan pages
+    // behind.
     if (classifyForInterior(new_parent_cells, 0, usable_size) != .fits) {
         return Error.UnsupportedFeature;
     }
+
+    // Parent will fit — safe to allocate L_new + R_new and write them.
+    const left_page_no = try pager.allocatePage();
+    const right_page_no = try pager.allocatePage();
+    new_parent_cells[parent_cells.len].left_child = left_page_no;
 
     // Build leaf bodies in scratch buffers; rebuildLeafTablePage may
     // still reject if a single record is oversize, in which case the
