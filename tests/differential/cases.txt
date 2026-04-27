@@ -1627,3 +1627,62 @@ CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT typeof(group_concat(x
 SELECT group_concat()
 SELECT group_concat(1, 2, 3)
 
+# Iter29.W: byte-aware string functions.
+#  - length(TEXT) is now UTF-8 character count (was byte count). The
+#    rule mirrors sqlite3's `SQLITE_SKIP_UTF8`: count every byte that
+#    is not a continuation byte (0x80-0xBF). Lone-leader inputs like
+#    x'C2C2C2' get counted as 3 separate "characters".
+#  - octet_length(X) returns the raw byte count for TEXT/BLOB and the
+#    rendered text length for INTEGER/REAL — the byte-level peer to
+#    length(). NULL stays NULL.
+#  - unhex(text [, ignore]) decodes hex into a BLOB. The optional
+#    second arg is a byte-set; characters in it are dropped before
+#    the hex check (case-sensitive). Returns NULL on any
+#    malformed/odd input or on NULL args. Empty inputs decode to an
+#    empty BLOB.
+SELECT length('hello')
+SELECT length('aあ')
+SELECT length('日本語')
+SELECT length(cast(x'C2C2C2' AS TEXT))
+SELECT length(123)
+SELECT length(1.5e308)
+SELECT length(x'AABBCC')
+SELECT length(NULL)
+SELECT octet_length('hello')
+SELECT octet_length('aあ')
+SELECT octet_length('日本語')
+SELECT octet_length(123)
+SELECT octet_length(1.5e308)
+SELECT octet_length(x'AABBCC')
+SELECT octet_length(NULL)
+SELECT typeof(octet_length('a'))
+SELECT octet_length()
+SELECT octet_length('a','b')
+SELECT unhex('4142')
+SELECT typeof(unhex('4142'))
+SELECT unhex('')
+SELECT typeof(unhex(''))
+SELECT unhex('41')
+SELECT unhex('414')
+SELECT unhex('41 42')
+SELECT typeof(unhex('41 42'))
+SELECT unhex('41 42', ' ')
+SELECT typeof(unhex('41 42', ' '))
+SELECT unhex('  4142  ')
+SELECT unhex('  4142  ', ' ')
+SELECT unhex('414g')
+SELECT unhex('41x42','x')
+SELECT unhex('41X42','x')
+SELECT unhex(NULL)
+SELECT unhex(NULL, ' ')
+SELECT unhex('41', NULL)
+SELECT unhex('','')
+SELECT typeof(unhex('',''))
+SELECT length(unhex('414243'))
+SELECT octet_length(unhex('414243'))
+SELECT unhex(4142)
+SELECT unhex(x'4142')
+SELECT unhex(1.5)
+SELECT unhex()
+SELECT unhex('1','2','3')
+

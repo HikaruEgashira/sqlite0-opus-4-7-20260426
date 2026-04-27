@@ -20,7 +20,9 @@ const Database = database.Database;
 /// state-aware functions (`changes()` / `last_insert_rowid()` / etc.) read
 /// from it. Functions that only need allocator-and-args ignore the param.
 pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args: []const Value) Error!Value {
-    if (util.eqlIgnoreCase(name, "length")) return fnLength(allocator, args);
+    if (util.eqlIgnoreCase(name, "length")) return text.fnLength(allocator, args);
+    if (util.eqlIgnoreCase(name, "octet_length")) return text.fnOctetLength(allocator, args);
+    if (util.eqlIgnoreCase(name, "unhex")) return text.fnUnhex(allocator, args);
     if (util.eqlIgnoreCase(name, "lower")) return fnLower(allocator, args);
     if (util.eqlIgnoreCase(name, "upper")) return fnUpper(allocator, args);
     if (util.eqlIgnoreCase(name, "substr") or util.eqlIgnoreCase(name, "substring")) return fnSubstr(allocator, args);
@@ -189,23 +191,6 @@ fn blobLengthFromArg(v: Value, min: usize) usize {
     return @intFromFloat(r);
 }
 
-fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
-    if (args.len != 1) return Error.WrongArgumentCount;
-    const v = args[0];
-    return switch (v) {
-        .null => Value.null,
-        .text => |t| Value{ .integer = @intCast(t.len) },
-        .blob => |b| Value{ .integer = @intCast(b.len) },
-        .integer, .real => blk: {
-            const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
-                error.OutOfMemory => return Error.OutOfMemory,
-                error.NotConvertible => return Error.UnsupportedFeature,
-            };
-            defer allocator.free(t);
-            break :blk Value{ .integer = @intCast(t.len) };
-        },
-    };
-}
 
 fn fnLower(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len != 1) return Error.WrongArgumentCount;

@@ -1,5 +1,6 @@
 //! String/byte-manipulation builtins: replace, hex, quote, trim/ltrim/rtrim,
-//! instr, char, unicode. Imported by `funcs.zig`'s dispatcher.
+//! instr, char, unicode, length, octet_length, unhex. Imported by
+//! `funcs.zig`'s dispatcher.
 
 const std = @import("std");
 const ops = @import("ops.zig");
@@ -7,6 +8,64 @@ const util = @import("func_util.zig");
 
 const Value = util.Value;
 const Error = util.Error;
+
+/// Count UTF-8 *characters* in `bytes` using sqlite3's lead-byte rule:
+/// every byte that is not a UTF-8 continuation byte (`0x80..0xBF`) starts
+/// a new character. Invalid sequences (orphan leaders, lone continuations)
+/// are counted as if each non-continuation byte were its own character —
+/// this matches the loop in sqlite3 `func.c::lengthFunc` (`SQLITE_SKIP_UTF8`
+/// stops at the next non-continuation byte even when the prior leader
+/// promised more), so byte-equal output is preserved on malformed input.
+fn utf8CharCount(bytes: []const u8) usize {
+    var n: usize = 0;
+    for (bytes) |b| {
+        if ((b & 0xC0) != 0x80) n += 1;
+    }
+    return n;
+}
+
+pub fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 1) return Error.WrongArgumentCount;
+    const v = args[0];
+    return switch (v) {
+        .null => Value.null,
+        .text => |t| Value{ .integer = @intCast(utf8CharCount(t)) },
+        .blob => |b| Value{ .integer = @intCast(b.len) },
+        .integer, .real => blk: {
+            const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                error.NotConvertible => return Error.UnsupportedFeature,
+            };
+            defer allocator.free(t);
+            break :blk Value{ .integer = @intCast(t.len) };
+        },
+    };
+}
+
+/// `octet_length(X)` — sqlite3 byte-count companion to `length(X)`. The
+/// only divergence from `length` is the TEXT branch: this returns the raw
+/// UTF-8 byte length, while `length` returns the character count. BLOB
+/// passes the raw byte count through (same as `length`), and NULL stays
+/// NULL. INTEGER/REAL render through `valueToOwnedText` and report the
+/// byte length of the rendered string — matching sqlite3's behaviour of
+/// running the value through `sqlite3_snprintf` first.
+pub fn fnOctetLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 1) return Error.WrongArgumentCount;
+    const v = args[0];
+    return switch (v) {
+        .null => Value.null,
+        .text => |t| Value{ .integer = @intCast(t.len) },
+        .blob => |b| Value{ .integer = @intCast(b.len) },
+        .integer, .real => blk: {
+            const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                error.NotConvertible => return Error.UnsupportedFeature,
+            };
+            defer allocator.free(t);
+            break :blk Value{ .integer = @intCast(t.len) };
+        },
+    };
+}
 
 pub fn fnReplace(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len != 3) return Error.WrongArgumentCount;
@@ -170,6 +229,65 @@ pub fn fnUnicode(allocator: std.mem.Allocator, args: []const Value) Error!Value 
     return Value{ .integer = cp };
 }
 
+/// `unhex(text [, ignore])` — decode a hex string into a BLOB. The optional
+/// 2nd arg is a *byte set*: any input byte that occurs in `ignore` is
+/// dropped before the hex check (case-sensitive — `unhex('41x42','x')`
+/// works, `unhex('41X42','x')` does not). Whatever remains must be all
+/// `[0-9A-Fa-f]` and an even number of bytes; otherwise the result is
+/// NULL. NULL on either argument propagates to NULL. On success the
+/// result is always BLOB, even when empty (`unhex('','') = x''`).
+pub fn fnUnhex(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len < 1 or args.len > 2) return Error.WrongArgumentCount;
+    for (args) |a| if (a == .null) return Value.null;
+
+    const subject = try util.ensureText(allocator, args[0]);
+    defer allocator.free(subject);
+
+    var ignore_owned: ?[]u8 = null;
+    defer if (ignore_owned) |b| allocator.free(b);
+    const ignore: []const u8 = if (args.len == 2) blk: {
+        const i = try util.ensureText(allocator, args[1]);
+        ignore_owned = i;
+        break :blk i;
+    } else "";
+
+    var hex_only: std.ArrayList(u8) = .empty;
+    defer hex_only.deinit(allocator);
+    try hex_only.ensureTotalCapacity(allocator, subject.len);
+
+    for (subject) |b| {
+        if (std.mem.indexOfScalar(u8, ignore, b) != null) continue;
+        if (!isHexDigitByte(b)) return Value.null;
+        hex_only.appendAssumeCapacity(b);
+    }
+
+    if (hex_only.items.len % 2 != 0) return Value.null;
+
+    const out = try allocator.alloc(u8, hex_only.items.len / 2);
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        const hi: u8 = hexDigitValue(hex_only.items[i * 2]);
+        const lo: u8 = hexDigitValue(hex_only.items[i * 2 + 1]);
+        out[i] = (hi << 4) | lo;
+    }
+    return Value{ .blob = out };
+}
+
+fn isHexDigitByte(c: u8) bool {
+    return (c >= '0' and c <= '9') or
+        (c >= 'a' and c <= 'f') or
+        (c >= 'A' and c <= 'F');
+}
+
+fn hexDigitValue(c: u8) u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => unreachable,
+    };
+}
+
 test "fnReplace: simple replacement" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .{ .text = "hello world" }, .{ .text = "world" }, .{ .text = "zig" } };
@@ -235,4 +353,33 @@ test "fnChar: ASCII code points" {
     const r = try fnChar(allocator, &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("Hi", r.text);
+}
+
+test "fnLength: UTF-8 char count not byte count" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "aあ" }};
+    const r = try fnLength(allocator, &args);
+    try std.testing.expectEqual(@as(i64, 2), r.integer);
+}
+
+test "fnOctetLength: TEXT byte count" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "aあ" }};
+    const r = try fnOctetLength(allocator, &args);
+    try std.testing.expectEqual(@as(i64, 4), r.integer);
+}
+
+test "fnUnhex: ignore-set strips spaces, decodes to BLOB" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "41 42" }, .{ .text = " " } };
+    const r = try fnUnhex(allocator, &args);
+    defer allocator.free(r.blob);
+    try std.testing.expectEqualSlices(u8, &.{ 0x41, 0x42 }, r.blob);
+}
+
+test "fnUnhex: odd hex length yields NULL" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "414" }};
+    const r = try fnUnhex(allocator, &args);
+    try std.testing.expectEqual(Value.null, r);
 }
