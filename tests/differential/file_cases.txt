@@ -796,3 +796,11 @@ QUERY: INSERT INTO t VALUES(1, 'first'), (NULL, 'second'); SELECT count(*) FROM 
 # bits restored) and the rejecting INSERT must still trip.
 SETUP: CREATE TABLE t(a TEXT NOT NULL, b INTEGER); INSERT INTO t VALUES('hi', 1);
 QUERY: INSERT INTO t(b) VALUES(99)
+
+# Iter29.E — blob literal end-to-end through file-mode B-tree.
+# sqlite0 INSERT writes Value{.blob} via record_encode (serial type 12+),
+# cold-reopen reads it back through BtreeCursor. Verifies blob_lit
+# parser produces bytes that survive disk round-trip.
+SETUP: CREATE TABLE blobs(id INTEGER PRIMARY KEY, b BLOB);
+MUTATE: INSERT INTO blobs(b) VALUES(x'DEADBEEF'), (x'CAFE'), (x''), (x'AABBCCDDEEFF')
+QUERY: SELECT id, hex(b), length(b), typeof(b) FROM blobs ORDER BY id

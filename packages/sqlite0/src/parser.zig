@@ -276,6 +276,28 @@ pub const Parser = struct {
                     return err;
                 };
             },
+            .blob_lit => {
+                // Lexer guarantees the shape `x'<even-length hex>'` —
+                // strip the `x'`/`'` envelope and decode pairs of hex
+                // digits into bytes. Empty hex span yields a 0-byte BLOB
+                // (sqlite3: `x''` → empty blob).
+                self.advance();
+                const text = tok.slice(self.src);
+                const hex = text[2 .. text.len - 1];
+                // No errdefer: `hexDigitValue` is infallible, so `bytes`
+                // only needs cleanup if `makeLiteral` itself errors —
+                // the catch handles that. Same shape as the .string arm
+                // (mixing both fires double-free on OOM).
+                const bytes = try self.allocator.alloc(u8, hex.len / 2);
+                var i: usize = 0;
+                while (i < hex.len) : (i += 2) {
+                    bytes[i / 2] = (hexDigitValue(hex[i]) << 4) | hexDigitValue(hex[i + 1]);
+                }
+                return ast.makeLiteral(self.allocator, Value{ .blob = bytes }) catch |err| {
+                    self.allocator.free(bytes);
+                    return err;
+                };
+            },
             .keyword_null => {
                 self.advance();
                 return ast.makeLiteral(self.allocator, Value.null);
@@ -440,6 +462,14 @@ pub const Parser = struct {
         };
     }
 };
+
+/// Decode one ASCII hex digit. Caller must ensure the byte was already
+/// validated by the lexer (so we don't bother returning ?u8).
+fn hexDigitValue(c: u8) u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    return c - 'A' + 10;
+}
 
 test "Parser: parseExpr literal" {
     const allocator = std.testing.allocator;

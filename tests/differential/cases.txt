@@ -1081,3 +1081,22 @@ SELECT date('2023-01-00')
 SELECT strftime('%j', '2023-02-29')
 SELECT strftime('%w', '2023-02-29')
 SELECT strftime('%Y-%m-%d %H:%M:%S', '2023-02-29 23:00:00')
+
+# Iter29.E — sqlite3 blob literal `x'<hex>'` / `X'<hex>'`. Lexer
+# produces a single blob_lit token only when `x`/`X` is immediately
+# followed by `'` — bare `x` as a column name is unaffected (regression
+# guard). Hex span must be even-length and `[0-9a-fA-F]+`; sqlite3 rejects
+# `x'A'`, `x'GG'`, and unterminated `x'AB`.
+SELECT typeof(x'AABB')
+SELECT length(x'AABB')
+SELECT hex(x'AABB')
+SELECT hex(X'cafe')
+SELECT typeof(x'')
+SELECT length(x'')
+SELECT x'AABB'
+SELECT x'A'
+SELECT x'GG'
+CREATE TABLE blob1(x); INSERT INTO blob1 VALUES(1); SELECT x FROM blob1
+CREATE TABLE blob2(b BLOB); INSERT INTO blob2 VALUES(x'DEADBEEF'); SELECT hex(b), typeof(b), length(b) FROM blob2
+# WHERE-side blob comparison (advisor verification)
+CREATE TABLE blob3(b BLOB); INSERT INTO blob3 VALUES(x'DEADBEEF'),(x'CAFE'); SELECT hex(b) FROM blob3 WHERE b = x'CAFE'
