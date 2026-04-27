@@ -20,6 +20,7 @@ const stmt_mod = @import("stmt.zig");
 const database = @import("database.zig");
 const engine = @import("engine.zig");
 const eval = @import("eval.zig");
+const cursor_mod = @import("cursor.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -163,12 +164,22 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             .qualifier = iv.alias orelse "",
         },
         .table_ref => |tr| blk: {
+            // Phase 3a (Iter24.A): the row source goes through `Cursor`
+            // rather than reading `t.rows.items` directly. For in-memory
+            // backed tables this is purely a refactor — `materializeRows`
+            // walks the cursor and produces the same `[][]Value` shape the
+            // legacy code expected. Phase 3b (BtreeCursor, ADR-0005) will
+            // swap the cursor implementation without touching this site.
             const t = try engine.lookupTable(db, alloc, tr.name);
-            const out = try alloc.alloc([]const Value, t.rows.items.len);
-            for (t.rows.items, out) |row, *slot| slot.* = row;
+            var tc = try alloc.create(cursor_mod.TableCursor);
+            tc.* = cursor_mod.TableCursor.open(t);
+            const c = tc.cursor();
+            const materialized = try cursor_mod.materializeRows(alloc, c);
+            const out = try alloc.alloc([]const Value, materialized.len);
+            for (materialized, out) |row, *slot| slot.* = row;
             break :blk .{
                 .rows = out,
-                .columns = t.columns,
+                .columns = c.columns(),
                 .qualifier = tr.alias orelse tr.name,
             };
         },

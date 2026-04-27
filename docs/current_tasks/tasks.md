@@ -12,7 +12,7 @@ ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が 
 
 ### Phase 3a: Cursor 抽象の導入 (Pager 着手前の refactor)
 
-- [ ] Iter24.A: `cursor.zig` 新設、`Cursor` + `VTable` + in-memory `TableCursor` を実装。`engine_from.cartesianFromSources` の table 解決経路を Cursor 経由に切替。差分テスト 787/787 緑を維持。
+- [x] Iter24.A: `cursor.zig` 新設、`Cursor` + `VTable` + in-memory `TableCursor` を実装。`engine_from.resolveSource` の `.table_ref` 経路を `TableCursor` + `materializeRows` 経由に切替。差分テスト 787/787 緑を維持。Phase 3b で `BtreeCursor` を追加するとき call site は無修正。
 - [ ] Iter24.B: DML 経路 (`engine_dml.executeDelete` / `executeUpdate`) を Cursor 経由に切替。INSERT は schema 追記なので変更しない。
 - [ ] Iter24.C (任意): correlated subquery の outer-frame 経路の `current_row` 所有関係を Cursor contract で固める。
 
