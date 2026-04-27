@@ -32,12 +32,12 @@ const Error = ops.Error;
 /// interior split (B.3), root overflow becomes balance-deeper-interior.
 ///
 /// Restrictions:
-///   - INSERTs always grow the rightmost subtree because the rowid is
-///     auto-assigned as `max(seen) + 1`. Mid-tree splits aren't
-///     reachable through this entry point.
-///   - rowid auto-assigned as `max(existing) + 1` (or 1 if empty).
-///     Explicit rowid via INTEGER PRIMARY KEY alias is a future
-///     iteration.
+///   - INSERTs always grow the rightmost subtree. Auto-assigned rowids
+///     are `max(seen) + 1`; explicit IPK rowids (Iter28) are accepted
+///     only when strictly greater than the current max, preserving the
+///     monotonic-rightmost invariant. An explicit IPK ≤ max would
+///     require mid-tree insertion (a future iteration); we reject with
+///     `Error.UnsupportedFeature` BEFORE any pwrite (fail-loud).
 ///   - records exceeding `usable_size − 35` use the overflow chain
 ///     allocated via `btree_overflow.allocateOverflowChain` (Iter26.C).
 pub fn executeInsertFile(
@@ -119,15 +119,11 @@ fn insertIntoLeafRoot(
         if (c.rowid > max_rowid) max_rowid = c.rowid;
     }
 
+    const prepared = try prepareNewCells(a, t, target_indices, source_rows, &max_rowid);
     var inserted: u64 = 0;
-    for (source_rows) |row| {
-        const new_values = try a.alloc(Value, t.columns.len);
-        for (new_values, 0..) |*slot, k| {
-            slot.* = if (target_indices[k]) |src_idx| row[src_idx] else Value.null;
-        }
-        const rec = try record_encode.encodeRecord(a, new_values);
-        max_rowid += 1;
-        try combined.append(a, try buildRebuildCellWithOverflow(pager, max_rowid, rec, usable_size));
+    for (prepared) |row_info| {
+        const rec = try record_encode.encodeRecord(a, row_info.values);
+        try combined.append(a, try buildRebuildCellWithOverflow(pager, row_info.rowid, rec, usable_size));
         inserted += 1;
     }
 
@@ -147,6 +143,84 @@ fn insertIntoLeafRoot(
         .oversize_record => return Error.IoError, // invariant: handled above
     }
     return inserted;
+}
+
+/// One row's resolved insert state: the rowid the cell will carry and
+/// the value array (with IPK column already nulled for IPK tables).
+const PreparedRow = struct {
+    rowid: i64,
+    values: []Value,
+};
+
+/// Pre-pass that allocates every new row's value array and resolves
+/// every rowid BEFORE any caller-side encode or chain allocation.
+///
+/// Why two passes (Iter28 chain-leak fix): `chooseRowid` can return
+/// `Error.UnsupportedFeature` for out-of-order explicit IPK. If we
+/// interleave it with `buildRebuildCellWithOverflow`, a row N that
+/// allocates an overflow chain followed by a row N+1 that fails IPK
+/// validation leaves the chain pages orphaned on disk. Pre-validating
+/// every row first ensures any failure short-circuits before the first
+/// pwrite to a chain page — preserving byte-identical-on-failure.
+fn prepareNewCells(
+    a: std.mem.Allocator,
+    t: *const Table,
+    target_indices: []const ?usize,
+    source_rows: []const []Value,
+    max_rowid: *i64,
+) ![]PreparedRow {
+    const out = try a.alloc(PreparedRow, source_rows.len);
+    for (source_rows, out) |row, *slot| {
+        const new_values = try a.alloc(Value, t.columns.len);
+        for (new_values, 0..) |*v, k| {
+            v.* = if (target_indices[k]) |src_idx| row[src_idx] else Value.null;
+        }
+        const rowid = try chooseRowid(t, max_rowid, new_values);
+        slot.* = .{ .rowid = rowid, .values = new_values };
+    }
+    return out;
+}
+
+/// IPK-aware rowid resolver (Iter28). When the table has an INTEGER
+/// PRIMARY KEY column and the user supplied a non-NULL integer value
+/// for it, that value becomes the cell's rowid AND the IPK column in
+/// `new_values` is rewritten to NULL (sqlite3 invariant: the record
+/// body always stores NULL for an aliased rowid). Otherwise the rowid
+/// is auto-assigned as `max(seen) + 1`.
+///
+/// `max_rowid` is updated in place so subsequent rows in the same
+/// INSERT see the running max.
+///
+/// Monotonic-rightmost guard: explicit IPK ≤ current max would force
+/// mid-tree insertion. The spine walker only descends to the rightmost
+/// leaf, so we reject with `Error.UnsupportedFeature`. Always called
+/// from `prepareNewCells` (pre-pass) so the failure short-circuits
+/// before any chain allocation (Iter28 chain-leak fix).
+fn chooseRowid(
+    t: *const Table,
+    max_rowid: *i64,
+    new_values: []Value,
+) !i64 {
+    const ipk = t.ipk_column orelse {
+        max_rowid.* += 1;
+        return max_rowid.*;
+    };
+    switch (new_values[ipk]) {
+        .integer => |explicit| {
+            if (explicit <= max_rowid.*) return Error.UnsupportedFeature;
+            new_values[ipk] = Value.null;
+            max_rowid.* = explicit;
+            return explicit;
+        },
+        else => {
+            // NULL or non-integer → auto-rowid. (sqlite3 also coerces
+            // text/real here in some cases; deferred — explicit-NULL
+            // is the common path for omitted-IPK INSERTs.)
+            new_values[ipk] = Value.null;
+            max_rowid.* += 1;
+            return max_rowid.*;
+        },
+    }
 }
 
 /// Build a `RebuildCell` for a freshly-encoded record. When the record
@@ -264,15 +338,11 @@ fn insertIntoDeepTree(
         });
     }
 
+    const prepared = try prepareNewCells(a, t, target_indices, source_rows, &max_rowid);
     var inserted: u64 = 0;
-    for (source_rows) |row| {
-        const new_values = try a.alloc(Value, t.columns.len);
-        for (new_values, 0..) |*slot, k| {
-            slot.* = if (target_indices[k]) |src_idx| row[src_idx] else Value.null;
-        }
-        const rec = try record_encode.encodeRecord(a, new_values);
-        max_rowid += 1;
-        try combined.append(a, try buildRebuildCellWithOverflow(pager, max_rowid, rec, usable_size));
+    for (prepared) |row_info| {
+        const rec = try record_encode.encodeRecord(a, row_info.values);
+        try combined.append(a, try buildRebuildCellWithOverflow(pager, row_info.rowid, rec, usable_size));
         inserted += 1;
     }
 

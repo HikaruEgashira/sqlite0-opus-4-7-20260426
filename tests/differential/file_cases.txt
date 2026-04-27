@@ -430,11 +430,12 @@ VERIFY: SELECT n, s FROM t ORDER BY n
 # IoError (newly-allocated page beyond EOF) or stale bytes from
 # pre-tx main-file reads. Advisor-caught hole.
 #
-# `n INTEGER` (not INTEGER PRIMARY KEY) — sqlite0 lacks IPK column-
-# rowid aliasing (Iter28 candidate); using IPK here would conflate the
-# WAL bug this fixture is meant to discriminate with the orthogonal
-# read/write IPK gap.
-SETUP: CREATE TABLE t(n INTEGER, s TEXT);
+# Iter28 restored `n INTEGER PRIMARY KEY` here. The MUTATE supplies
+# explicit IPK values 1..10 strictly greater than the WAL_SETUP-seeded
+# rowid 0, so the monotonic-rightmost spine walker can take them
+# verbatim. VERIFY's count/min/max validate that the read path
+# substitutes the cell rowid for the IPK column on cold reopen.
+SETUP: CREATE TABLE t(n INTEGER PRIMARY KEY, s TEXT);
 WAL_SETUP: INSERT INTO t VALUES(0, 'seed');
 MUTATE: INSERT INTO t(n,s) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),(2,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),(3,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),(4,'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'),(5,'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'),(6,'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'),(7,'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'),(8,'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh'),(9,'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'),(10,'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj');
 VERIFY: SELECT count(*), min(n), max(n) FROM t
@@ -548,3 +549,42 @@ QUERY: PRAGMA wal_checkpoint(TRUNCATE); SELECT n FROM t ORDER BY n
 SETUP: CREATE TABLE t(n);
 WAL_SETUP: INSERT INTO t VALUES (1), (2);
 QUERY: PRAGMA wal_checkpoint(PASSIVE); SELECT n FROM t ORDER BY n
+
+# Iter28 — INTEGER PRIMARY KEY column-rowid aliasing. The advisor's
+# minimal discriminating fixture: explicit IPK value 5 must surface
+# back through SELECT as `5|x`, not `1|x` (auto-rowid would yield
+# the latter on a fresh table).
+SETUP: CREATE TABLE t(n INTEGER PRIMARY KEY, s);
+MUTATE: INSERT INTO t VALUES(5,'x');
+VERIFY: SELECT n,s FROM t
+
+# Cold-reopen round-trip: MUTATE adds an IPK table to an existing
+# fixture; VERIFY's third pass (sqlite0 round-trip line in the
+# harness) re-opens the file fresh, re-parses sqlite_schema, and the
+# IPK metadata must survive that loop. WHERE n=5 also exercises the
+# rowid substitution in the engine_dml_file WHERE evaluation path.
+# `bootstrap` exists only to ensure the .db file is created — sqlite3
+# refuses to materialise the file on a bare SELECT.
+SETUP: CREATE TABLE bootstrap(x);
+MUTATE: CREATE TABLE t(n INTEGER PRIMARY KEY, s); INSERT INTO t VALUES(5,'x'),(7,'y');
+VERIFY: SELECT n,s FROM t WHERE n=5
+
+# Omitted-IPK INSERT auto-assigns the rowid like sqlite3. Three rows,
+# explicit max=10, then omitted INSERT picks 11. Cell records store
+# NULL for the IPK column; SELECT must read back the rowid.
+SETUP: CREATE TABLE t(id INTEGER PRIMARY KEY, val);
+MUTATE: INSERT INTO t(id,val) VALUES(10,'a'); INSERT INTO t(val) VALUES('b');
+VERIFY: SELECT id,val FROM t ORDER BY id
+
+# WHERE on IPK column is the path most users hit. The substitution
+# must be live during DELETE's WHERE eval too: with three rows
+# (rowids 1,2,3) DELETE WHERE id=2 must drop exactly one row.
+SETUP: CREATE TABLE t(id INTEGER PRIMARY KEY, val);
+MUTATE: INSERT INTO t VALUES(1,'a'),(2,'b'),(3,'c'); DELETE FROM t WHERE id=2;
+VERIFY: SELECT id,val FROM t ORDER BY id
+
+# Aggregate over IPK exercises the read path through Cursor +
+# materializeRows. count/min/max all reference the IPK column.
+SETUP: CREATE TABLE t(id INTEGER PRIMARY KEY, val);
+MUTATE: INSERT INTO t VALUES(3,'c'),(7,'g'),(10,'j');
+VERIFY: SELECT count(*),min(id),max(id) FROM t

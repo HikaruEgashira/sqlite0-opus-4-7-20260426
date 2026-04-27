@@ -177,7 +177,7 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             const c: cursor_mod.Cursor = if (t.root_page != 0) c_blk: {
                 const pager_ptr = if (db.pager) |*pp| pp else return ops.Error.IoError;
                 const bc = try alloc.create(btree_cursor_mod.BtreeCursor);
-                bc.* = btree_cursor_mod.BtreeCursor.open(alloc, pager_ptr, t.root_page, t.columns);
+                bc.* = btree_cursor_mod.BtreeCursor.open(alloc, pager_ptr, t.root_page, t.columns, t.ipk_column);
                 break :c_blk bc.cursor();
             } else c_blk: {
                 const tc = try alloc.create(cursor_mod.TableCursor);

@@ -65,6 +65,11 @@ pub const Table = struct {
     /// file. 0 means in-memory (CREATE TABLE on a memory Database).
     /// `engine_from.resolveSource` forks on this value.
     root_page: u32 = 0,
+    /// Index into `columns` of the INTEGER PRIMARY KEY column that
+    /// aliases the rowid (Iter28). Null when the table has no IPK.
+    /// At most one IPK per table — sqlite3 enforces this at parse time;
+    /// `registerTable` mirrors the rule with `Error.SyntaxError`.
+    ipk_column: ?usize = null,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         for (self.rows.items) |row| {
@@ -167,8 +172,10 @@ pub const Database = struct {
             for (cols[0..produced]) |c| self.allocator.free(c);
             self.allocator.free(cols);
         }
+        var ipk: ?usize = null;
         while (produced < parsed.columns.len) : (produced += 1) {
-            const lowered = try lowerCaseDupe(self.allocator, parsed.columns[produced]);
+            const src = parsed.columns[produced];
+            const lowered = try lowerCaseDupe(self.allocator, src.name);
             // Reject duplicates (case-insensitive). Compare against earlier
             // entries which are already lower-cased; the lowered slice we
             // just created is freed via the errdefer chain on the surrounding
@@ -179,10 +186,17 @@ pub const Database = struct {
                     return Error.DuplicateColumnName;
                 }
             }
+            if (src.is_ipk) {
+                if (ipk != null) {
+                    self.allocator.free(lowered);
+                    return Error.SyntaxError; // sqlite3: "table has more than one primary key"
+                }
+                ipk = produced;
+            }
             cols[produced] = lowered;
         }
 
-        try self.tables.put(self.allocator, key, .{ .columns = cols });
+        try self.tables.put(self.allocator, key, .{ .columns = cols, .ipk_column = ipk });
     }
 
     /// Execute `sql` (one or more `;`-separated statements) against `self`.

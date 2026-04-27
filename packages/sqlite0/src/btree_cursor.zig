@@ -56,6 +56,12 @@ pub const BtreeCursor = struct {
     pager: *Pager,
     root_page: u32,
     column_names: []const []const u8,
+    /// Index of the INTEGER PRIMARY KEY column for this table, or null
+    /// if there is no IPK. When set, `decodeCurrentRow` overwrites the
+    /// decoded value at this slot with the cell's rowid (sqlite3 always
+    /// stores NULL for the IPK column in the record body — the rowid is
+    /// the source of truth, see Iter28).
+    ipk_column: ?usize = null,
 
     walker: TableLeafWalker,
     /// Cached usable_size (PAGE_SIZE − reserved). Read once on first
@@ -80,12 +86,14 @@ pub const BtreeCursor = struct {
         p: *Pager,
         root_page: u32,
         column_names: []const []const u8,
+        ipk_column: ?usize,
     ) BtreeCursor {
         return .{
             .arena = arena,
             .pager = p,
             .root_page = root_page,
             .column_names = column_names,
+            .ipk_column = ipk_column,
             .walker = TableLeafWalker.init(arena, p, root_page),
         };
     }
@@ -214,6 +222,14 @@ pub const BtreeCursor = struct {
                 },
                 else => {},
             }
+        }
+        // IPK column substitution (Iter28). sqlite3 stores NULL in the
+        // record body for an INTEGER PRIMARY KEY column; the actual
+        // value lives in the cell's rowid header. Substitute here so
+        // every consumer (column(), WHERE eval via materializeRows,
+        // aggregate inputs) sees the rowid as if it were stored.
+        if (self.ipk_column) |ipk| {
+            if (ipk < raw.len) raw[ipk] = .{ .integer = cell.rowid };
         }
         self.decoded = raw;
     }

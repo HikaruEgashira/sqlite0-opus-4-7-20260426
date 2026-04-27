@@ -69,7 +69,7 @@ test "BtreeCursor: empty B-tree (root leaf, 0 cells)" {
     defer p.close();
 
     const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
+    var bc = BtreeCursor.open(a, &p, 1, &names, null);
     defer bc.deinit();
     const c = bc.cursor();
 
@@ -103,7 +103,7 @@ test "BtreeCursor: walks rows in rowid order, decodes columns" {
     defer p.close();
 
     const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
+    var bc = BtreeCursor.open(a, &p, 1, &names, null);
     defer bc.deinit();
     const c = bc.cursor();
 
@@ -159,7 +159,7 @@ test "BtreeCursor: TEXT survives page churn (arena dupe)" {
     p.cache_capacity = 1; // force eviction between leaves
 
     const names = [_][]const u8{"name"};
-    var bc = BtreeCursor.open(a, &p, 2, &names);
+    var bc = BtreeCursor.open(a, &p, 2, &names, null);
     defer bc.deinit();
     const c = bc.cursor();
 
@@ -202,7 +202,7 @@ test "BtreeCursor: rewind re-reads from the start" {
     defer p.close();
 
     const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
+    var bc = BtreeCursor.open(a, &p, 1, &names, null);
     defer bc.deinit();
     const c = bc.cursor();
 
@@ -237,7 +237,7 @@ test "BtreeCursor: short record yields NULL for missing trailing columns" {
     defer p.close();
 
     const names = [_][]const u8{ "a", "b", "c" };
-    var bc = BtreeCursor.open(a, &p, 1, &names);
+    var bc = BtreeCursor.open(a, &p, 1, &names, null);
     defer bc.deinit();
     const c = bc.cursor();
 
@@ -270,7 +270,7 @@ test "BtreeCursor: column() before rewind returns SyntaxError" {
     defer p.close();
 
     const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
+    var bc = BtreeCursor.open(a, &p, 1, &names, null);
     defer bc.deinit();
     const c = bc.cursor();
     // Note: eof defaults to true before rewind() is called. column() on

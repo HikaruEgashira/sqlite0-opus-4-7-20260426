@@ -201,6 +201,19 @@ fn modifyOneLeaf(
 
     const cells = try btree.parseLeafTablePage(a, work, header_offset, usable_size);
 
+    // Iter28: UPDATE that targets the IPK column would change the cell
+    // rowid (= move the cell to a different leaf), which the per-leaf
+    // rebuild walker can't express. Reject up-front, before any pwrite,
+    // so the file stays byte-identical.
+    if (t.ipk_column) |ipk| {
+        switch (op) {
+            .update => |u| for (u.indices) |col_idx| {
+                if (col_idx == ipk) return Error.UnsupportedFeature;
+            },
+            .delete => {},
+        }
+    }
+
     var rebuilt: std.ArrayList(btree_insert.RebuildCell) = .empty;
     // Old chain heads to free AFTER the leaf rebuild commits — leaf is
     // the source of truth for chain reachability, so we mustn't put a
@@ -214,6 +227,13 @@ fn modifyOneLeaf(
         // WHERE predicates and UPDATE RHS expressions need every column.
         const full = try btree_overflow.assemblePayload(a, pager, c, usable_size);
         const row_values = try decodeRowPadded(a, full, t.columns.len);
+        // IPK substitution mirrors btree_cursor.decodeCurrentRow: the
+        // record stores NULL for the IPK column; the rowid header is
+        // the source of truth. WHERE clauses (`WHERE n=5`) need to see
+        // the rowid, not NULL.
+        if (t.ipk_column) |ipk| {
+            if (ipk < row_values.len) row_values[ipk] = .{ .integer = c.rowid };
+        }
         const ctx = eval.EvalContext{
             .allocator = a,
             .current_row = row_values,
@@ -260,6 +280,12 @@ fn modifyOneLeaf(
                     }
                     for (u.indices, new_values) |col_idx, new_v| {
                         row_values[col_idx] = new_v;
+                    }
+                    // Restore IPK column to NULL before encoding —
+                    // sqlite3 invariant: aliased rowid is stored only
+                    // in the cell header, never in the record body.
+                    if (t.ipk_column) |ipk| {
+                        if (ipk < row_values.len) row_values[ipk] = Value.null;
                     }
                     const new_rec = try record_encode.encodeRecord(a, row_values);
                     // Always free old chain on UPDATE — incremental chain
