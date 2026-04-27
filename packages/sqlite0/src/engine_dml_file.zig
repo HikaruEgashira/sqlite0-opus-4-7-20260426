@@ -22,6 +22,7 @@ const eval = @import("eval.zig");
 const database = @import("database.zig");
 const btree = @import("btree.zig");
 const btree_insert = @import("btree_insert.zig");
+const btree_overflow = @import("btree_overflow.zig");
 const record = @import("record.zig");
 const record_encode = @import("record_encode.zig");
 const pager_mod = @import("pager.zig");
@@ -158,14 +159,18 @@ fn modifyOneLeaf(
     const cells = try btree.parseLeafTablePage(a, work, header_offset, usable_size);
 
     var rebuilt: std.ArrayList(btree_insert.RebuildCell) = .empty;
+    // Old chain heads to free AFTER the leaf rebuild commits — leaf is
+    // the source of truth for chain reachability, so we mustn't put a
+    // chain on the freelist while a leaf cell still points at it.
+    // Crash between rebuild + free leaves orphan chain pages; same
+    // accepted window as B.1/B.2 (Phase 4 / WAL absorbs it).
+    var chains_to_free: std.ArrayList(u32) = .empty;
     var changed: u64 = 0;
     for (cells) |c| {
-        // Cells with overflow chains land in C.3 — for now reject them
-        // loudly so a fixture with oversize rows doesn't silently lose
-        // data through DELETE/UPDATE. C.1 (this iteration) wires only
-        // the SELECT read path.
-        if (c.overflow_head != 0) return Error.UnsupportedFeature;
-        const row_values = try decodeRowPadded(a, c.inline_bytes, t.columns.len);
+        // Decode against the FULL payload (assemble the chain if any) —
+        // WHERE predicates and UPDATE RHS expressions need every column.
+        const full = try btree_overflow.assemblePayload(a, pager, c, usable_size);
+        const row_values = try decodeRowPadded(a, full, t.columns.len);
         const ctx = eval.EvalContext{
             .allocator = a,
             .current_row = row_values,
@@ -180,13 +185,21 @@ fn modifyOneLeaf(
                     break :blk ops.truthy(cond) orelse false;
                 } else true;
                 if (matches) {
+                    if (c.overflow_head != 0) try chains_to_free.append(a, c.overflow_head);
                     changed += 1;
                     continue;
                 }
-                // Survivor — dupe out of `work` since rebuildLeafTablePage
-                // will overwrite the source bytes.
+                // Survivor — dupe inline bytes out of `work` (rebuild
+                // overwrites the source) and preserve the chain
+                // reference so the existing overflow pages stay
+                // reachable through the new leaf.
                 const dup = try a.dupe(u8, c.inline_bytes);
-                try rebuilt.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
+                try rebuilt.append(a, .{
+                    .rowid = c.rowid,
+                    .record_bytes = dup,
+                    .overflow_head = c.overflow_head,
+                    .payload_len = if (c.overflow_head != 0) c.payload_len else 0,
+                });
             },
             .update => |u| {
                 const matches = if (u.where) |w| blk: {
@@ -206,11 +219,22 @@ fn modifyOneLeaf(
                         row_values[col_idx] = new_v;
                     }
                     const new_rec = try record_encode.encodeRecord(a, row_values);
-                    try rebuilt.append(a, .{ .rowid = c.rowid, .record_bytes = new_rec });
+                    // Always free old chain on UPDATE — incremental chain
+                    // mutation is out-of-scope per the C plan; new chain
+                    // (if needed) is allocated fresh below. May reuse the
+                    // freed pages once \`Pager.allocatePage\` honours the
+                    // freelist, currently grows end-of-file.
+                    if (c.overflow_head != 0) try chains_to_free.append(a, c.overflow_head);
+                    try rebuilt.append(a, try buildUpdateRebuildCell(pager, c.rowid, new_rec, usable_size));
                     changed += 1;
                 } else {
                     const dup = try a.dupe(u8, c.inline_bytes);
-                    try rebuilt.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
+                    try rebuilt.append(a, .{
+                        .rowid = c.rowid,
+                        .record_bytes = dup,
+                        .overflow_head = c.overflow_head,
+                        .payload_len = if (c.overflow_head != 0) c.payload_len else 0,
+                    });
                 }
             },
         }
@@ -218,7 +242,35 @@ fn modifyOneLeaf(
 
     try btree_insert.rebuildLeafTablePage(work, header_offset, usable_size, rebuilt.items);
     try pager.writePage(page_no, work);
+
+    // Leaf is committed — chain pages we held a reference to are now
+    // unreachable from any leaf and safe to add to the freelist.
+    for (chains_to_free.items) |head| try btree_overflow.freeOverflowChain(pager, head);
     return changed;
+}
+
+/// Allocate an overflow chain for an UPDATE-replaced record when it
+/// exceeds the inline threshold. Mirrors `buildRebuildCellWithOverflow`
+/// in `engine_dml_insert_file.zig` — kept here as a small helper so
+/// the two file-mode DML modules don't need a cross-import for one
+/// 12-line function.
+fn buildUpdateRebuildCell(
+    pager: *pager_mod.Pager,
+    rowid: i64,
+    rec: []const u8,
+    usable_size: usize,
+) !btree_insert.RebuildCell {
+    const split = btree_overflow.inlineSplitForPayload(rec.len, usable_size);
+    if (split.spill_len == 0) {
+        return .{ .rowid = rowid, .record_bytes = rec };
+    }
+    const head = try btree_overflow.allocateOverflowChain(pager, rec, split.inline_len);
+    return .{
+        .rowid = rowid,
+        .record_bytes = rec[0..split.inline_len],
+        .overflow_head = head,
+        .payload_len = rec.len,
+    };
 }
 
 /// Decode `record_bytes` and pad the result to `expected_columns` by
