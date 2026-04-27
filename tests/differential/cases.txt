@@ -2790,3 +2790,21 @@ SELECT printf('%le', 1.5)
 SELECT printf('%lg', 1.5)
 SELECT printf('%lld %lld', 1, 2)
 SELECT printf('%5.3lld', 1)
+
+# UTF-8 char count via SKIP_UTF8 semantics (Iter30.O). sqlite3 always
+# advances by ≥1 byte per char and skips continuation bytes only after
+# a multi-byte lead (≥0xC0). This makes orphan continuation bytes
+# (0x80-0xBF alone) and bare leads (0xC0-0xFF without continuation)
+# count as 1 char each — matching `length(cast(x'AB' as text))` = 1.
+SELECT length(cast(x'AB' as text))
+SELECT length(cast(x'AB80' as text))
+SELECT length(cast(x'80AB' as text))
+SELECT length(cast(x'C3' as text))
+SELECT length(cast(x'C382' as text))
+SELECT length(cast(x'C3A0' as text))
+SELECT length(cast(x'E697A5' as text))
+SELECT length(cast(x'E6' as text))
+SELECT length(cast(x'E697' as text))
+SELECT length(printf('%c', x'AB'))
+SELECT length(printf('%s', x'AB00CD'))
+SELECT length(printf('%s', cast(x'AB80' as text)))

@@ -334,3 +334,19 @@ test "datetime: hour=24 accepted, hour=25 rejected" {
     const r2 = try call(allocator, null, "datetime", &args2);
     try std.testing.expectEqual(Value.null, r2);
 }
+
+test "length: orphan continuation byte counts as 1 (SKIP_UTF8)" {
+    const allocator = std.testing.allocator;
+    var args1 = [_]Value{.{ .text = "\xAB" }};
+    const r1 = try call(allocator, null, "length", &args1);
+    try std.testing.expectEqual(@as(i64, 1), r1.integer);
+
+    var args2 = [_]Value{.{ .text = "\xAB\x80" }};
+    const r2 = try call(allocator, null, "length", &args2);
+    try std.testing.expectEqual(@as(i64, 2), r2.integer);
+
+    // Valid 2-byte UTF-8: lead + continuation = 1 char.
+    var args3 = [_]Value{.{ .text = "\xC3\x82" }};
+    const r3 = try call(allocator, null, "length", &args3);
+    try std.testing.expectEqual(@as(i64, 1), r3.integer);
+}

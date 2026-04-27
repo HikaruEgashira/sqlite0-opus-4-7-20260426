@@ -45,16 +45,26 @@ pub fn ensureBytes(allocator: std.mem.Allocator, v: Value) Error![]u8 {
     return ensureText(allocator, v);
 }
 
-/// Count UTF-8 *characters* in `bytes` using sqlite3's lead-byte rule (every
-/// non-continuation byte starts a new character). Used both by `length()`
-/// (UTF-8 char count) and by `like()` ESCAPE-arg validation (sqlite3 requires
-/// the escape to be exactly one UTF-8 character, not byte). Invalid input
-/// (orphan leaders) counts each non-continuation byte as one — matches the
-/// `SQLITE_SKIP_UTF8` loop.
+/// Count UTF-8 *characters* in `bytes` using sqlite3's `SQLITE_SKIP_UTF8`
+/// macro semantics: each iteration consumes the lead byte (always at
+/// least 1 byte advanced); only if the lead is ≥0xC0 does the loop also
+/// skip following 0x80-0xBF continuation bytes. Result: every byte that
+/// becomes a "lead" — including orphan continuation bytes (0x80-0xBF
+/// alone) and bare lead bytes without continuations — counts as one
+/// character. Used by `length()` (UTF-8 char count) and `like()` ESCAPE
+/// validation (sqlite3 requires the escape to be exactly one UTF-8
+/// character per SKIP_UTF8). Empirical match against sqlite3 3.51.0:
+/// `length(cast(x'AB' as text))` = 1, `length(cast(x'AB80' as text))` = 2,
+/// `length(cast(x'C382' as text))` = 1.
 pub fn utf8CharCount(bytes: []const u8) usize {
     var n: usize = 0;
-    for (bytes) |b| {
-        if ((b & 0xC0) != 0x80) n += 1;
+    var i: usize = 0;
+    while (i < bytes.len) : (n += 1) {
+        const lead = bytes[i];
+        i += 1;
+        if (lead >= 0xC0) {
+            while (i < bytes.len and (bytes[i] & 0xC0) == 0x80) i += 1;
+        }
     }
     return n;
 }
