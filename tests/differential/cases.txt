@@ -2370,3 +2370,46 @@ SELECT timediff('2024-01-15.5', '2024-01-15')
 SELECT timediff(NULL, '2024-01-01')
 SELECT timediff('2024-01-01', NULL)
 SELECT typeof(timediff(NULL, '2024-01-01'))
+
+# --- Iter30.B: printf `%*` / `%.*` width / precision from int arg
+# Width-from-arg: positive → exact width, negative → left-align with abs.
+SELECT printf('%*d', 5, 42)
+SELECT printf('%*d', 10, 42)
+SELECT printf('%*d', -5, 42)
+SELECT printf('%-*d|', 5, 42)
+SELECT printf('%0*d', 5, 42)
+SELECT printf('%*s|', 5, 'hi')
+SELECT printf('%-*s|', 5, 'hi')
+SELECT printf('%*X|', 4, 15)
+SELECT printf('%-*X|', 4, 15)
+# `%*c` width pads the single byte (`%c` always emits exactly one byte;
+# 0 flag is ignored — sqlite3 always uses spaces).
+SELECT printf('%5c', 65)
+SELECT printf('%-5c|', 65)
+SELECT printf('%05c', 65)
+SELECT printf('%*c', 3, 65)
+# Precision-from-arg: positive → use directly, negative → take abs (sqlite3
+# quirk distinct from C printf, which would drop precision entirely).
+SELECT printf('%.*f', 3, 3.14159)
+SELECT printf('%.*f', -1, 3.14)
+SELECT printf('%.*f', -2, 3.14)
+SELECT printf('%.*f', -5, 3.14)
+SELECT printf('%.*s', 3, 'hello')
+SELECT printf('%.*s', -1, 'hello')
+SELECT printf('%.*s', -3, 'hello')
+SELECT printf('%.*d', 3, 42)
+SELECT printf('%.*d', -3, 42)
+SELECT printf('%.*g', -1, 3.14)
+SELECT printf('%.*e', -1, 3.14)
+SELECT printf('%.*d', 0, 0)
+# Both width and precision from arg.
+SELECT printf('%*.*f', 10, 3, 3.14159)
+SELECT printf('%*.*s', 10, 3, 'hello')
+SELECT printf('%-*.*s|', 10, 3, 'hello')
+SELECT printf('%*.*f', 10, -1, 3.14)
+SELECT printf('%*.*s', -10, -1, 'hello')
+SELECT printf('%*.*s', -10, -3, 'hello')
+SELECT printf('%*.*d', 10, 5, 42)
+# `*` arg is text or float — coerced to int.
+SELECT printf('%*d', '7', 42)
+SELECT printf('%*d', 3.7, 42)

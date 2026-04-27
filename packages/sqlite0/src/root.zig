@@ -14,6 +14,7 @@ pub const funcs_text = @import("funcs_text.zig");
 pub const funcs_text_test = @import("funcs_text_test.zig");
 pub const funcs_format = @import("funcs_format.zig");
 pub const funcs_format_float = @import("funcs_format_float.zig");
+pub const funcs_format_int = @import("funcs_format_int.zig");
 pub const funcs_format_test = @import("funcs_format_test.zig");
 pub const funcs_time = @import("funcs_time.zig");
 pub const funcs_time_calendar = @import("funcs_time_calendar.zig");

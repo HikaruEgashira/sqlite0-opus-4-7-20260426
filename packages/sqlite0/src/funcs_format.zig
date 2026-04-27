@@ -7,6 +7,18 @@
 //! optional precision (for integers: minimum digits; for `%f`/`%e`: decimal
 //! places; for `%g`: significant digits; for `%s`: max chars).
 //!
+//! Width and precision can also come from arguments via `*` / `.*`. The
+//! starred form consumes one int arg from the value list before the
+//! conversion arg (so `%*d` is `args = [..., width, value]`). sqlite3
+//! quirks (printf.c `etPercent`):
+//!   * negative width arg → flip left-align flag with abs(width)
+//!   * negative precision arg → take abs(precision) (NOT "no precision"
+//!     the way C printf would). `printf('%.*f', -2, 3.14)` → "3.14".
+//!
+//! `%c` always emits exactly one byte (the C-string's first byte; NUL for
+//! empty/NULL inputs). Width pads with spaces — the `0` flag is ignored
+//! for `%c` even when present (`printf('%05c', 65)` → "    6").
+//!
 //! Argument coercion follows sqlite3:
 //!   * non-numeric TEXT → `0` for integer specs, `0.0` for float specs
 //!   * NULL (any spec)  → empty string for `%s`, `0` / `0.0` for numeric
@@ -38,6 +50,7 @@ const std = @import("std");
 const util = @import("func_util.zig");
 const ops = @import("ops.zig");
 const float_fmt = @import("funcs_format_float.zig");
+const int_fmt = @import("funcs_format_int.zig");
 
 const Value = util.Value;
 const Error = util.Error;
@@ -79,35 +92,58 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
             continue;
         }
         // Parse spec starting at fmt[i+1]
-        const spec = parseSpec(fmt, i + 1);
+        var spec = parseSpec(fmt, i + 1);
         i = spec.end;
+
+        // Consume `*` / `.*` args (width before precision, both before
+        // the conversion arg). Negative width → left-align flag with
+        // abs(value). Negative precision is a sqlite3 quirk (printf.c
+        // `etPercent`): instead of dropping precision the way C printf
+        // does, sqlite3 takes abs(value) as the precision — so
+        // `printf('%.*f', -2, 3.14)` → "3.14".
+        if (spec.width_from_arg) {
+            const wv = if (arg_idx < args.len) args[arg_idx] else Value.null;
+            arg_idx += 1;
+            const wn = int_fmt.coerceToInt(wv);
+            // @abs returns u64 — clean even at i64.minInt where -wn would
+            // overflow signed i64.
+            const wabs = @abs(wn);
+            if (wn < 0) spec.left_align = true;
+            spec.width = @intCast(wabs);
+        }
+        if (spec.precision_from_arg) {
+            const pv = if (arg_idx < args.len) args[arg_idx] else Value.null;
+            arg_idx += 1;
+            const pn = int_fmt.coerceToInt(pv);
+            spec.precision = @intCast(@abs(pn));
+        }
 
         switch (spec.conv) {
             '%' => try out.append(allocator, '%'),
             'd', 'i' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeSignedInt(allocator, &out, v, spec, 10, false);
+                try int_fmt.writeSignedInt(allocator, &out, v, spec, 10, false);
             },
             'u' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeUnsignedInt(allocator, &out, v, spec, 10, false);
+                try int_fmt.writeUnsignedInt(allocator, &out, v, spec, 10, false);
             },
             'x' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeUnsignedInt(allocator, &out, v, spec, 16, false);
+                try int_fmt.writeUnsignedInt(allocator, &out, v, spec, 16, false);
             },
             'X' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeUnsignedInt(allocator, &out, v, spec, 16, true);
+                try int_fmt.writeUnsignedInt(allocator, &out, v, spec, 16, true);
             },
             'o' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeUnsignedInt(allocator, &out, v, spec, 8, false);
+                try int_fmt.writeUnsignedInt(allocator, &out, v, spec, 8, false);
             },
             's' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
@@ -117,7 +153,7 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
             'c' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeChar(allocator, &out, v);
+                try writeChar(allocator, &out, v, spec);
             },
             'f' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
@@ -197,6 +233,12 @@ pub const Spec = struct {
     zero_pad: bool = false,
     width: usize = 0,
     precision: ?usize = null,
+    // sqlite3 `%*` / `%.*`: pull width / precision from the next int arg
+    // before the conversion arg. Both can be present (`%*.*f`). Negative
+    // width forces left-align with abs(value); negative precision drops
+    // the precision entirely.
+    width_from_arg: bool = false,
+    precision_from_arg: bool = false,
 };
 
 fn parseSpec(fmt: []const u8, start: usize) Spec {
@@ -213,18 +255,29 @@ fn parseSpec(fmt: []const u8, start: usize) Spec {
             else => break,
         }
     }
-    // Width
-    while (p < fmt.len and fmt[p] >= '0' and fmt[p] <= '9') : (p += 1) {
-        s.width = s.width * 10 + (fmt[p] - '0');
+    // Width — `*` defers to next arg, otherwise digits
+    if (p < fmt.len and fmt[p] == '*') {
+        s.width_from_arg = true;
+        p += 1;
+    } else {
+        while (p < fmt.len and fmt[p] >= '0' and fmt[p] <= '9') : (p += 1) {
+            s.width = s.width * 10 + (fmt[p] - '0');
+        }
     }
-    // Precision
+    // Precision — `.` then `*` or digits
     if (p < fmt.len and fmt[p] == '.') {
         p += 1;
-        var prec: usize = 0;
-        while (p < fmt.len and fmt[p] >= '0' and fmt[p] <= '9') : (p += 1) {
-            prec = prec * 10 + (fmt[p] - '0');
+        if (p < fmt.len and fmt[p] == '*') {
+            s.precision_from_arg = true;
+            s.precision = 0; // overwritten by arg consumption
+            p += 1;
+        } else {
+            var prec: usize = 0;
+            while (p < fmt.len and fmt[p] >= '0' and fmt[p] <= '9') : (p += 1) {
+                prec = prec * 10 + (fmt[p] - '0');
+            }
+            s.precision = prec;
         }
-        s.precision = prec;
     }
     if (p < fmt.len) {
         s.conv = fmt[p];
@@ -233,140 +286,6 @@ fn parseSpec(fmt: []const u8, start: usize) Spec {
         s.end = p;
     }
     return s;
-}
-
-fn coerceToInt(v: Value) i64 {
-    return switch (v) {
-        .null => 0,
-        .integer => |i| i,
-        // lossyCast clamps non-finite/out-of-range f64 to match sqlite3:
-        // +Inf and values > i64.max → LLONG_MAX, -Inf and values < i64.min
-        // → LLONG_MIN, NaN → 0. Plain `@intFromFloat` panics in safety
-        // builds for any of these — `printf('%d', 9223372036854775808)`
-        // hit the panic until this saturating path landed.
-        .real => |r| std.math.lossyCast(i64, r),
-        .text => |t| coerceTextToInt(t),
-        .blob => |b| coerceTextToInt(b),
-    };
-}
-
-/// printf TEXT→i64: try the atoi64 prefix parse first (sqlite3's
-/// printf accepts `'10abc'` → 10, `'  10  '` → 10, `'0x10'` → 0). If
-/// that finds nothing, fall back to parseFloat → saturating-i64 so
-/// pure-exponential strings like `'9.99e99'` still produce a saturated
-/// integer the way sqlite3 does. atoi64 itself lives in `func_util` so
-/// `eval_cast` can share it.
-fn coerceTextToInt(s: []const u8) i64 {
-    if (util.atoi64Prefix(s)) |i| return i;
-    if (std.fmt.parseFloat(f64, s)) |f| return std.math.lossyCast(i64, f) else |_| {}
-    return 0;
-}
-
-fn writeSignedInt(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    v: Value,
-    spec: Spec,
-    base: u8,
-    upper: bool,
-) !void {
-    _ = upper;
-    const n = coerceToInt(v);
-    var digits_buf: [32]u8 = undefined;
-    const abs_val: u64 = if (n < 0) @as(u64, @intCast(-(n + 1))) + 1 else @as(u64, @intCast(n));
-    const digits = formatDigits(&digits_buf, abs_val, base, false);
-    var sign: ?u8 = null;
-    if (n < 0) sign = '-' else if (spec.plus) sign = '+' else if (spec.space) sign = ' ';
-    try writeIntPadded(allocator, out, digits, sign, spec);
-}
-
-fn writeUnsignedInt(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    v: Value,
-    spec: Spec,
-    base: u8,
-    upper: bool,
-) !void {
-    const n = coerceToInt(v);
-    const u: u64 = @bitCast(n);
-    var digits_buf: [32]u8 = undefined;
-    const digits = formatDigits(&digits_buf, u, base, upper);
-    // sqlite3 alt-form (`#` flag): %#o prepends `0` to non-zero octal,
-    // %#x/%#X prepends `0x`/`0X` to non-zero hex. Value 0 gets no prefix
-    // in any base — sqlite3 quirk distinct from C printf, which would
-    // emit `0x0` for `%#x` of 0.
-    const prefix: []const u8 = if (spec.alt and u != 0)
-        switch (base) {
-            8 => "0",
-            16 => if (upper) "0X" else "0x",
-            else => "",
-        }
-    else
-        "";
-    try writeIntPaddedPrefixed(allocator, out, digits, null, prefix, spec);
-}
-
-fn formatDigits(buf: []u8, value: u64, base: u8, upper: bool) []const u8 {
-    if (value == 0) {
-        buf[0] = '0';
-        return buf[0..1];
-    }
-    var v = value;
-    var i: usize = buf.len;
-    while (v > 0) : (v /= base) {
-        i -= 1;
-        const d: u8 = @intCast(v % base);
-        buf[i] = if (d < 10) '0' + d else (if (upper) 'A' + (d - 10) else 'a' + (d - 10));
-    }
-    return buf[i..];
-}
-
-fn writeIntPadded(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    digits: []const u8,
-    sign: ?u8,
-    spec: Spec,
-) !void {
-    try writeIntPaddedPrefixed(allocator, out, digits, sign, "", spec);
-}
-
-fn writeIntPaddedPrefixed(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    digits: []const u8,
-    sign: ?u8,
-    prefix: []const u8,
-    spec: Spec,
-) !void {
-    // sqlite3 quirk (printf.c::etRADIX): the `0` flag forces the effective
-    // precision up to `width - sign_len`, so the zero-padding becomes part of
-    // the digit run rather than a separate fill. Two consequences fall out of
-    // this single rule:
-    //   * `0` wins over `-`: when content fills width via boosted precision,
-    //     there is no slack left for left-justify spaces. `printf('%-05d', 42)`
-    //     → "00042", not "42   ".
-    //   * `0` wins over explicit precision when the precision is too small:
-    //     `printf('%05.0d', 0)` → "00000", not "    0".
-    // Note `prefix.len` (alt-form `0x`/`0X`/`0`) is intentionally NOT subtracted
-    // — sqlite3 adds the alt-form prefix AFTER zero-padding, which can push
-    // total length past `width`. `printf('%-#05x', 255)` → "0x000ff" (7 chars).
-    const sign_len: usize = if (sign != null) 1 else 0;
-    const explicit_prec = spec.precision orelse 0;
-    const min_digits: usize = if (spec.zero_pad and spec.width > sign_len)
-        @max(explicit_prec, spec.width - sign_len)
-    else
-        explicit_prec;
-    const pad_zeros: usize = if (digits.len < min_digits) min_digits - digits.len else 0;
-    const content_len = digits.len + pad_zeros + sign_len + prefix.len;
-    const total_pad: usize = if (content_len < spec.width) spec.width - content_len else 0;
-    if (!spec.left_align) try appendN(allocator, out, ' ', total_pad);
-    if (sign) |s| try out.append(allocator, s);
-    try out.appendSlice(allocator, prefix);
-    try appendN(allocator, out, '0', pad_zeros);
-    try out.appendSlice(allocator, digits);
-    if (spec.left_align) try appendN(allocator, out, ' ', total_pad);
 }
 
 fn writeString(
@@ -401,12 +320,15 @@ fn writeString(
     if (spec.left_align) try appendN(allocator, out, ' ', pad);
 }
 
-fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) !void {
+fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value, spec: Spec) !void {
     // sqlite3 quirk: `%c` reads the C-string's first byte and ALWAYS writes
     // exactly 1 byte to the accumulator. Empty / NULL / leading-NUL inputs
     // all produce a NUL byte (because `bufpt[0]` is the NUL terminator).
     // INTEGER 65 is text-rendered to `"65"` first, so `printf('%c', 65)`
     // emits `'6'` (first char of `"65"`), not `'A'`.
+    //
+    // Width pads the single byte; `0` flag is ignored for `%c` — sqlite3
+    // always uses spaces (`printf('%05c', 65)` → `"    6"`, not `"00006"`).
     var owned: ?[]u8 = null;
     defer if (owned) |b| allocator.free(b);
     const raw: []const u8 = switch (v) {
@@ -422,7 +344,10 @@ fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) !v
         },
     };
     const c: u8 = if (raw.len > 0) raw[0] else 0;
+    const pad: usize = if (spec.width > 1) spec.width - 1 else 0;
+    if (!spec.left_align) try appendN(allocator, out, ' ', pad);
     try out.append(allocator, c);
+    if (spec.left_align) try appendN(allocator, out, ' ', pad);
 }
 
 fn nulTruncate(s: []const u8) []const u8 {

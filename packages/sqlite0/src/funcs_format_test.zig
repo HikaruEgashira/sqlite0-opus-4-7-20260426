@@ -280,3 +280,65 @@ test "fnPrintf: %05.10d → explicit precision exceeds width-boosted minimum" {
     defer a.free(r.text);
     try std.testing.expectEqualStrings("0000000042", r.text);
 }
+
+test "fnPrintf: %*d consumes width from int arg" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%*d" }, .{ .integer = 5 }, .{ .integer = 42 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("   42", r.text);
+}
+
+test "fnPrintf: %*d with negative width arg → left-align with abs" {
+    // sqlite3 quirk: `*` arg negative flips left-align even without explicit `-` flag.
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%*d|" }, .{ .integer = -5 }, .{ .integer = 42 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("42   |", r.text);
+}
+
+test "fnPrintf: %.*f consumes precision from int arg" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%.*f" }, .{ .integer = 3 }, .{ .real = 3.14159 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("3.142", r.text);
+}
+
+test "fnPrintf: %.*f with negative precision arg → abs (sqlite3 quirk)" {
+    // sqlite3 takes abs(value) instead of dropping precision the way
+    // C printf does: `printf('%.*f', -2, 3.14)` → "3.14".
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%.*f" }, .{ .integer = -2 }, .{ .real = 3.14 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("3.14", r.text);
+}
+
+test "fnPrintf: %*.*f consumes both width and precision args" {
+    const a = std.testing.allocator;
+    var p = [_]Value{
+        .{ .text = "%*.*f" },
+        .{ .integer = 10 },
+        .{ .integer = 3 },
+        .{ .real = 3.14159 },
+    };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("     3.142", r.text);
+}
+
+test "fnPrintf: %5c width-pads single byte; %05c uses spaces (no zero-pad)" {
+    const a = std.testing.allocator;
+    var p1 = [_]Value{ .{ .text = "%5c" }, .{ .integer = 65 } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    // INTEGER 65 → "65" → first byte '6'; width 5 prepends 4 spaces.
+    try std.testing.expectEqualStrings("    6", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "%05c" }, .{ .integer = 65 } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("    6", r2.text);
+}
