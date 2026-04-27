@@ -122,6 +122,16 @@ fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const V
             'I' => try writeZeroPadded(allocator, &out, twelveHour(dt.hour), 2),
             'M' => try writeZeroPadded(allocator, &out, dt.minute, 2),
             'S' => try writeZeroPadded(allocator, &out, dt.second, 2),
+            'f' => {
+                // sqlite3 `%f` is "SS.fff" (zero-padded second + 3-digit ms),
+                // not just the fractional part — `strftime('%S.%f', …)`
+                // surfaces this by emitting `56.56.789`. Using `dt.second`
+                // here (instead of @as(u16, dt.second)) keeps the inferred
+                // u16 promotion implicit.
+                try writeZeroPadded(allocator, &out, dt.second, 2);
+                try out.append(allocator, '.');
+                try writeZeroPadded(allocator, &out, dt.millisecond, 3);
+            },
             'j' => try writeZeroPadded(allocator, &out, calendar.dayOfYear(dt), 3),
             'w' => try writeZeroPadded(allocator, &out, calendar.dayOfWeek(dt), 1),
             'u' => try writeZeroPadded(allocator, &out, isoWeekday(calendar.dayOfWeek(dt)), 1),

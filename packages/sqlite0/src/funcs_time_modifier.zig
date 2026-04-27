@@ -128,6 +128,7 @@ fn applyDelta(dt: DateTime, mod: []const u8) ?DateTime {
         .hour = dt.hour,
         .minute = dt.minute,
         .second = dt.second,
+        .millisecond = dt.millisecond,
     };
     const jd = calendar.dateTimeToJulianFloat(adjusted) + frac_days;
     return calendar.julianFloatToDateTime(jd);

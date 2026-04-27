@@ -15,15 +15,27 @@ pub const DateTime = struct {
     hour: u8 = 0,
     minute: u8 = 0,
     second: u8 = 0,
+    millisecond: u16 = 0, // 0-999
 };
 
 pub const Ymd = struct { year: u16, month: u8, day: u8 };
 
-/// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DDTHH:MM:SS`,
-/// or `HH:MM:SS` (time-only — date defaults to 2000-01-01 per sqlite3
-/// time() docs). Year must lie in 0..=9999, month in 1..=12, day in
-/// 1..=31. Hour/minute/second are strict (≤23/59/59 — sqlite3 rejects
-/// `25:00:00`).
+/// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS[.fff][Z]`,
+/// `YYYY-MM-DDTHH:MM:SS[.fff][Z]`, or `HH:MM:SS[.fff][Z]` (time-only —
+/// date defaults to 2000-01-01 per sqlite3 time() docs). Year must lie
+/// in 0..=9999, month in 1..=12, day in 1..=31. Hour/minute/second are
+/// strict (≤23/59/59 — sqlite3 rejects `25:00:00`).
+///
+/// Sub-second precision: `.NNN…` reads as fractional seconds, stored as
+/// integer milliseconds. First three digits are the integer ms; a fourth
+/// digit ≥ '5' rounds up (with a clamp at 999 to keep the parser from
+/// rolling into the next second — sqlite3 does the same). Trailing
+/// digits past the fourth are ignored. `'2024-01-01 12:34:56.0009'`
+/// thus stores 1ms; `'.9999'` stores 999ms (not 1000); `.50050'` → 501.
+///
+/// `Z` (Zulu/UTC) is accepted at end of input — sqlite3 treats both
+/// `'…56Z'` and `'…56.5Z'` as already-UTC and ignores the marker.
+/// Anything else past the seconds (or fractional digits) → NULL.
 ///
 /// Day-overflow within a valid month (e.g. `2023-02-29`, `2023-04-31`)
 /// is renormalised forward via Julian round-trip to match sqlite3's
@@ -32,13 +44,14 @@ pub const Ymd = struct { year: u16, month: u8, day: u8 };
 /// year window — the only literal that could trigger a year overflow
 /// is day=32, which is rejected upstream.
 pub fn parseDateTime(s: []const u8) ?DateTime {
-    // Time-only `HH:MM:SS`: sqlite3 fills the date with 2000-01-01.
-    if (s.len == 8 and s[2] == ':' and s[5] == ':') {
+    // Time-only `HH:MM:SS[.fff][Z]`: sqlite3 fills the date with 2000-01-01.
+    if (s.len >= 8 and s[2] == ':' and s[5] == ':') {
         const hour = parseUintFixed(u8, s[0..2]) orelse return null;
         const minute = parseUintFixed(u8, s[3..5]) orelse return null;
         const second = parseUintFixed(u8, s[6..8]) orelse return null;
         if (hour > 23 or minute > 59 or second > 59) return null;
-        return .{ .year = 2000, .month = 1, .day = 1, .hour = hour, .minute = minute, .second = second };
+        const ms = parseSubsecAndZ(s[8..]) orelse return null;
+        return .{ .year = 2000, .month = 1, .day = 1, .hour = hour, .minute = minute, .second = second, .millisecond = ms };
     }
     if (s.len < 10) return null;
     if (s[4] != '-' or s[7] != '-') return null;
@@ -57,19 +70,56 @@ pub fn parseDateTime(s: []const u8) ?DateTime {
         const minute = parseUintFixed(u8, s[14..16]) orelse return null;
         const second = parseUintFixed(u8, s[17..19]) orelse return null;
         if (hour > 23 or minute > 59 or second > 59) return null;
+        const ms = parseSubsecAndZ(s[19..]) orelse return null;
         dt.hour = hour;
         dt.minute = minute;
         dt.second = second;
+        dt.millisecond = ms;
     }
 
     if (dt.day > daysInMonth(dt.year, dt.month)) {
         // Lenient day overflow → roll forward via Julian round-trip.
-        // Time fields are preserved exactly because the round-trip
-        // operates on the JD float without altering the second-of-day.
+        // Time fields (including ms) ride through unchanged.
         const jd = dateTimeToJulianFloat(dt);
         return julianFloatToDateTime(jd);
     }
     return dt;
+}
+
+/// Parse the optional `.fff…[Z]` tail after `HH:MM:SS`. Empty or `Z`
+/// alone → 0ms. A `.` must be followed by ≥1 digit. Returns null if the
+/// tail contains anything else after the digits/optional Z (sqlite3 is
+/// strict — `'…56xxxxx'` and `'…56.7Z!'` both fail to parse).
+fn parseSubsecAndZ(tail: []const u8) ?u16 {
+    var idx: usize = 0;
+    var ms: u16 = 0;
+    if (idx < tail.len and tail[idx] == '.') {
+        idx += 1;
+        // Require at least one digit after the dot — sqlite3 rejects `'…56.'`.
+        if (idx >= tail.len or tail[idx] < '0' or tail[idx] > '9') return null;
+        var digits: u8 = 0;
+        while (idx < tail.len and tail[idx] >= '0' and tail[idx] <= '9' and digits < 3) : ({
+            idx += 1;
+            digits += 1;
+        }) {
+            ms = ms * 10 + (tail[idx] - '0');
+        }
+        // Pad to ms-precision: `.5` → 500, `.78` → 780, `.789` → 789.
+        while (digits < 3) : (digits += 1) ms *= 10;
+        // Round-half-up using the 4th digit, clamping at 999 — sqlite3
+        // truncates rather than rolling into the next second
+        // (`'2024-01-01 12:34:56.9995'` → `56.999`, NOT `57.000`).
+        if (idx < tail.len and tail[idx] >= '0' and tail[idx] <= '9') {
+            const fourth = tail[idx];
+            idx += 1;
+            if (fourth >= '5' and ms < 999) ms += 1;
+            // Skip remaining digits — sqlite3 ignores anything past the 4th.
+            while (idx < tail.len and tail[idx] >= '0' and tail[idx] <= '9') : (idx += 1) {}
+        }
+    }
+    if (idx < tail.len and tail[idx] == 'Z') idx += 1;
+    if (idx != tail.len) return null;
+    return ms;
 }
 
 fn parseUintFixed(comptime T: type, s: []const u8) ?T {
@@ -135,11 +185,13 @@ pub fn unixEpochSeconds(dt: DateTime) i64 {
 /// Continuous Julian day (with fractional time-of-day) for `dt`. Mid-day UTC
 /// of JDN N is N exactly; midnight is N - 0.5. This is sqlite3's
 /// `julianday(...)` value, also used internally by every modifier path
-/// to renormalise day/month/year overflow.
+/// to renormalise day/month/year overflow. Sub-second precision rides
+/// through as `ms / 86_400_000` — f64 around year 2024 has ~9 fractional
+/// decimal digits, leaving ~10× headroom over the 1.16e-8 per-ms unit.
 pub fn dateTimeToJulianFloat(dt: DateTime) f64 {
     const jdn = julianDayNumber(dt.year, dt.month, dt.day);
-    const tod_sec: i64 = @as(i64, dt.hour) * 3600 + @as(i64, dt.minute) * 60 + dt.second;
-    return @as(f64, @floatFromInt(jdn)) - 0.5 + @as(f64, @floatFromInt(tod_sec)) / 86400.0;
+    const tod_ms: i64 = (@as(i64, dt.hour) * 3600 + @as(i64, dt.minute) * 60 + dt.second) * 1000 + dt.millisecond;
+    return @as(f64, @floatFromInt(jdn)) - 0.5 + @as(f64, @floatFromInt(tod_ms)) / 86_400_000.0;
 }
 
 /// Inverse of `dateTimeToJulianFloat`. Returns null if the resulting year
@@ -149,19 +201,21 @@ pub fn julianFloatToDateTime(jd: f64) ?DateTime {
     const adj = jd + 0.5;
     var jdn_floor: i64 = @intFromFloat(@floor(adj));
     const day_frac = adj - @as(f64, @floatFromInt(jdn_floor));
-    // Round seconds with a half-up rule. If we land exactly on 86400, push
-    // the date forward and reset seconds to 0 — keeps `'+24 hours'` from
-    // producing `24:00:00`.
-    var total_sec: i64 = @intFromFloat(@round(day_frac * 86400.0));
-    if (total_sec >= 86400) {
-        total_sec -= 86400;
+    // Round to whole milliseconds. If we land on exactly 86_400_000 (full
+    // day), push the date forward and reset to 0 — keeps `'+24 hours'`
+    // from producing `24:00:00.000`.
+    var total_ms: i64 = @intFromFloat(@round(day_frac * 86_400_000.0));
+    if (total_ms >= 86_400_000) {
+        total_ms -= 86_400_000;
         jdn_floor += 1;
-    } else if (total_sec < 0) {
-        total_sec += 86400;
+    } else if (total_ms < 0) {
+        total_ms += 86_400_000;
         jdn_floor -= 1;
     }
     const ymd = jdnToYmd(jdn_floor) orelse return null;
 
+    const total_sec: i64 = @divTrunc(total_ms, 1000);
+    const millisecond: i64 = @mod(total_ms, 1000);
     const hour: i64 = @divTrunc(total_sec, 3600);
     const minute: i64 = @divTrunc(@mod(total_sec, 3600), 60);
     const second: i64 = @mod(total_sec, 60);
@@ -173,6 +227,7 @@ pub fn julianFloatToDateTime(jd: f64) ?DateTime {
         .hour = @intCast(hour),
         .minute = @intCast(minute),
         .second = @intCast(second),
+        .millisecond = @intCast(millisecond),
     };
 }
 
