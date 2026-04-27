@@ -1364,3 +1364,40 @@ SELECT -9223372036854775808 + 0
 SELECT typeof(-9223372036854775808 + 0)
 SELECT -9223372036854775808 + 1
 
+# Iter29.P: REAL `%` truncates both operands to i64 first.
+# sqlite3 (vdbe.c OP_Remainder fp_math): `iA = (i64)rA; iB = (i64)rB`
+# then `iB % iA` returned as REAL. So `1.5 % 1` is `1 % 1 = 0` returned
+# as `0.0` (not f64 fmod which would give 0.5).
+#  - both INTEGER stays INTEGER (regression guard).
+#  - either side REAL truncates → REAL result.
+#  - divisor truncates to 0 → NULL (e.g. `7.5 % 0.3` since 0.3 → 0).
+#  - divisor -1 → result 0 (or 0.0 in REAL form).
+SELECT 1.5 % 1
+SELECT typeof(1.5 % 1)
+SELECT 7.5 % 2
+SELECT typeof(7.5 % 2)
+SELECT 7 % 2.5
+SELECT typeof(7 % 2.5)
+SELECT 7.0 % 2.5
+SELECT typeof(7.0 % 2.5)
+SELECT -7.5 % 2
+SELECT 7.5 % -2
+SELECT 7.5 % 0
+SELECT 7.5 % 0.3
+SELECT 7.5 % 0.5
+SELECT '5.5' % 2
+SELECT typeof('5.5' % 2)
+SELECT '7' % 2
+SELECT typeof('7' % 2)
+SELECT 'foo' % 2
+SELECT typeof('foo' % 2)
+SELECT NULL % 2
+SELECT 2 % NULL
+SELECT 7 % -1
+SELECT typeof(7 % -1)
+SELECT 7.5 % -1
+SELECT typeof(7.5 % -1)
+SELECT 1e20 % 3
+SELECT typeof(1e20 % 3)
+SELECT 7 % 0
+

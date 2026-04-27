@@ -115,6 +115,11 @@ pub fn applyArith(op: TokenKind, lhs_raw: Value, rhs_raw: Value) Error!Value {
             },
             .percent => {
                 if (b == 0) return Value.null;
+                // `LLONG_MIN % -1` is mathematically 0 but Zig's @rem
+                // touches the @divTrunc UB boundary; sqlite3 short-
+                // circuits this case (vdbe.c OP_Remainder: `if iA==-1
+                // then result=0`). Mirror exactly.
+                if (b == -1) return Value{ .integer = 0 };
                 return Value{ .integer = @rem(a, b) };
             },
             else => unreachable,
@@ -131,8 +136,17 @@ pub fn applyArith(op: TokenKind, lhs_raw: Value, rhs_raw: Value) Error!Value {
             return Value{ .real = a / b };
         },
         .percent => {
-            if (b == 0) return Value.null;
-            return Value{ .real = @rem(a, b) };
+            // sqlite3 truncates BOTH operands to i64 for modulo even
+            // when one side is REAL, then promotes the integer result
+            // back to REAL (vdbe.c OP_Remainder fp_math branch). So
+            // `1.5 % 1` is `(i64)1.5 % (i64)1 = 1 % 1 = 0` returned as
+            // 0.0 REAL — not f64 fmod which would give 0.5. Inf/NaN
+            // saturate via lossyCast (LLONG_MAX / LLONG_MIN / 0).
+            const a_i = std.math.lossyCast(i64, a);
+            const b_i = std.math.lossyCast(i64, b);
+            if (b_i == 0) return Value.null;
+            if (b_i == -1) return Value{ .real = 0.0 };
+            return Value{ .real = @floatFromInt(@rem(a_i, b_i)) };
         },
         else => unreachable,
     }
