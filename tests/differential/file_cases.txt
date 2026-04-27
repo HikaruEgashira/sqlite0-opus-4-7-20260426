@@ -433,3 +433,45 @@ SETUP: CREATE TABLE t(n INTEGER PRIMARY KEY, s TEXT);
 WAL_SETUP: INSERT INTO t VALUES(0, 'seed');
 MUTATE: INSERT INTO t(n,s) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),(2,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),(3,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),(4,'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'),(5,'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'),(6,'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'),(7,'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'),(8,'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh'),(9,'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'),(10,'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj');
 VERIFY: SELECT count(*), min(n), max(n) FROM t
+
+# Iter27.B.4 — WAL MUTATE coverage expansion. DELETE through WAL.
+SETUP: CREATE TABLE t(n INTEGER, s TEXT);
+WAL_SETUP: INSERT INTO t VALUES(1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+MUTATE: DELETE FROM t WHERE n > 2;
+VERIFY: SELECT n, s FROM t ORDER BY n
+
+# UPDATE-only through WAL — no row-count change, just page rewrite.
+SETUP: CREATE TABLE t(n INTEGER, s TEXT);
+WAL_SETUP: INSERT INTO t VALUES(1, 'old'), (2, 'old'), (3, 'old');
+MUTATE: UPDATE t SET s = 'new' WHERE n = 2;
+VERIFY: SELECT n, s FROM t ORDER BY n
+
+# CREATE TABLE through WAL — sqlite_schema (page 1) gets a new cell
+# appended; the new table's root page must be allocated through the
+# WAL stage, not extend the main file.
+SETUP: CREATE TABLE seed(x); INSERT INTO seed VALUES (1);
+WAL_SETUP: INSERT INTO seed VALUES (2);
+MUTATE: CREATE TABLE u(a, b); INSERT INTO u VALUES (10, 'x'), (20, 'y');
+VERIFY: SELECT (SELECT count(*) FROM seed), (SELECT count(*) FROM u)
+
+# DELETE-everything through WAL — leaf rebuild, freelist update, page-1
+# header bump.
+SETUP: CREATE TABLE t(a INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1), (2), (3);
+MUTATE: DELETE FROM t;
+VERIFY: SELECT count(*) FROM t
+
+# UPDATE expression through WAL — `a = a + 10` exercises the read-
+# then-write path on the same page within one statement.
+SETUP: CREATE TABLE t(a INTEGER, b INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1, 100);
+MUTATE: UPDATE t SET a = a + 10, b = a;
+VERIFY: SELECT a, b FROM t
+
+# Multiple statements per execute() — the per-statement commit hook
+# in Database.execute fires twice. Each must produce a valid commit
+# frame; recovery sees both.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1);
+MUTATE: INSERT INTO t VALUES (2); INSERT INTO t VALUES (3);
+VERIFY: SELECT n FROM t ORDER BY n
