@@ -144,3 +144,33 @@ VERIFY: SELECT n FROM t
 SETUP: CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 0)
 MUTATE: UPDATE t SET a = a + 10, b = a
 VERIFY: SELECT a, b FROM t
+
+# Iter26.A.3 file-mode CREATE TABLE cases. Both engines run the same
+# MUTATE on independent file copies (each starting from the SETUP
+# fixture); VERIFY then runs against both and the outputs must match.
+# `PRAGMA integrity_check` on the sqlite0-mutated copy catches any
+# byte-format divergence that VERIFY alone might not surface.
+
+# CREATE TABLE on an existing file, then SELECT confirms the schema
+# is visible to sqlite3.
+SETUP: CREATE TABLE seed(x)
+MUTATE: CREATE TABLE u(a, b)
+VERIFY: SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name
+
+# CREATE + INSERT + SELECT round-trip through sqlite0; sqlite3 then
+# reads the inserted rows.
+SETUP: CREATE TABLE seed(x)
+MUTATE: CREATE TABLE u(a, b); INSERT INTO u VALUES (1, 'hello'), (2, 'world')
+VERIFY: SELECT a, b FROM u
+
+# CREATE TABLE preserves column types in the stored sql column —
+# sqlite3 reads the schema row's sql to drive its own typing.
+SETUP: CREATE TABLE seed(x)
+MUTATE: CREATE TABLE u(id INTEGER, name TEXT)
+VERIFY: SELECT sql FROM sqlite_schema WHERE name='u'
+
+# Two CREATE TABLE statements in one batch — both must land and both
+# must show up in sqlite_schema.
+SETUP: CREATE TABLE seed(x)
+MUTATE: CREATE TABLE a1(p); CREATE TABLE a2(q)
+VERIFY: SELECT name FROM sqlite_schema WHERE type='table' AND name LIKE 'a%' ORDER BY name

@@ -29,12 +29,6 @@ pub const Error = error{
     /// Phase 4 (Transaction + WAL) will split this when WAL recovery
     /// branches on specific errors.
     IoError,
-    /// Phase 3b (read-only Pager): a write statement (INSERT / UPDATE
-    /// / DELETE / CREATE TABLE) was issued against a Database opened
-    /// from a sqlite3 .db file. The write path is Iter26.A scope; until
-    /// then file-mode databases reject writes loudly so silent in-memory
-    /// shadow state can't masquerade as a successful mutation.
-    ReadOnlyDatabase,
 };
 
 pub fn unescapeStringLiteral(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {

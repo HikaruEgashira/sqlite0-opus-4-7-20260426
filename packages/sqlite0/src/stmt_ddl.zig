@@ -13,9 +13,16 @@ const Parser = parser_mod.Parser;
 /// holds for the entire `execute` call; the outer slice is in
 /// `Parser.allocator` (per-statement arena). The caller dupes `name` and
 /// `columns[*]` to long-lived memory before storing them.
+///
+/// `source_text` is the verbatim CREATE TABLE statement bytes from `p.src`
+/// (`CREATE` keyword through the closing `)`). Iter26.A.3 needs this to
+/// populate the `sql` column of `sqlite_schema` so that on a subsequent
+/// open the schema scanner can re-parse the original definition. Trailing
+/// `;` is NOT included — sqlite3 stores the statement without it.
 pub const ParsedCreateTable = struct {
     name: []const u8,
     columns: [][]const u8,
+    source_text: []const u8,
 };
 
 /// `CREATE TABLE <name> ( <col-def> [, <col-def> ...] )`
@@ -25,6 +32,7 @@ pub const ParsedCreateTable = struct {
 /// (Iter14.B). SQLite3 dynamic typing means the absence of constraint
 /// enforcement is observationally equivalent for Phase 2.
 pub fn parseCreateTableStatement(p: *Parser) !ParsedCreateTable {
+    const stmt_start: u32 = p.cur.start;
     try p.expect(.keyword_create);
     try p.expect(.keyword_table);
 
@@ -46,9 +54,18 @@ pub fn parseCreateTableStatement(p: *Parser) !ParsedCreateTable {
         }
         break;
     }
-    try p.expect(.rparen);
+    // Capture the rparen token's end BEFORE `expect` advances past it
+    // — once consumed, the lexer cursor moves to the next token and we
+    // can't recover the source-text endpoint.
+    if (p.cur.kind != .rparen) return Error.SyntaxError;
+    const stmt_end: u32 = p.cur.end;
+    p.advance();
 
-    return .{ .name = name, .columns = try columns.toOwnedSlice(p.allocator) };
+    return .{
+        .name = name,
+        .columns = try columns.toOwnedSlice(p.allocator),
+        .source_text = p.src[stmt_start..stmt_end],
+    };
 }
 
 /// Column-def: `<name> [<type-name> ...] [<column-constraint> ...]`. We only

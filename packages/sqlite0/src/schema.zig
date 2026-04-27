@@ -29,10 +29,13 @@ const database = @import("database.zig");
 const pager_mod = @import("pager.zig");
 const btree = @import("btree.zig");
 const btree_walk = @import("btree_walk.zig");
+const btree_insert = @import("btree_insert.zig");
 const record = @import("record.zig");
+const record_encode = @import("record_encode.zig");
 const stmt_ddl = @import("stmt_ddl.zig");
 const parser_mod = @import("parser.zig");
 
+const Value = value_mod.Value;
 pub const Error = ops.Error;
 
 pub const SQLITE_FILE_HEADER: []const u8 = "SQLite format 3\x00";
@@ -123,47 +126,81 @@ fn registerCell(
     }
 }
 
+/// Append one row to the sqlite_schema B-tree (root = page 1) with the
+/// 5 columns sqlite3 expects: type, name, tbl_name, rootpage, sql.
+/// Allocates a fresh rowid (max + 1, like the user-table INSERT path),
+/// encodes the record, and inserts the cell on page 1 with
+/// `header_offset = 100` (the file header occupies the first 100 bytes
+/// of page 1). Single-page sqlite_schema only — if page 1 is full,
+/// returns `Error.UnsupportedFeature` (Iter26.B will widen this).
+///
+/// Used by Iter26.A.3.c to record a freshly-CREATEd table so that
+/// re-opening the file rediscovers it through `loadFromPager`.
+pub fn appendSchemaRow(
+    p: *pager_mod.Pager,
+    type_str: []const u8,
+    name: []const u8,
+    tbl_name: []const u8,
+    rootpage: u32,
+    sql: []const u8,
+) Error!void {
+    var arena = std.heap.ArenaAllocator.init(p.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const usable_size = try p.usableSize();
+
+    const original = try p.getPage(1);
+    const work = try a.alloc(u8, original.len);
+    @memcpy(work, original);
+
+    const header_offset: usize = 100;
+    const header = try btree.parsePageHeader(work, header_offset);
+    if (header.page_type != .leaf_table) return Error.UnsupportedFeature;
+
+    // Find current max rowid in sqlite_schema by linear scan.
+    var max_rowid: i64 = 0;
+    {
+        const cells = try btree.parseLeafTablePage(a, work, header_offset, usable_size);
+        for (cells) |c| {
+            if (c.rowid > max_rowid) max_rowid = c.rowid;
+        }
+    }
+
+    const cols = [_]Value{
+        .{ .text = type_str },
+        .{ .text = name },
+        .{ .text = tbl_name },
+        .{ .integer = @intCast(rootpage) },
+        .{ .text = sql },
+    };
+    const rec = try record_encode.encodeRecord(a, &cols);
+    const new_rowid = max_rowid + 1;
+
+    const outcome = try btree_insert.insertLeafTableCell(
+        work,
+        header_offset,
+        usable_size,
+        new_rowid,
+        rec,
+    );
+    switch (outcome) {
+        .ok => {},
+        .page_full => return Error.UnsupportedFeature, // Iter26.B
+    }
+
+    try p.writePage(1, work);
+}
+
 // -- tests --
 
 const testing = std.testing;
 const test_util = @import("btree_test_util.zig");
+const test_db_util = @import("test_db_util.zig");
 const PAGE_SIZE = pager_mod.PAGE_SIZE;
-
-var sch_test_counter: std.atomic.Value(u32) = .init(0);
-
-fn makeTempPath(suffix: []const u8) ![]u8 {
-    const tmpdir_raw = std.c.getenv("TMPDIR");
-    const tmpdir_slice: []const u8 = if (tmpdir_raw) |x| std.mem.span(@as([*:0]const u8, x)) else "/tmp";
-    const trimmed = std.mem.trimEnd(u8, tmpdir_slice, "/");
-    const pid = std.c.getpid();
-    const seq = sch_test_counter.fetchAdd(1, .seq_cst);
-    return std.fmt.allocPrint(testing.allocator, "{s}/sqlite0-schema-test-{d}-{d}-{s}.db", .{ trimmed, pid, seq, suffix });
-}
-
-fn unlinkPath(path: []const u8) void {
-    const path_z = testing.allocator.dupeZ(u8, path) catch return;
-    defer testing.allocator.free(path_z);
-    _ = std.c.unlink(path_z.ptr);
-}
-
-fn writePages(path: []const u8, pages: []const []const u8) !void {
-    const path_z = try testing.allocator.dupeZ(u8, path);
-    defer testing.allocator.free(path_z);
-    const flags: std.c.O = .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true };
-    const fd = std.c.open(path_z.ptr, flags, @as(std.c.mode_t, 0o644));
-    if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
-    const total = pages.len * PAGE_SIZE;
-    const buf = try testing.allocator.alloc(u8, total);
-    defer testing.allocator.free(buf);
-    @memset(buf, 0);
-    for (pages, 0..) |p, i| {
-        std.debug.assert(p.len == PAGE_SIZE);
-        @memcpy(buf[i * PAGE_SIZE .. (i + 1) * PAGE_SIZE], p);
-    }
-    const w = std.c.write(fd, buf.ptr, total);
-    if (w != @as(isize, @intCast(total))) return error.WriteFailed;
-}
+const makeTempPath = test_db_util.makeTempPath;
+const unlinkPath = test_db_util.unlinkPath;
+const writePages = test_db_util.writePages;
 
 /// Build a hand-rolled record matching sqlite_schema's column layout.
 /// All five columns are TEXT/INTEGER for our test purposes.
@@ -338,35 +375,3 @@ test "loadFromPager: rejects non-sqlite3 file" {
     try testing.expectError(Error.IoError, loadFromPager(&db, &p));
 }
 
-test "file-mode Database rejects CREATE TABLE (Iter26.A.3 still pending)" {
-    // After Iter26.A.1/.A.2, INSERT/DELETE are allowed in file mode
-    // (exercised by run_file.sh). UPDATE was added in A.2.b. Only
-    // CREATE TABLE remains gated by engine.assertWritable until A.3
-    // lands schema-page allocation.
-    const path = try makeTempPath("readonly");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    const rec = try buildSchemaRecord(testing.allocator, "table", "t", "t", 2, "CREATE TABLE t(a, b)");
-    defer testing.allocator.free(rec);
-    const inputs = [_]test_util.TestCellInput{.{ .rowid = 1, .record = rec }};
-    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &inputs);
-    defer testing.allocator.free(page1);
-    @memcpy(page1[0..SQLITE_FILE_HEADER.len], SQLITE_FILE_HEADER);
-
-    const empty_inputs = [_]test_util.TestCellInput{};
-    const page2 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 0, &empty_inputs);
-    defer testing.allocator.free(page2);
-
-    try writePages(path, &[_][]const u8{ page1, page2 });
-
-    var db = try database.Database.openFile(testing.allocator, path);
-    defer db.deinit();
-
-    try testing.expectError(Error.ReadOnlyDatabase, db.execute("CREATE TABLE u(z)"));
-
-    // SELECT still works against file-mode databases (Iter25 read path).
-    var sr = try db.execute("SELECT a, b FROM t");
-    defer sr.deinit();
-    try testing.expectEqual(@as(usize, 1), sr.statements.len);
-}

@@ -107,6 +107,53 @@ pub const Pager = struct {
         return PAGE_SIZE - @as(usize, try self.reservedSpace());
     }
 
+    /// Allocate a new page at the end of the file. Reads the
+    /// in-header database size (page-1 bytes 28..31, u32 BE),
+    /// increments it, writes a zero-filled page at the new index
+    /// (pwrite past EOF auto-extends sparsely), and finally writes
+    /// page 1 with the bumped dbsize so `PRAGMA integrity_check`
+    /// finds the in-header count matching reality. Returns the
+    /// freshly-allocated page number.
+    ///
+    /// All-or-nothing: if the page-1 update fails after the new
+    /// page hits disk, the file ends up with a trailing page that
+    /// the header doesn't know about — sqlite3 ignores it (treats
+    /// dbsize as authoritative). Callers should treat that as
+    /// recoverable: re-running allocatePage will reuse the same
+    /// page index because dbsize never advanced.
+    pub fn allocatePage(self: *Pager) Error!u32 {
+        const page1 = try self.getPage(1);
+        if (page1.len < 32) return Error.IoError;
+        const cur_dbsize: u32 = (@as(u32, page1[28]) << 24) |
+            (@as(u32, page1[29]) << 16) |
+            (@as(u32, page1[30]) << 8) |
+            @as(u32, page1[31]);
+        if (cur_dbsize == 0) return Error.IoError; // malformed
+        const new_page: u32 = cur_dbsize + 1;
+
+        // Write the new page first (sparse extend). A failure here
+        // leaves the on-disk dbsize unchanged.
+        const zeros = try self.allocator.alloc(u8, PAGE_SIZE);
+        defer self.allocator.free(zeros);
+        @memset(zeros, 0);
+        try self.writePage(new_page, zeros);
+
+        // Bump dbsize on page 1. getPage may return a different
+        // pointer than `page1` above if eviction happened during
+        // the writePage call — re-fetch to be safe.
+        const page1_now = try self.getPage(1);
+        const updated = try self.allocator.alloc(u8, PAGE_SIZE);
+        defer self.allocator.free(updated);
+        @memcpy(updated, page1_now);
+        updated[28] = @intCast((new_page >> 24) & 0xff);
+        updated[29] = @intCast((new_page >> 16) & 0xff);
+        updated[30] = @intCast((new_page >> 8) & 0xff);
+        updated[31] = @intCast(new_page & 0xff);
+        try self.writePage(1, updated);
+
+        return new_page;
+    }
+
     /// Write `bytes` (exactly PAGE_SIZE) to page `page_no` via pwrite,
     /// then update the LRU cache so subsequent `getPage` reads see the
     /// new contents without an extra disk roundtrip. Iter26.A.0 — the
@@ -210,66 +257,20 @@ pub const Pager = struct {
 // -- tests --
 
 const testing = std.testing;
-
-/// Module-scope monotonic counter for unique temp paths.
-var test_counter: std.atomic.Value(u32) = .init(0);
-
-/// Construct a unique temp-file path under `$TMPDIR` (or `/tmp`). Caller
-/// frees. Uses pid + monotonic counter so concurrent tests don't collide.
-fn makeTempPath(allocator: std.mem.Allocator, suffix: []const u8) ![]u8 {
-    const tmpdir_raw = std.c.getenv("TMPDIR");
-    const tmpdir_slice: []const u8 = if (tmpdir_raw) |p| std.mem.span(@as([*:0]const u8, p)) else "/tmp";
-    const trimmed = std.mem.trimEnd(u8, tmpdir_slice, "/");
-    const pid = std.c.getpid();
-    const seq = test_counter.fetchAdd(1, .seq_cst);
-    return std.fmt.allocPrint(allocator, "{s}/sqlite0-pager-test-{d}-{d}-{s}.db", .{ trimmed, pid, seq, suffix });
-}
-
-/// Write `content` to a fresh file at `path` (truncating any existing).
-/// Pads with zeros to the next PAGE_SIZE boundary so partial writes
-/// don't surprise pread.
-fn writeFixture(path: []const u8, content: []const u8) !void {
-    const path_z = try testing.allocator.dupeZ(u8, path);
-    defer testing.allocator.free(path_z);
-
-    const flags: std.c.O = .{
-        .ACCMODE = .RDWR,
-        .CREAT = true,
-        .TRUNC = true,
-    };
-    // Use the variadic mode arg — 0o644.
-    const fd = std.c.open(path_z.ptr, flags, @as(std.c.mode_t, 0o644));
-    if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
-
-    // Round up to page boundary; final byte ensures the file is exactly
-    // ceil(content.len / PAGE_SIZE) pages long.
-    const n_pages = (content.len + PAGE_SIZE - 1) / PAGE_SIZE;
-    const total = n_pages * PAGE_SIZE;
-    const padded = try testing.allocator.alloc(u8, total);
-    defer testing.allocator.free(padded);
-    @memset(padded, 0);
-    @memcpy(padded[0..content.len], content);
-
-    const w = std.c.write(fd, padded.ptr, total);
-    if (w != @as(isize, @intCast(total))) return error.WriteFailed;
-}
-
-fn unlinkPath(path: []const u8) void {
-    const path_z = testing.allocator.dupeZ(u8, path) catch return;
-    defer testing.allocator.free(path_z);
-    _ = std.c.unlink(path_z.ptr);
-}
+const test_db_util = @import("test_db_util.zig");
+const makeTempPath = test_db_util.makeTempPath;
+const unlinkPath = test_db_util.unlinkPath;
+const writeFixture = test_db_util.writeFixture;
 
 test "Pager.open: rejects nonexistent file" {
-    const path = try makeTempPath(testing.allocator, "missing");
+    const path = try makeTempPath("missing");
     defer testing.allocator.free(path);
     // No fixture written — open must fail.
     try testing.expectError(Error.IoError, Pager.open(testing.allocator, path));
 }
 
 test "Pager.getPage: reads page 1 contents" {
-    const path = try makeTempPath(testing.allocator, "page1");
+    const path = try makeTempPath("page1");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
 
@@ -285,7 +286,7 @@ test "Pager.getPage: reads page 1 contents" {
 }
 
 test "Pager.getPage: page 0 is invalid" {
-    const path = try makeTempPath(testing.allocator, "p0");
+    const path = try makeTempPath("p0");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
     try writeFixture(path, "x");
@@ -296,7 +297,7 @@ test "Pager.getPage: page 0 is invalid" {
 }
 
 test "Pager.getPage: cache hit returns same backing slice" {
-    const path = try makeTempPath(testing.allocator, "hit");
+    const path = try makeTempPath("hit");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
     try writeFixture(path, "abc");
@@ -310,7 +311,7 @@ test "Pager.getPage: cache hit returns same backing slice" {
 }
 
 test "Pager.getPage: LRU eviction at capacity" {
-    const path = try makeTempPath(testing.allocator, "lru");
+    const path = try makeTempPath("lru");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
 
@@ -347,7 +348,7 @@ test "Pager.getPage: LRU eviction at capacity" {
 }
 
 test "Pager.open: second instance fails with DatabaseLocked" {
-    const path = try makeTempPath(testing.allocator, "lock");
+    const path = try makeTempPath("lock");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
     try writeFixture(path, "x");
@@ -358,7 +359,7 @@ test "Pager.open: second instance fails with DatabaseLocked" {
 }
 
 test "Pager.getPage: LRU promotion on hit" {
-    const path = try makeTempPath(testing.allocator, "promote");
+    const path = try makeTempPath("promote");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
 
@@ -385,82 +386,5 @@ test "Pager.getPage: LRU promotion on hit" {
     try testing.expectEqual(@as(u32, 2), p.cache.items[2].page_no);
 }
 
-test "Pager.writePage: round-trip through close + reopen" {
-    const path = try makeTempPath(testing.allocator, "write");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    // Pre-create a 2-page file (sparse zeros) so page 1 and 2 exist
-    // before we open the Pager (open requires the file to exist).
-    const content = try testing.allocator.alloc(u8, PAGE_SIZE * 2);
-    defer testing.allocator.free(content);
-    @memset(content, 0);
-    try writeFixture(path, content);
-
-    // Construct a non-trivial payload for page 1.
-    const payload = try testing.allocator.alloc(u8, PAGE_SIZE);
-    defer testing.allocator.free(payload);
-    @memset(payload, 0);
-    @memcpy(payload[0..6], "hello!");
-    payload[PAGE_SIZE - 1] = 0xab; // mark the tail too
-
-    {
-        var p = try Pager.open(testing.allocator, path);
-        defer p.close();
-        try p.writePage(1, payload);
-    }
-
-    // Reopen the file; verify the bytes survived the close.
-    var p2 = try Pager.open(testing.allocator, path);
-    defer p2.close();
-    const got = try p2.getPage(1);
-    try testing.expectEqualStrings("hello!", got[0..6]);
-    try testing.expectEqual(@as(u8, 0xab), got[PAGE_SIZE - 1]);
-}
-
-test "Pager.writePage: rejects page 0 and wrong-length buffers" {
-    const path = try makeTempPath(testing.allocator, "rejects");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-    try writeFixture(path, "x");
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    const buf = try testing.allocator.alloc(u8, PAGE_SIZE);
-    defer testing.allocator.free(buf);
-    @memset(buf, 0);
-    try testing.expectError(Error.IoError, p.writePage(0, buf));
-
-    const short = try testing.allocator.alloc(u8, 32);
-    defer testing.allocator.free(short);
-    try testing.expectError(Error.IoError, p.writePage(1, short));
-}
-
-test "Pager.writePage: cache write-through reflects in subsequent getPage" {
-    const path = try makeTempPath(testing.allocator, "wt");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-    try writeFixture(path, "init");
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    // Prime the cache with the initial bytes.
-    const initial = try p.getPage(1);
-    try testing.expectEqualStrings("init", initial[0..4]);
-
-    // Write new bytes; cache must reflect them WITHOUT another disk
-    // read (the test trusts the write-through path because we haven't
-    // reopened the file).
-    const fresh = try testing.allocator.alloc(u8, PAGE_SIZE);
-    defer testing.allocator.free(fresh);
-    @memset(fresh, 0);
-    @memcpy(fresh[0..5], "fresh");
-    try p.writePage(1, fresh);
-
-    const after = try p.getPage(1);
-    try testing.expectEqualStrings("fresh", after[0..5]);
-    // Pointer identity: same cache slot, in-place memcpy.
-    try testing.expect(initial.ptr == after.ptr);
-}
+// `Pager.writePage` and `Pager.allocatePage` tests live in
+// `pager_write_test.zig` to keep this file under the 500-line discipline.

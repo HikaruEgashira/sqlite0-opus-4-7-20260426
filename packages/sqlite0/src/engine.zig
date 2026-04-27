@@ -22,6 +22,7 @@ const database = @import("database.zig");
 const engine_from = @import("engine_from.zig");
 const engine_setop = @import("engine_setop.zig");
 const engine_dml = @import("engine_dml.zig");
+const engine_ddl_file = @import("engine_ddl_file.zig");
 const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
@@ -64,8 +65,13 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_create => {
             const parsed = try stmt_mod.parseCreateTableStatement(p);
-            try assertWritable(db);
-            try db.registerTable(parsed);
+            // File-mode CREATE TABLE persists through sqlite_schema
+            // (Iter26.A.3); in-memory tables stay in db.tables only.
+            if (db.pager != null) {
+                try engine_ddl_file.executeCreateTableFile(db, parsed);
+            } else {
+                try db.registerTable(parsed);
+            }
             return .create_table;
         },
         .keyword_insert => {
@@ -94,15 +100,6 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         else => return Error.SyntaxError,
     }
-}
-
-/// Reject CREATE TABLE against a Pager-backed Database until Iter26.A.3
-/// lands schema-page allocation. INSERT/DELETE/UPDATE now have file-mode
-/// paths (Iter26.A.1 / .A.2) and dispatch on `Table.root_page` themselves;
-/// only CREATE TABLE would still mutate `db.tables` with no path back to
-/// the file, hence the gate stays for it alone.
-fn assertWritable(db: *Database) Error!void {
-    if (db.pager != null) return Error.ReadOnlyDatabase;
 }
 
 /// Result of a SELECT used as a row source. Iter21 added this so subqueries
