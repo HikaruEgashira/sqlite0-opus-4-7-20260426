@@ -46,8 +46,26 @@ pub const Aggregator = struct {
     /// per-statement arena passed to `feed` — arena lifetime spans the
     /// whole grouped SELECT, so this pointer stays valid until finalise.
     best: ?Value = null,
+    /// Accumulated `group_concat` output (separators + text-coerced values).
+    /// Owned by the per-statement arena passed to `feed`.
+    text_buf: std.ArrayListUnmanaged(u8) = .empty,
+    /// Number of non-NULL contributors fed so far. `0` after finalise means
+    /// the group was all-NULL → result is NULL (sqlite3 quirk).
+    text_count: u64 = 0,
+    /// Per-row separator override for the 2-arg `group_concat(x, sep)` form.
+    /// `aggregate.feedRow` evaluates `fc.args[1]` before each `feed` call and
+    /// stores the borrowed text bytes here; `feed` consumes the override
+    /// (using it BEFORE appending the current value) and the driver clears
+    /// it. NULL ⇒ caller leaves `null` and `feed` substitutes "" (sqlite3
+    /// treats a NULL separator as empty).
+    sep_override: ?[]const u8 = null,
+    /// Whether `sep_override` should be honoured even if it is `null`. When
+    /// the 2-arg form yields a NULL separator we want "" (no comma); when
+    /// the 1-arg form is used we want the default "," — distinguishing
+    /// these two cases requires more than `?[]const u8` alone.
+    sep_explicit: bool = false,
 
-    pub const Kind = enum { count_star, count, sum, avg, min, max, total };
+    pub const Kind = enum { count_star, count, sum, avg, min, max, total, group_concat };
 
     pub fn init(kind: Kind, distinct: bool) Aggregator {
         return .{ .kind = kind, .distinct = distinct };
@@ -133,6 +151,29 @@ pub const Aggregator = struct {
                     self.best = try dupeArena(arena, v);
                 }
             },
+            .group_concat => {
+                if (v == .null) return;
+                if (self.text_count > 0) {
+                    // sqlite3: the separator used between rows N-1 and N is
+                    // the separator EVALUATED ON ROW N (the dynamic-sep
+                    // case). For 1-arg we fall back to ",".
+                    const sep: []const u8 = if (self.sep_explicit)
+                        (self.sep_override orelse "")
+                    else
+                        ",";
+                    try self.text_buf.appendSlice(arena, sep);
+                }
+                switch (v) {
+                    .text, .blob => |bytes| try self.text_buf.appendSlice(arena, bytes),
+                    .integer, .real => {
+                        const txt = try func_util.ensureText(arena, v);
+                        defer arena.free(txt);
+                        try self.text_buf.appendSlice(arena, txt);
+                    },
+                    .null => unreachable,
+                }
+                self.text_count += 1;
+            },
         }
     }
 
@@ -164,6 +205,10 @@ pub const Aggregator = struct {
                 if (self.best) |current| break :blk dupeArena(out_alloc, current) catch |err| return err;
                 break :blk Value.null;
             },
+            .group_concat => blk: {
+                if (self.text_count == 0) break :blk Value.null;
+                break :blk Value{ .text = try out_alloc.dupe(u8, self.text_buf.items) };
+            },
         };
     }
 };
@@ -189,6 +234,7 @@ pub fn aggregatorFromCall(fc: ast.Expr.FuncCall) Aggregator {
     else if (func_util.eqlIgnoreCase(fc.name, "total")) .total
     else if (func_util.eqlIgnoreCase(fc.name, "min")) .min
     else if (func_util.eqlIgnoreCase(fc.name, "max")) .max
+    else if (func_util.eqlIgnoreCase(fc.name, "group_concat")) .group_concat
     else unreachable;
     return Aggregator.init(kind, fc.distinct);
 }

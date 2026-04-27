@@ -31,6 +31,7 @@ const select_post = @import("select_post.zig");
 const walk = @import("aggregate_walk.zig");
 const state = @import("aggregate_state.zig");
 const database = @import("database.zig");
+const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -221,6 +222,27 @@ fn feedRow(
         const fc = call_expr.*.func_call;
         if (agg.kind == .count_star or fc.args.len == 0) {
             try agg.feed(alloc, Value{ .integer = 1 });
+            continue;
+        }
+        // group_concat(x, sep): the separator is dynamic — re-evaluated per
+        // row. We stash it on the aggregator so `feed` can read it before
+        // appending the current contributor's text.
+        if (agg.kind == .group_concat and fc.args.len == 2) {
+            const sep_v = try eval.evalExpr(ctx, fc.args[1]);
+            defer ops.freeValue(alloc, sep_v);
+            agg.sep_explicit = true;
+            if (sep_v == .null) {
+                agg.sep_override = null;
+            } else {
+                // ensureText returns a fresh arena alloc; lifetime only
+                // needs to span this feed call (text_buf appendSlice
+                // copies). The arena reclaims at statement teardown.
+                const sep_text = try func_util.ensureText(alloc, sep_v);
+                agg.sep_override = sep_text;
+            }
+            const v = try eval.evalExpr(ctx, fc.args[0]);
+            defer ops.freeValue(alloc, v);
+            try agg.feed(alloc, v);
             continue;
         }
         const v = try eval.evalExpr(ctx, fc.args[0]);

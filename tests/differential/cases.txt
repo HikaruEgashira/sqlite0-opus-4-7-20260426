@@ -1589,3 +1589,41 @@ SELECT json_array(-1e308 * 10)
 SELECT json_array(0.0/0.0)
 SELECT json_array(1.0/0.0)
 
+# Iter29.V: group_concat(x [, sep]) aggregate. Per-group string accumulator
+# with NULL-skipping semantics. Coverage:
+#  - default separator ',', custom sep, empty sep, NULL sep (treated as "").
+#  - dynamic per-row separator: char(43+x) yields '+'/'.'/'-' between rows.
+#  - NULL-skip: a NULL contributor doesn't increment count and doesn't
+#    inject a separator either (so '1, NULL, 3' still emits "1,3").
+#  - all-NULL group → result is NULL (typeof = 'null'). Empty source table
+#    follows the implicit-group rule and returns the same NULL.
+#  - DISTINCT only valid for the 1-arg form; 2-arg DISTINCT raises
+#    "DISTINCT aggregates must have exactly one argument" in sqlite3,
+#    matched as <error> on sqlite0 (SyntaxError exit).
+#  - GROUP BY emits one concat per group; WHERE filters before grouping.
+#  - BLOB contributors are appended as raw bytes (no quoting).
+#  - REAL contributors render via the shortest-round-trip formatter.
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, '-') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, '') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, NULL) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, char(43+x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(NULL),(3); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT typeof(group_concat(x)) FROM t
+CREATE TABLE t(x); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); SELECT typeof(group_concat(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES('hello'); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1.5),(2.5),(3.5); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(2),(3); SELECT group_concat(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(NULL),(2),(NULL); SELECT group_concat(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT group_concat(DISTINCT x, '|') FROM t
+CREATE TABLE t(g,v); INSERT INTO t VALUES(1,'a'),(1,'b'),(2,'c'),(2,'d'); SELECT g, group_concat(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g,v); INSERT INTO t VALUES(1,'a'),(2,'b'),(1,'c'); SELECT group_concat(v) FROM t WHERE g=1
+CREATE TABLE t(x); INSERT INTO t VALUES(x'AB'),(x'CD'); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT length(group_concat(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT typeof(group_concat(x)) FROM t
+SELECT group_concat()
+SELECT group_concat(1, 2, 3)
+
