@@ -39,6 +39,7 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "date")) return time_mod.fnDate(allocator, args);
     if (util.eqlIgnoreCase(name, "time")) return time_mod.fnTime(allocator, args);
     if (util.eqlIgnoreCase(name, "datetime")) return time_mod.fnDatetime(allocator, args);
+    if (util.eqlIgnoreCase(name, "julianday")) return time_mod.fnJulianday(allocator, args);
     if (util.eqlIgnoreCase(name, "iif")) return fnIif(allocator, args);
     return Error.UnknownFunction;
 }

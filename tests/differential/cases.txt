@@ -1050,3 +1050,34 @@ SELECT datetime('2024-01-15 14:30:45', '+1 hour')
 SELECT date(NULL)
 SELECT date('invalid')
 SELECT time(NULL)
+
+# Iter29.D — julianday(timestring, [modifier]*) returns REAL (vs %J's
+# TEXT). Discriminating: 12:00:00 UTC of 2024-01-01 → 2460311.0 (REAL
+# trailing .0) where strftime('%J') would yield "2460311" without it.
+SELECT julianday('2024-01-01')
+SELECT julianday('1970-01-01')
+SELECT julianday('2024-01-01 12:00:00')
+SELECT julianday('2024-01-01 06:00:00')
+SELECT julianday('2024-12-31 23:59:59')
+SELECT julianday('2024-01-01', '+1 day')
+SELECT julianday('2024-01-31', 'start of month')
+SELECT julianday(NULL)
+SELECT julianday('invalid')
+
+# Iter29.D — lenient day-overflow normalisation. sqlite3 accepts
+# day∈1..=31 literally then renormalises forward via Julian round-trip
+# when day > daysInMonth. month=0/13 and day=0/32 remain rejected.
+SELECT date('2023-02-29')
+SELECT date('2023-02-30')
+SELECT date('2023-02-31')
+SELECT date('2023-04-31')
+SELECT datetime('2023-02-29 12:34:56')
+SELECT julianday('2023-02-29')
+SELECT date('2023-02-29', '+1 day')
+SELECT date('2023-13-01')
+SELECT date('2023-00-01')
+SELECT date('2023-01-32')
+SELECT date('2023-01-00')
+SELECT strftime('%j', '2023-02-29')
+SELECT strftime('%w', '2023-02-29')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2023-02-29 23:00:00')
