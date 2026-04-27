@@ -2282,6 +2282,8 @@ SELECT date('2024-01-01', 'weekday')
 SELECT date('2024-12-31', 'weekday 1')
 SELECT date('2024-12-30', 'weekday 0')
 SELECT date('2024-01-01', 'weekday 2', '+1 day')
+SELECT typeof(printf())
+SELECT printf() IS NULL
 
 
 

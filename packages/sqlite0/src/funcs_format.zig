@@ -43,7 +43,11 @@ const Value = util.Value;
 const Error = util.Error;
 
 pub fn fnPrintf(allocator: std.mem.Allocator, args: []const Value) Error!Value {
-    if (args.len == 0) return Error.WrongArgumentCount;
+    // sqlite3 quirk: `printf()` with no arguments returns SQL NULL rather
+    // than raising — same surface contract as `printf('')` and any other
+    // empty-accumulator path. WrongArgumentCount would diverge from
+    // `typeof(printf()) → 'null'`.
+    if (args.len == 0) return Value.null;
     const fmt = switch (args[0]) {
         .null => return Value.null, // sqlite3: printf(NULL, ...) → NULL
         .text => |t| t,
