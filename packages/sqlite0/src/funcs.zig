@@ -4,6 +4,7 @@ const util = @import("func_util.zig");
 const text = @import("funcs_text.zig");
 const fmt_mod = @import("funcs_format.zig");
 const time_mod = @import("funcs_time.zig");
+const time_diff_mod = @import("funcs_time_diff.zig");
 const math_mod = @import("funcs_math.zig");
 const json_mod = @import("funcs_json.zig");
 const match = @import("match.zig");
@@ -57,6 +58,7 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "datetime")) return time_mod.fnDatetime(allocator, args);
     if (util.eqlIgnoreCase(name, "julianday")) return time_mod.fnJulianday(allocator, args);
     if (util.eqlIgnoreCase(name, "unixepoch")) return time_mod.fnUnixepoch(allocator, args);
+    if (util.eqlIgnoreCase(name, "timediff")) return time_diff_mod.fnTimediff(allocator, args);
     if (util.eqlIgnoreCase(name, "iif")) return fnIif(allocator, args);
     // sqlite3 math extension (SQLITE_ENABLE_MATH_FUNCTIONS).
     if (util.eqlIgnoreCase(name, "pi")) return math_mod.fnPi(args);

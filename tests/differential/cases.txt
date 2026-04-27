@@ -2319,3 +2319,54 @@ SELECT time('12:34:56  ')
 
 
 
+
+# --- Iter30.A: timediff() — calendar-aware duration peeled from B toward A.
+# sqlite3 docs: "amount of time that must be added to B in order to reach A".
+# Peel direction follows sign — months go forward when A>B, backward when A<B.
+SELECT timediff('2024-01-01', '2024-01-01')
+SELECT timediff('2024-01-15 12:30:45', '2024-01-15 12:30:45')
+SELECT timediff('2024-01-02', '2024-01-01')
+SELECT timediff('2024-01-01', '2024-01-02')
+SELECT timediff('2024-01-15 13:00:00', '2024-01-15 12:30:45')
+SELECT timediff('2024-01-15 12:30:45.789', '2024-01-15 12:30:45.123')
+SELECT timediff('2024-02-15', '2024-01-20')
+SELECT timediff('2024-01-20', '2024-02-15')
+SELECT timediff('2024-03-01', '2024-01-31')
+SELECT timediff('2023-03-01', '2023-01-31')
+SELECT timediff('2024-03-01', '2024-02-29')
+SELECT timediff('2025-02-28', '2024-03-01')
+SELECT timediff('2024-01-15', '2023-01-15')
+SELECT timediff('2024-01-14', '2023-01-15')
+SELECT timediff('1900-01-01', '2000-01-01')
+SELECT timediff('2024-12-31 23:59:59.999', '2024-01-01 00:00:00.000')
+SELECT timediff('2024-12-31', '2024-01-01')
+SELECT timediff('2025-01-01', '2024-01-01')
+SELECT timediff('2024-04-30', '2024-03-31')
+SELECT timediff('2024-02-29', '2024-03-31')
+SELECT timediff('2025-01-15', '2024-01-20')
+SELECT timediff('2025-01-19', '2024-01-20')
+SELECT timediff('2025-01-20', '2024-01-20')
+# Peel-direction asymmetry: forward 10 months from Feb 25 yields 21 days
+# remainder, backward 10 months from Jan 15 yields 18 days remainder.
+SELECT timediff('2024-01-15', '2023-02-25')
+SELECT timediff('2023-02-25', '2024-01-15')
+# Numeric arg = JD float (text-numeric also accepted via parseFloat fallback).
+SELECT timediff(0, 0)
+SELECT timediff(1, 0)
+SELECT timediff(0.5, 0)
+SELECT timediff(0, 1)
+SELECT timediff(2440587.5, 2440587.5)
+SELECT timediff(2440587.5, 0.5)
+SELECT timediff(0.001, 0)
+SELECT timediff('2460000.5', '2024-01-15')
+SELECT timediff(2460000.5, '2024-01-15')
+# JD bounds: 0 ≤ jd ≤ 5373484.5 (= year 9999-12-31). Outside → NULL.
+SELECT timediff(5373484, 0)
+SELECT timediff(5373485, 0)
+SELECT timediff(-1, 0)
+SELECT timediff('1700000000', '0')
+SELECT timediff('2024-01-15.5', '2024-01-15')
+# NULL propagation: any NULL arg → NULL.
+SELECT timediff(NULL, '2024-01-01')
+SELECT timediff('2024-01-01', NULL)
+SELECT typeof(timediff(NULL, '2024-01-01'))
