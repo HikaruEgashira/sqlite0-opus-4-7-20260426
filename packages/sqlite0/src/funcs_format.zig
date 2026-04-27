@@ -257,7 +257,19 @@ fn writeUnsignedInt(
     const u: u64 = @bitCast(n);
     var digits_buf: [32]u8 = undefined;
     const digits = formatDigits(&digits_buf, u, base, upper);
-    try writeIntPadded(allocator, out, digits, null, spec);
+    // sqlite3 alt-form (`#` flag): %#o prepends `0` to non-zero octal,
+    // %#x/%#X prepends `0x`/`0X` to non-zero hex. Value 0 gets no prefix
+    // in any base — sqlite3 quirk distinct from C printf, which would
+    // emit `0x0` for `%#x` of 0.
+    const prefix: []const u8 = if (spec.alt and u != 0)
+        switch (base) {
+            8 => "0",
+            16 => if (upper) "0X" else "0x",
+            else => "",
+        }
+    else
+        "";
+    try writeIntPaddedPrefixed(allocator, out, digits, null, prefix, spec);
 }
 
 fn formatDigits(buf: []u8, value: u64, base: u8, upper: bool) []const u8 {
@@ -282,16 +294,28 @@ fn writeIntPadded(
     sign: ?u8,
     spec: Spec,
 ) !void {
+    try writeIntPaddedPrefixed(allocator, out, digits, sign, "", spec);
+}
+
+fn writeIntPaddedPrefixed(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    digits: []const u8,
+    sign: ?u8,
+    prefix: []const u8,
+    spec: Spec,
+) !void {
     // precision = minimum number of digits
     const min_digits = spec.precision orelse 0;
     const pad_zeros: usize = if (digits.len < min_digits) min_digits - digits.len else 0;
     const sign_len: usize = if (sign != null) 1 else 0;
-    const content_len = digits.len + pad_zeros + sign_len;
+    const content_len = digits.len + pad_zeros + sign_len + prefix.len;
     const total_pad: usize = if (content_len < spec.width) spec.width - content_len else 0;
     // sqlite3: explicit precision suppresses zero-pad flag
     const use_zero_pad = spec.zero_pad and spec.precision == null and !spec.left_align;
     if (!spec.left_align and !use_zero_pad) try appendN(allocator, out, ' ', total_pad);
     if (sign) |s| try out.append(allocator, s);
+    try out.appendSlice(allocator, prefix);
     if (use_zero_pad) try appendN(allocator, out, '0', total_pad);
     try appendN(allocator, out, '0', pad_zeros);
     try out.appendSlice(allocator, digits);

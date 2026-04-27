@@ -162,3 +162,56 @@ test "fnPrintf: %s with NULL → NULL (empty accumulator)" {
     const r = try fnPrintf(a, &p);
     try std.testing.expect(r == .null);
 }
+
+test "fnPrintf: %#o non-zero prepends '0'" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%#o" }, .{ .integer = 8 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("010", r.text);
+}
+
+test "fnPrintf: %#o zero gets NO prefix (sqlite3 quirk)" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%#o" }, .{ .integer = 0 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("0", r.text);
+}
+
+test "fnPrintf: %#x non-zero prepends '0x'" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%#x" }, .{ .integer = 255 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("0xff", r.text);
+}
+
+test "fnPrintf: %#X uses uppercase prefix and digits" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%#X" }, .{ .integer = 255 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("0XFF", r.text);
+}
+
+test "fnPrintf: %#5x width includes prefix" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%#5x" }, .{ .integer = 15 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("  0xf", r.text);
+}
+
+test "fnPrintf: %#d / %#u alt-form is no-op for decimal" {
+    const a = std.testing.allocator;
+    var p1 = [_]Value{ .{ .text = "%#d" }, .{ .integer = 42 } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("42", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "%#u" }, .{ .integer = 42 } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("42", r2.text);
+}

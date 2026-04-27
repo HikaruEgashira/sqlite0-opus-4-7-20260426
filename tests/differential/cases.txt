@@ -1908,6 +1908,27 @@ SELECT round(155, -2)
 SELECT round(0.5)
 SELECT round(0.05, 1)
 SELECT round(1234.5)
+# Iter29.AE: printf alt-form `#` flag for radix specs. %#o prepends '0' to
+# non-zero octal, %#x/%#X prepends '0x'/'0X' to non-zero hex. Value 0 is a
+# sqlite3 quirk: NO prefix is added (C printf would emit '0x0').
+SELECT printf('%#o', 0)
+SELECT printf('%#o', 8)
+SELECT printf('%#o', -8)
+SELECT printf('%#o', -1)
+SELECT printf('%#x', 0)
+SELECT printf('%#x', 255)
+SELECT printf('%#X', 255)
+SELECT printf('%#x', -1)
+SELECT printf('%#X', -1)
+SELECT printf('%#5x', 15)
+SELECT printf('%#5x', 0)
+SELECT printf('%#-5x|', 15)
+SELECT printf('%#10x', 15)
+SELECT length(printf('%#x', 0))
+SELECT typeof(printf('%#x', 0))
+SELECT printf('%#d', 42)
+SELECT printf('%#u', 42)
+
 
 
 
