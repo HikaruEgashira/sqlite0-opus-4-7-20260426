@@ -57,6 +57,7 @@ pub const TokenKind = enum {
     keyword_intersect,
     keyword_except,
     keyword_exists,
+    keyword_cast,
     plus,
     minus,
     star,
@@ -315,6 +316,7 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "intersect")) return .keyword_intersect;
     if (eqlIgnoreCase(text, "except")) return .keyword_except;
     if (eqlIgnoreCase(text, "exists")) return .keyword_exists;
+    if (eqlIgnoreCase(text, "cast")) return .keyword_cast;
     return null;
 }
 

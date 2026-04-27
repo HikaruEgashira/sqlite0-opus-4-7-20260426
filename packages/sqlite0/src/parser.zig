@@ -5,6 +5,7 @@ const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 const parser_predicate = @import("parser_predicate.zig");
+const parser_cast = @import("parser_cast.zig");
 const database = @import("database.zig");
 
 const Token = lex.Token;
@@ -302,6 +303,10 @@ pub const Parser = struct {
             .keyword_exists => {
                 self.advance();
                 return parser_predicate.parseExists(self);
+            },
+            .keyword_cast => {
+                self.advance();
+                return parser_cast.parseCastBody(self);
             },
             else => return Error.SyntaxError,
         }

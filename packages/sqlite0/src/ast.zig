@@ -66,6 +66,13 @@ pub const Expr = union(enum) {
     /// modelled as `logical_not(exists)`; EXISTS never returns NULL,
     /// so the wrapped form is observationally identical.
     exists: *stmt.ParsedSelect,
+    /// `CAST(<expr> AS <type-name>)`. Affinity is computed at parse time
+    /// from the type-name spelling (sqlite3 quirk: `INT`, `BIGINT`,
+    /// `INT2` all map to integer affinity; `VARCHAR(N)` keeps the parens
+    /// but maps to text). Eval performs the conversion sqlite3-style:
+    /// integer truncates toward zero, text→int parses leading digits and
+    /// returns 0 on failure, etc.
+    cast: Cast,
 
     pub const BinaryArith = struct { op: BinaryOp, left: *Expr, right: *Expr };
     pub const BinaryConcat = struct { left: *Expr, right: *Expr };
@@ -101,6 +108,11 @@ pub const Expr = union(enum) {
     /// coerce to a 1-byte text value or runtime returns `InvalidEscape`.
     pub const Like = struct { op: LikeOp, value: *Expr, pattern: *Expr, escape: ?*Expr, negated: bool };
     pub const InSubquery = struct { value: *Expr, subquery: *stmt.ParsedSelect, negated: bool };
+    /// Storage class affinity selected by `CAST`'s target type-name. NUMERIC
+    /// is "INTEGER if losslessly representable, else REAL"; the rest map
+    /// 1:1 to a `Value` variant.
+    pub const Affinity = enum { integer, real, text, blob, numeric };
+    pub const Cast = struct { value: *Expr, target: Affinity };
 
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -174,6 +186,7 @@ pub const Expr = union(enum) {
                 stmt.freeParsedSelectFields(allocator, sq.*);
                 allocator.destroy(sq);
             },
+            .cast => |c| c.value.deinit(allocator),
         }
         allocator.destroy(self);
     }
@@ -338,6 +351,12 @@ pub fn makeExists(allocator: std.mem.Allocator, ps: stmt.ParsedSelect) !*Expr {
     errdefer allocator.destroy(box);
     const node = try allocator.create(Expr);
     node.* = .{ .exists = box };
+    return node;
+}
+
+pub fn makeCast(allocator: std.mem.Allocator, value: *Expr, target: Expr.Affinity) !*Expr {
+    const node = try allocator.create(Expr);
+    node.* = .{ .cast = .{ .value = value, .target = target } };
     return node;
 }
 

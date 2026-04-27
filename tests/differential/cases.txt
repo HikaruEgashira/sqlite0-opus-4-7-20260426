@@ -962,3 +962,39 @@ SELECT * FROM (SELECT 1 + 2, 3*4)
 # Iter22.F: correlated FROM-clause subquery — sqlite3 has no LATERAL, so
 # both engines reject 'a.x' inside an inline subquery sharing the FROM list.
 CREATE TABLE a22f(x); INSERT INTO a22f VALUES(1),(2),(3); SELECT a22f.x, t.y FROM a22f, (SELECT a22f.x+10 AS y) t
+# Iter23: CAST(<expr> AS <type-name>)
+# integer affinity: leading-digit parse, 0 on no digits, truncate REAL toward zero
+SELECT CAST('123' AS INTEGER)
+SELECT CAST('123abc' AS INTEGER)
+SELECT CAST('abc' AS INTEGER)
+SELECT CAST('  -42  ' AS INTEGER)
+SELECT CAST(3.7 AS INTEGER)
+SELECT CAST(-3.7 AS INTEGER)
+SELECT CAST(NULL AS INTEGER)
+# overflow saturates to i64 min/max (matches sqlite3 atoi64)
+SELECT CAST('99999999999999999999' AS INTEGER)
+SELECT CAST('-99999999999999999999' AS INTEGER)
+# real affinity: lenient parseFloat, 0.0 on bad input
+SELECT CAST('1.5e2' AS REAL)
+SELECT CAST('abc' AS REAL)
+# text affinity: numbers stringify, blob bytes copy in
+SELECT CAST(123 AS TEXT)
+SELECT CAST(1.5 AS TEXT)
+# blob affinity: text bytes copy in
+SELECT CAST('xyz' AS BLOB)
+# NUMERIC: integer if integer-valued, else real; preserves source REAL
+SELECT CAST(123 AS NUMERIC)
+SELECT CAST('1.5' AS NUMERIC)
+SELECT CAST(1.0 AS NUMERIC)
+# type-name affinity rules: substring match (INT, CHAR/CLOB/TEXT, BLOB, REAL/FLOA/DOUB)
+SELECT CAST(1.5 AS INT)
+SELECT CAST(2.5 AS BIGINT)
+SELECT CAST('1' AS DOUBLE PRECISION)
+SELECT CAST(100 AS DECIMAL)
+SELECT CAST('hello' AS varchar(10))
+# typeof reports the post-CAST storage class
+SELECT typeof(CAST(123 AS INTEGER))
+SELECT typeof(CAST(3 AS NUMERIC))
+SELECT typeof(CAST(3.0 AS NUMERIC))
+# CAST in FROM-row context with NULL pass-through
+CREATE TABLE t23(x); INSERT INTO t23 VALUES('42'),('abc'),(NULL); SELECT CAST(x AS INTEGER) FROM t23

@@ -21,6 +21,7 @@ const database = @import("database.zig");
 const eval_match = @import("eval_match.zig");
 const eval_subquery = @import("eval_subquery.zig");
 const eval_column = @import("eval_column.zig");
+const eval_cast = @import("eval_cast.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -106,7 +107,14 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .subquery => |sq| try eval_subquery.evalScalarSubquery(ctx, sq),
         .in_subquery => |is| try eval_subquery.evalInSubquery(ctx, is),
         .exists => |sq| try eval_subquery.evalExists(ctx, sq),
+        .cast => |c| try evalCast(ctx, c),
     };
+}
+
+fn evalCast(ctx: EvalContext, c: Expr.Cast) Error!Value {
+    const inner = try evalExpr(ctx, c.value);
+    defer ops.freeValue(ctx.allocator, inner);
+    return eval_cast.castValue(ctx.allocator, inner, c.target);
 }
 
 fn evalBinaryArith(ctx: EvalContext, b: Expr.BinaryArith) Error!Value {

@@ -98,6 +98,7 @@ fn exprHasAggregate(expr: *const ast.Expr) bool {
         // into the aggregate path. Same logic for `collectInExpr` below.
         .subquery, .exists => false,
         .in_subquery => |is| exprHasAggregate(is.value),
+        .cast => |c| exprHasAggregate(c.value),
     };
 }
 
@@ -195,5 +196,6 @@ fn collectInExpr(
         // (if any) still need collection.
         .subquery, .exists => {},
         .in_subquery => |is| try collectInExpr(allocator, is.value, out),
+        .cast => |c| try collectInExpr(allocator, c.value, out),
     }
 }
