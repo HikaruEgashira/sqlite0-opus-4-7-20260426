@@ -77,16 +77,37 @@ pub fn numericAsReal(v: Value) f64 {
     };
 }
 
-/// Parse the longest valid numeric prefix of `bytes`. Anything that doesn't
-/// parse cleanly returns 0 (matching SQLite's `CAST(...AS REAL)` semantics
-/// for non-numeric text).
+/// sqlite3 `sqlite3AtoF`-style lenient numeric prefix parser. Returns 0 for
+/// inputs that don't begin with valid numeric syntax — sqlite3 quirk: this
+/// function REJECTS literal `NaN`/`Inf` (Zig's `std.fmt.parseFloat` accepts
+/// them). Whitespace prefix and trailing garbage are tolerated; the longest
+/// valid numeric prefix is returned. The prefix must contain at least one
+/// digit somewhere — bare signs (`+`/`-`/`.`) yield 0.
+///
+/// Used by `CAST(... AS REAL)`, type-affinity coercion in arithmetic, and
+/// builtins like `abs(text)`. sqlite3's behaviour comes from `sqlite3AtoF`
+/// in util.c which only accepts digit-led mantissas.
 pub fn parseFloatLoose(bytes: []const u8) f64 {
-    if (std.fmt.parseFloat(f64, bytes)) |f| return f else |_| {}
-    var end = bytes.len;
-    while (end > 0) : (end -= 1) {
-        if (std.fmt.parseFloat(f64, bytes[0..end])) |f| return f else |_| {}
+    var i: usize = 0;
+    while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '\n' or bytes[i] == '\r')) i += 1;
+    const start = i;
+    if (i < bytes.len and (bytes[i] == '+' or bytes[i] == '-')) i += 1;
+    var saw_digit = false;
+    while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) saw_digit = true;
+    if (i < bytes.len and bytes[i] == '.') {
+        i += 1;
+        while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) saw_digit = true;
     }
-    return 0;
+    if (!saw_digit) return 0;
+    var end = i;
+    if (i < bytes.len and (bytes[i] == 'e' or bytes[i] == 'E')) {
+        var j = i + 1;
+        if (j < bytes.len and (bytes[j] == '+' or bytes[j] == '-')) j += 1;
+        const exp_start = j;
+        while (j < bytes.len and bytes[j] >= '0' and bytes[j] <= '9') j += 1;
+        if (j > exp_start) end = j;
+    }
+    return std.fmt.parseFloat(f64, bytes[start..end]) catch 0;
 }
 
 pub fn nibble(n: u8) u8 {

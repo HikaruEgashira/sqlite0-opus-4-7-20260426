@@ -21,6 +21,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const ops = @import("ops.zig");
 const value_mod = @import("value.zig");
+const util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -78,7 +79,7 @@ fn castNumeric(v: Value) Error!Value {
             // sqlite3VdbeMemNumerify path for TEXT-source CAST AS
             // NUMERIC. `'5.0'` → 5, `'1.5e2'` → 150, `'foo'` → 0,
             // `'1e20'` (out of i64 range) → REAL.
-            const r = std.fmt.parseFloat(f64, std.mem.trim(u8, bytes, " \t\n\r")) catch 0.0;
+            const r = util.parseFloatLoose(bytes);
             if (realIsExactI64(r)) |i| break :blk Value{ .integer = i };
             break :blk Value{ .real = r };
         },
@@ -128,8 +129,9 @@ fn coerceToReal(v: Value) f64 {
         .null => 0.0,
         .integer => |i| @floatFromInt(i),
         .real => |r| r,
-        .text => |t| std.fmt.parseFloat(f64, std.mem.trim(u8, t, " \t\n\r")) catch 0.0,
-        .blob => |b| std.fmt.parseFloat(f64, std.mem.trim(u8, b, " \t\n\r")) catch 0.0,
+        // sqlite3 `sqlite3VdbeRealValue` calls `sqlite3AtoF` which accepts a
+        // numeric prefix and rejects literal NaN/Inf — see `parseFloatLoose`.
+        .text, .blob => |bytes| util.parseFloatLoose(bytes),
     };
 }
 

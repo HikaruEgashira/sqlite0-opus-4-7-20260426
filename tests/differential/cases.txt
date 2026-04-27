@@ -2015,6 +2015,35 @@ SELECT typeof(substr(x'4142', 1, 1))
 SELECT hex(substr(cast(x'4142' as blob), 1, 1))
 SELECT substr('Hあhi', 0, 3)
 SELECT substr(cast(x'410042' as text), -2, 5)
+# Iter29.AJ: TEXT→numeric coercion in CAST AS REAL and arithmetic.
+# sqlite3 sqlite3AtoF / computeNumericType: parses leading numeric prefix,
+# rejects literal NaN/Inf (no digit prefix), tags as REAL only if prefix has
+# '.' or 'e'/'E' syntax. CAST AS REAL: partial-prefix accepted, no NaN/Inf.
+# Arithmetic: '1abc' → INT 1, '1.5xyz' → REAL 1.5, 'NaN' → INT 0.
+SELECT CAST('NaN' AS REAL)
+SELECT CAST('Inf' AS REAL)
+SELECT CAST('1.5xyz' AS REAL)
+SELECT CAST('1.5e+2x' AS REAL)
+SELECT CAST('1e' AS REAL)
+SELECT CAST('1e+' AS REAL)
+SELECT CAST('123.45abc' AS REAL)
+SELECT CAST('  1.5xyz  ' AS REAL)
+SELECT 1+'NaN'
+SELECT 1+'Inf'
+SELECT 1+'1.5xyz'
+SELECT 0+'1abc'
+SELECT typeof(0+'1abc')
+SELECT 0+'1e3xyz'
+SELECT typeof(0+'1e3xyz')
+SELECT 0+'.5xyz'
+SELECT typeof(0+'.5xyz')
+SELECT 0+'1.xyz'
+SELECT typeof(0+'1.xyz')
+SELECT 0+'1.5e2x'
+SELECT typeof(0+'NaN')
+SELECT abs('NaN')
+SELECT abs('Inf')
+SELECT abs('1.5xyz')
 
 
 

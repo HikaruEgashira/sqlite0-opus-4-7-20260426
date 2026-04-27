@@ -5,6 +5,7 @@ pub const lex = @import("lex.zig");
 pub const lex_keyword = @import("lex_keyword.zig");
 pub const lex_test = @import("lex_test.zig");
 pub const ops = @import("ops.zig");
+pub const ops_test = @import("ops_test.zig");
 pub const match = @import("match.zig");
 pub const func_util = @import("func_util.zig");
 pub const funcs = @import("funcs.zig");

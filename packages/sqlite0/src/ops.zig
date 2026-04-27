@@ -188,9 +188,50 @@ fn coerceToNumericValue(v: Value) Value {
 }
 
 fn coerceBytesToNumeric(bytes: []const u8) Value {
-    if (std.fmt.parseInt(i64, bytes, 10)) |i| return Value{ .integer = i } else |_| {}
-    if (std.fmt.parseFloat(f64, bytes)) |f| return Value{ .real = f } else |_| {}
-    return Value{ .integer = 0 };
+    // sqlite3 vdbe.c::computeNumericType / sqlite3VdbeRealValue parse a
+    // numeric prefix and tag the result as INTEGER unless the prefix
+    // contains decimal-point or exponent syntax. Plain digit prefixes
+    // are INTEGER even when followed by garbage (`'1abc' → INT 1`); a
+    // `.` or `e`/`E` in the prefix promotes to REAL (`'1.5xyz' → REAL
+    // 1.5`); no leading digits at all yields INTEGER 0 (`'NaN'` → 0,
+    // because sqlite3AtoF rejects literal NaN/Inf).
+    var i: usize = 0;
+    while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '\n' or bytes[i] == '\r')) i += 1;
+    const start = i;
+    if (i < bytes.len and (bytes[i] == '+' or bytes[i] == '-')) i += 1;
+    const digits_start = i;
+    while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') i += 1;
+    var saw_digit = i > digits_start;
+    var has_real_syntax = false;
+    if (i < bytes.len and bytes[i] == '.') {
+        has_real_syntax = true;
+        i += 1;
+        while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) saw_digit = true;
+    }
+    if (!saw_digit) return Value{ .integer = 0 };
+    var prefix_end = i;
+    if (i < bytes.len and (bytes[i] == 'e' or bytes[i] == 'E')) {
+        var j = i + 1;
+        if (j < bytes.len and (bytes[j] == '+' or bytes[j] == '-')) j += 1;
+        const exp_digits_start = j;
+        while (j < bytes.len and bytes[j] >= '0' and bytes[j] <= '9') j += 1;
+        if (j > exp_digits_start) {
+            has_real_syntax = true;
+            prefix_end = j;
+        }
+    }
+    const slice = bytes[start..prefix_end];
+    if (has_real_syntax) {
+        const r = std.fmt.parseFloat(f64, slice) catch 0.0;
+        return Value{ .real = r };
+    }
+    // Integer prefix: try strict parse, fall back to REAL on overflow.
+    if (std.fmt.parseInt(i64, slice, 10)) |iv| {
+        return Value{ .integer = iv };
+    } else |_| {
+        const r = std.fmt.parseFloat(f64, slice) catch 0.0;
+        return Value{ .real = r };
+    }
 }
 
 /// `~x` — coerce to i64 then bitwise NOT. NULL propagates as NULL.
@@ -452,73 +493,4 @@ pub fn applyIn(left: Value, list: []const Value) Value {
     return boolValue(false);
 }
 
-test "ops: applyArith integer division truncates" {
-    const r = try applyArith(.slash, .{ .integer = 100 }, .{ .integer = 4 });
-    try std.testing.expectEqual(@as(i64, 25), r.integer);
-}
-
-test "ops: applyArith mixed int+real returns real" {
-    const r = try applyArith(.plus, .{ .integer = 1 }, .{ .real = 0.5 });
-    try std.testing.expectEqual(@as(f64, 1.5), r.real);
-}
-
-test "ops: applyArith division by zero returns NULL" {
-    const r = try applyArith(.slash, .{ .integer = 1 }, .{ .integer = 0 });
-    try std.testing.expectEqual(Value.null, r);
-}
-
-test "ops: truthy text coercion" {
-    try std.testing.expectEqual(@as(?bool, false), truthy(.{ .text = "foo" }));
-    try std.testing.expectEqual(@as(?bool, true), truthy(.{ .text = "1" }));
-    try std.testing.expectEqual(@as(?bool, false), truthy(.{ .text = "0" }));
-    try std.testing.expectEqual(@as(?bool, null), truthy(.null));
-}
-
-test "ops: logicalAnd three-valued" {
-    try std.testing.expectEqual(@as(i64, 0), logicalAnd(.null, .{ .integer = 0 }).integer);
-    try std.testing.expectEqual(Value.null, logicalAnd(.null, .{ .integer = 1 }));
-    try std.testing.expectEqual(Value.null, logicalAnd(.null, .null));
-}
-
-test "ops: logicalOr three-valued" {
-    try std.testing.expectEqual(@as(i64, 1), logicalOr(.null, .{ .integer = 1 }).integer);
-    try std.testing.expectEqual(Value.null, logicalOr(.null, .{ .integer = 0 }));
-    try std.testing.expectEqual(Value.null, logicalOr(.null, .null));
-}
-
-test "ops: identicalValues" {
-    try std.testing.expect(identicalValues(.null, .null));
-    try std.testing.expect(!identicalValues(.null, .{ .integer = 1 }));
-    try std.testing.expect(identicalValues(.{ .integer = 1 }, .{ .real = 1.0 }));
-}
-
-test "ops: compareValues by storage class" {
-    try std.testing.expectEqual(Order.lt, compareValues(.{ .integer = 1 }, .{ .text = "a" }));
-    try std.testing.expectEqual(Order.gt, compareValues(.{ .blob = "x" }, .{ .text = "x" }));
-    try std.testing.expectEqual(Order.eq, compareValues(.{ .integer = 1 }, .{ .real = 1.0 }));
-}
-
-test "ops: applyIn matches" {
-    const list = [_]Value{ .{ .integer = 1 }, .{ .integer = 2 }, .{ .integer = 3 } };
-    try std.testing.expectEqual(@as(i64, 1), applyIn(.{ .integer = 2 }, &list).integer);
-    try std.testing.expectEqual(@as(i64, 0), applyIn(.{ .integer = 4 }, &list).integer);
-}
-
-test "ops: applyIn with NULL in left is NULL" {
-    const list = [_]Value{ .{ .integer = 1 } };
-    try std.testing.expectEqual(Value.null, applyIn(.null, &list));
-}
-
-test "ops: applyIn no match but contains NULL is NULL" {
-    const list = [_]Value{ .{ .integer = 1 }, .null, .{ .integer = 3 } };
-    try std.testing.expectEqual(Value.null, applyIn(.{ .integer = 2 }, &list));
-}
-
-test "ops: applyIn match preempts NULL" {
-    const list = [_]Value{ .null, .{ .integer = 1 } };
-    try std.testing.expectEqual(@as(i64, 1), applyIn(.{ .integer = 1 }, &list).integer);
-}
-
-test "ops: applyIn empty list is 0" {
-    try std.testing.expectEqual(@as(i64, 0), applyIn(.{ .integer = 1 }, &.{}).integer);
-}
+// Tests live in ops_test.zig (split out for the 500-line discipline).
