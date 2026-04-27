@@ -19,6 +19,16 @@ pub const Error = error{
     ColumnCountMismatch,
     DuplicateColumnName,
     InvalidEscape,
+    /// Pager (ADR-0005): could not acquire the exclusive flock on the
+    /// database file because another process already holds it.
+    DatabaseLocked,
+    /// Pager (ADR-0005): file open / pread / close returned a negative
+    /// errno. The Pager surface intentionally collapses every file-I/O
+    /// failure into one variant — Phase 3a doesn't need finer granularity
+    /// for the differential test surface (single-process, single-file).
+    /// Phase 4 (Transaction + WAL) will split this when WAL recovery
+    /// branches on specific errors.
+    IoError,
 };
 
 pub fn unescapeStringLiteral(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {

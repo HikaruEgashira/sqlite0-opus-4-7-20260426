@@ -17,7 +17,7 @@ ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が 
 
 ### Phase 3b: Pager + read-only B-tree (SQLite3 .db 読み込み)
 
-- [ ] Iter25.A: `pager.zig` 新設。`init(allocator, file_path)` で open, `getPage(n)` で 4096-byte buffer。LRU 16 page。kernel `flock` で exclusive lock。Unit test で sqlite3 fixture の page 1 header を読めること。
+- [x] Iter25.A: `pager.zig` 新設。`Pager.open(allocator, file_path)` / `getPage(n)` / `close()`。PAGE_SIZE=4096, LRU 16 page (test では `cache_capacity` 直接書き換え可)。`std.c.open/pread/flock` 直接使用 (std.Io threading は別 ADR で再評価)。Errors: `DatabaseLocked` / `IoError` を `ops.Error` に追加。7 unit tests 緑 (open/cache hit/LRU evict/promote/lock contention/page 0 reject/missing file).
 - [ ] Iter25.B: `btree.zig` 新設。Table B-tree の cell parser + traversal。`BtreeCursor` を `cursor.zig` に追加。CLI に `-file <path>` 追加。差分ハーネス `run_file.sh` 新設。**OuterFrame.current_row 所有関係を BtreeCursor lifetime contract に統合**。
 - [ ] Iter25.C: `schema.zig` 新設。`sqlite_schema` 経由で `Database.tables` populate。
 
