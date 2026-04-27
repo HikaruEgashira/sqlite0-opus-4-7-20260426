@@ -166,25 +166,74 @@ fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const V
 /// Parse `args[0]` as a date string and apply each `args[1..]` as a
 /// modifier left-to-right. NULL / non-text / unparsable input or any
 /// modifier failure collapses to null (sqlite3 → SQL NULL).
+///
+/// `'unixepoch'` is a special-case modifier that **must** appear as the
+/// first modifier (sqlite3 quirk: `datetime(1704067200, '+1 day',
+/// 'unixepoch')` returns NULL). When present, `args[0]` is interpreted
+/// as seconds since 1970-01-01 UTC instead of being parsed as a date
+/// string — INTEGER, REAL, and numeric-TEXT all accepted; sub-second
+/// precision survives via the f64 round-trip through `julianFloatToDateTime`.
+/// Out-of-range epochs (year > 9999 or < 0) collapse to NULL.
 fn parseAndApplyModifiers(args: []const Value) ?DateTime {
-    const datestr = switch (args[0]) {
-        .null => return null,
-        .text => |t| t,
-        .blob => |b| b,
-        else => return null,
-    };
+    var dt: DateTime = undefined;
+    var mod_start: usize = 1;
 
-    var dt = calendar.parseDateTime(datestr) orelse return null;
-    for (args[1..]) |mod_arg| {
+    if (args.len >= 2 and isUnixepochModifier(args[1])) {
+        const sec = numericFromArg(args[0]) orelse return null;
+        dt = unixepochToDateTime(sec) orelse return null;
+        mod_start = 2;
+    } else {
+        const datestr = switch (args[0]) {
+            .null => return null,
+            .text => |t| t,
+            .blob => |b| b,
+            else => return null,
+        };
+        dt = calendar.parseDateTime(datestr) orelse return null;
+    }
+
+    for (args[mod_start..]) |mod_arg| {
         const mod_str = switch (mod_arg) {
             .null => return null,
             .text => |t| t,
             .blob => |b| b,
             else => return null,
         };
+        // sqlite3 quirk: `'unixepoch'` only valid as the first modifier;
+        // a second (or later) occurrence falls through to applyModifier
+        // which doesn't recognise it → NULL.
         dt = modifier.applyModifier(dt, mod_str) orelse return null;
     }
     return dt;
+}
+
+fn isUnixepochModifier(v: Value) bool {
+    const s = switch (v) {
+        .text => |t| t,
+        .blob => |b| b,
+        else => return false,
+    };
+    return util.eqlIgnoreCase(s, "unixepoch");
+}
+
+fn numericFromArg(v: Value) ?f64 {
+    return switch (v) {
+        .integer => |i| @floatFromInt(i),
+        .real => |r| r,
+        .text => |t| std.fmt.parseFloat(f64, t) catch null,
+        .blob => |b| std.fmt.parseFloat(f64, b) catch null,
+        .null => null,
+    };
+}
+
+/// Convert seconds-since-epoch (1970-01-01 00:00:00 UTC) to DateTime via
+/// JD round-trip. Midnight 1970-01-01 = JD 2440587.5; a one-second tick
+/// is 1/86400 of a JD. Sub-second fractions ride through as part of the
+/// JD float — `julianFloatToDateTime` recovers ms via `round(day_frac *
+/// 86_400_000)`. Returns null when the resulting year escapes 0..=9999.
+fn unixepochToDateTime(sec: f64) ?DateTime {
+    const jd = 2440587.5 + sec / 86400.0;
+    return calendar.julianFloatToDateTime(jd);
 }
 
 /// Julian Day formatted as a shortest-unique decimal — matches sqlite3's
