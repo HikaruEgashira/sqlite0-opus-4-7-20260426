@@ -41,61 +41,67 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
         .blob => |b| b,
         else => return Value.null,
     };
-    return formatDateTime(allocator, fmt, args[1..]);
+    const r = parseAndApplyModifiers(args[1..]) orelse return Value.null;
+    return renderFormat(allocator, fmt, r.dt);
 }
 
 /// `date(timestring, [modifier]*)` — sqlite3 shorthand for
-/// `strftime('%Y-%m-%d', timestring, ...)`. Returns NULL on missing
-/// arg / NULL / unparsable date / unknown modifier (mirrors strftime).
-/// The 0-arg form (current date via `'now'`) is deferred until
-/// std.Io plumbing lands.
+/// `strftime('%Y-%m-%d', timestring, ...)`. The `'subsec'` modifier has
+/// no effect because `%Y-%m-%d` carries no time component.
 pub fn fnDate(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
-    return formatDateTime(allocator, "%Y-%m-%d", args);
+    const r = parseAndApplyModifiers(args) orelse return Value.null;
+    return renderFormat(allocator, "%Y-%m-%d", r.dt);
 }
 
 pub fn fnTime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
-    return formatDateTime(allocator, "%H:%M:%S", args);
+    const r = parseAndApplyModifiers(args) orelse return Value.null;
+    const fmt = if (r.subsec) "%H:%M:%f" else "%H:%M:%S";
+    return renderFormat(allocator, fmt, r.dt);
 }
 
 pub fn fnDatetime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
-    return formatDateTime(allocator, "%Y-%m-%d %H:%M:%S", args);
+    const r = parseAndApplyModifiers(args) orelse return Value.null;
+    const fmt = if (r.subsec) "%Y-%m-%d %H:%M:%f" else "%Y-%m-%d %H:%M:%S";
+    return renderFormat(allocator, fmt, r.dt);
 }
 
 /// `julianday(timestring, [modifier]*)` — sqlite3 returns the
 /// continuous Julian day as REAL (mid-day UTC of JDN N is exactly N;
 /// midnight is N - 0.5). Distinct from `strftime('%J', ...)` which
 /// returns the same value as TEXT — REAL avoids the `2460311 vs
-/// 2460311.0` formatting divergence the CLI surfaces.
+/// 2460311.0` formatting divergence the CLI surfaces. The `'subsec'`
+/// modifier is accepted for parity with sqlite3 but is a no-op here:
+/// julianday is already REAL with sub-sec precision baked in.
 pub fn fnJulianday(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     _ = allocator;
     if (args.len == 0) return Error.WrongArgumentCount;
-    const dt = parseAndApplyModifiers(args) orelse return Value.null;
-    return Value{ .real = calendar.dateTimeToJulianFloat(dt) };
+    const r = parseAndApplyModifiers(args) orelse return Value.null;
+    return Value{ .real = calendar.dateTimeToJulianFloat(r.dt) };
 }
 
 /// `unixepoch(timestring, [modifier]*)` — sqlite3 returns seconds since
-/// 1970-01-01 00:00:00 UTC as INTEGER. The 0-arg `unixepoch()` form
-/// requires resolving `'now'` which depends on `std.Io` plumbing — until
-/// that lands, we return NULL (sqlite3 returns NULL for any input that
-/// fails to resolve, so the surface contract is preserved).
+/// 1970-01-01 00:00:00 UTC. Default is INTEGER (truncated to whole
+/// seconds); the `'subsec'` / `'subsecond'` modifier flips the return
+/// to REAL with the millisecond fraction included.
 pub fn fnUnixepoch(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     _ = allocator;
     if (args.len == 0) return Value.null;
-    const dt = parseAndApplyModifiers(args) orelse return Value.null;
-    return Value{ .integer = calendar.unixEpochSeconds(dt) };
+    const r = parseAndApplyModifiers(args) orelse return Value.null;
+    if (r.subsec) {
+        const ms_total: f64 = @as(f64, @floatFromInt(calendar.unixEpochSeconds(r.dt))) + @as(f64, @floatFromInt(r.dt.millisecond)) / 1000.0;
+        return Value{ .real = ms_total };
+    }
+    return Value{ .integer = calendar.unixEpochSeconds(r.dt) };
 }
 
-/// Core formatter shared by strftime/date/time/datetime. `args` is the
-/// post-format slice: [datestring, modifier1, modifier2, ...]. A NULL
-/// or non-text/blob datestring or modifier collapses the whole result
-/// to NULL (sqlite3 parity); an unrecognised %-specifier in `fmt`
-/// likewise → NULL.
-fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const Value) Error!Value {
-    const dt = parseAndApplyModifiers(args) orelse return Value.null;
-
+/// Core formatter — renders an already-parsed `DateTime` against the
+/// given strftime-style `fmt`. Unrecognised %-specifier → NULL (matches
+/// sqlite3's PRINTF_DATEFUNC abort-on-bad-spec rule). Caller owns the
+/// pre-parse step; this fn never re-reads `args`.
+fn renderFormat(allocator: std.mem.Allocator, fmt: []const u8, dt: DateTime) Error!Value {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -169,24 +175,50 @@ fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const V
 }
 
 /// Parse `args[0]` as a date string and apply each `args[1..]` as a
-/// modifier left-to-right. NULL / non-text / unparsable input or any
-/// modifier failure collapses to null (sqlite3 → SQL NULL).
+/// modifier left-to-right. Returns `null` (= sqlite3 SQL NULL) for any
+/// unparsable input or modifier failure.
 ///
-/// `'unixepoch'` is a special-case modifier that **must** appear as the
-/// first modifier (sqlite3 quirk: `datetime(1704067200, '+1 day',
-/// 'unixepoch')` returns NULL). When present, `args[0]` is interpreted
-/// as seconds since 1970-01-01 UTC instead of being parsed as a date
-/// string — INTEGER, REAL, and numeric-TEXT all accepted; sub-second
-/// precision survives via the f64 round-trip through `julianFloatToDateTime`.
-/// Out-of-range epochs (year > 9999 or < 0) collapse to NULL.
-fn parseAndApplyModifiers(args: []const Value) ?DateTime {
+/// Input-mode modifiers (must appear as `args[1]`):
+///   * `'unixepoch'` — `args[0]` is seconds since 1970-01-01 UTC
+///     (INTEGER / REAL / numeric-TEXT). Sub-second precision rides
+///     through the f64 JD round-trip.
+///   * `'julianday'` — `args[0]` is a Julian day float. Treated as
+///     already a JD; bypasses date-string parsing.
+///   * sqlite3 quirk: input-mode modifiers placed at position ≥ 2 fall
+///     through to `applyModifier`, which doesn't recognise them → NULL.
+///
+/// Output-mode modifier (may appear anywhere in the chain):
+///   * `'subsec'` / `'subsecond'` — flips default datetime/time format
+///     to include `%f`, and `unixepoch()` to return REAL. No effect on
+///     `julianday`/`date`/`strftime` (already format-controlled).
+pub const ParseResult = struct {
+    dt: DateTime,
+    subsec: bool = false,
+};
+
+fn parseAndApplyModifiers(args: []const Value) ?ParseResult {
     var dt: DateTime = undefined;
+    var subsec = false;
     var mod_start: usize = 1;
 
-    if (args.len >= 2 and isUnixepochModifier(args[1])) {
-        const sec = numericFromArg(args[0]) orelse return null;
-        dt = unixepochToDateTime(sec) orelse return null;
-        mod_start = 2;
+    if (args.len >= 2) {
+        if (isLiteralModifier(args[1], "unixepoch")) {
+            const sec = numericFromArg(args[0]) orelse return null;
+            dt = unixepochToDateTime(sec) orelse return null;
+            mod_start = 2;
+        } else if (isLiteralModifier(args[1], "julianday")) {
+            const jd = numericFromArg(args[0]) orelse return null;
+            dt = calendar.julianFloatToDateTime(jd) orelse return null;
+            mod_start = 2;
+        } else {
+            const datestr = switch (args[0]) {
+                .null => return null,
+                .text => |t| t,
+                .blob => |b| b,
+                else => return null,
+            };
+            dt = calendar.parseDateTime(datestr) orelse return null;
+        }
     } else {
         const datestr = switch (args[0]) {
             .null => return null,
@@ -204,21 +236,22 @@ fn parseAndApplyModifiers(args: []const Value) ?DateTime {
             .blob => |b| b,
             else => return null,
         };
-        // sqlite3 quirk: `'unixepoch'` only valid as the first modifier;
-        // a second (or later) occurrence falls through to applyModifier
-        // which doesn't recognise it → NULL.
+        if (util.eqlIgnoreCase(mod_str, "subsec") or util.eqlIgnoreCase(mod_str, "subsecond")) {
+            subsec = true;
+            continue;
+        }
         dt = modifier.applyModifier(dt, mod_str) orelse return null;
     }
-    return dt;
+    return .{ .dt = dt, .subsec = subsec };
 }
 
-fn isUnixepochModifier(v: Value) bool {
+fn isLiteralModifier(v: Value, name: []const u8) bool {
     const s = switch (v) {
         .text => |t| t,
         .blob => |b| b,
         else => return false,
     };
-    return util.eqlIgnoreCase(s, "unixepoch");
+    return util.eqlIgnoreCase(s, name);
 }
 
 fn numericFromArg(v: Value) ?f64 {
