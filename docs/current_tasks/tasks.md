@@ -28,6 +28,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter22.A: `EvalContext` に `?*Database` を追加し、SELECT/DML 全 evalExpr 経路に通す (refactor only)
 - [x] Iter22.B: スカラサブクエリ `(SELECT ...)` を式位置で受理 (空→NULL / 多列→error / 多行→先頭行; sqlite3 互換)
 - [x] Iter22.C: `IN (SELECT ...)` / `EXISTS (SELECT ...)` (空→ left 無視 0 / NULL 三値論理 / EXISTS は column-count 無視; `applyIn` の empty 早期 0 化は既存 `NULL IN ()` バグの修正も兼ねる)
+- [x] Iter22.D: correlated subqueries (`EvalContext.outer_frames` を 14 EvalContext サイトに通す + DML EvalContext に `column_qualifiers = [table_name]` を植える + `eval_column.evalColumnRef` が innermost-out フォールバック; correlated `EXISTS` / `IN (SELECT)` / scalar in SELECT-list を sqlite3 互換で実装。FROM-clause subquery の correlation は対象外)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [ ] strftime の `%s` (Unix epoch) / `%J` (Julian day)
@@ -35,7 +36,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [ ] Iter20 拡張: setop chain での ORDER BY <name>/<expr> 対応 (現在は position-only)
 - [ ] Iter21 拡張: 任意 expression 列の合成名は現在 `columnN` を使用 (sqlite3 はソーステキストを使用); 仕様乖離あり、`alias` または bare ref で命名するワークアラウンド要
 - [ ] Iter22 拡張: `INSERT INTO t VALUES ((SELECT ...))` (parser-time VALUES に Database を渡す要)
-- [ ] Iter22 拡張: correlated subquery (外側 row への参照 — EvalContext から outer rows を流す要)
+- [ ] Iter22 拡張: correlated **FROM-clause** subquery (cart は materialise 一度きり — outer 駆動で再実行する仕組みが要)
 
 ## Backlog (Phase 3以降)
 

@@ -173,6 +173,7 @@ pub fn applyLimitOffset(
     db: ?*Database,
     rows: [][]Value,
     pp: PostProcess,
+    outer_frames: []const eval.OuterFrame,
 ) ![][]Value {
     if (pp.limit == null and pp.offset == null) return rows;
     var owned = true;
@@ -188,6 +189,7 @@ pub fn applyLimitOffset(
         .current_row = &.{},
         .columns = &.{},
         .db = db,
+        .outer_frames = outer_frames,
     };
     var skip: usize = 0;
     if (pp.offset) |e| {

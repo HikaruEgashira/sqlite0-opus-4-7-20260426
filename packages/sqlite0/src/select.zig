@@ -158,11 +158,12 @@ pub fn executeWithoutFrom(
     items: []const SelectItem,
     where_ast: ?*ast.Expr,
     pp: PostProcess,
+    outer_frames: []const eval.OuterFrame,
 ) ![][]Value {
-    if (!try evalWhereTruthy(allocator, db, where_ast, &.{}, &.{}, &.{})) {
+    if (!try evalWhereTruthy(allocator, db, where_ast, &.{}, &.{}, &.{}, outer_frames)) {
         return allocator.alloc([]Value, 0);
     }
-    const row = try evaluateSelectRow(allocator, db, items, &.{}, &.{}, &.{});
+    const row = try evaluateSelectRow(allocator, db, items, &.{}, &.{}, &.{}, outer_frames);
     errdefer {
         for (row) |v| ops.freeValue(allocator, v);
         allocator.free(row);
@@ -170,7 +171,7 @@ pub fn executeWithoutFrom(
     var rows = try allocator.alloc([]Value, 1);
     rows[0] = row;
     // ORDER BY is a no-op on a single row, but LIMIT/OFFSET still applies.
-    return post.applyLimitOffset(allocator, db, rows, pp);
+    return post.applyLimitOffset(allocator, db, rows, pp, outer_frames);
 }
 
 /// Execute a SELECT against a FROM source. For each source row, optionally
@@ -186,6 +187,7 @@ pub fn executeWithFrom(
     source_qualifiers: []const []const u8,
     where_ast: ?*ast.Expr,
     pp: PostProcess,
+    outer_frames: []const eval.OuterFrame,
 ) ![][]Value {
     var rows: std.ArrayList([]Value) = .empty;
     errdefer {
@@ -205,15 +207,15 @@ pub fn executeWithFrom(
     }
 
     for (source_rows) |source_row| {
-        if (!try evalWhereTruthy(allocator, db, where_ast, source_row, source_columns, source_qualifiers)) continue;
-        const out_row = try evaluateSelectRow(allocator, db, items, source_row, source_columns, source_qualifiers);
+        if (!try evalWhereTruthy(allocator, db, where_ast, source_row, source_columns, source_qualifiers, outer_frames)) continue;
+        const out_row = try evaluateSelectRow(allocator, db, items, source_row, source_columns, source_qualifiers, outer_frames);
         rows.append(allocator, out_row) catch |err| {
             for (out_row) |v| ops.freeValue(allocator, v);
             allocator.free(out_row);
             return err;
         };
         if (pp.order_by.len > 0) {
-            const key = try evaluateOrderKey(allocator, db, pp.order_by, source_row, source_columns, source_qualifiers, out_row);
+            const key = try evaluateOrderKey(allocator, db, pp.order_by, source_row, source_columns, source_qualifiers, out_row, outer_frames);
             sort_keys.append(allocator, key) catch |err| {
                 for (key) |v| ops.freeValue(allocator, v);
                 allocator.free(key);
@@ -234,7 +236,7 @@ pub fn executeWithFrom(
 
     var all_rows = try rows.toOwnedSlice(allocator);
     if (pp.distinct) all_rows = post.dedupeRows(allocator, all_rows);
-    return post.applyLimitOffset(allocator, db, all_rows, pp);
+    return post.applyLimitOffset(allocator, db, all_rows, pp, outer_frames);
 }
 
 fn evaluateOrderKey(
@@ -245,6 +247,7 @@ fn evaluateOrderKey(
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
     projected_row: []const Value,
+    outer_frames: []const eval.OuterFrame,
 ) ![]Value {
     const key = try allocator.alloc(Value, terms.len);
     var produced: usize = 0;
@@ -258,6 +261,7 @@ fn evaluateOrderKey(
         .columns = columns,
         .column_qualifiers = column_qualifiers,
         .db = db,
+        .outer_frames = outer_frames,
     };
     while (produced < terms.len) : (produced += 1) {
         const term = terms[produced];
@@ -287,6 +291,7 @@ fn evaluateSelectRow(
     current_row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    outer_frames: []const eval.OuterFrame,
 ) Error![]Value {
     var total: usize = 0;
     for (items) |item| total += switch (item) {
@@ -305,6 +310,7 @@ fn evaluateSelectRow(
         .columns = columns,
         .column_qualifiers = column_qualifiers,
         .db = db,
+        .outer_frames = outer_frames,
     };
     for (items) |item| switch (item) {
         .star => |q| {
@@ -347,6 +353,7 @@ fn evalWhereTruthy(
     current_row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    outer_frames: []const eval.OuterFrame,
 ) !bool {
     const w = where_ast orelse return true;
     const ctx = eval.EvalContext{
@@ -355,6 +362,7 @@ fn evalWhereTruthy(
         .columns = columns,
         .column_qualifiers = column_qualifiers,
         .db = db,
+        .outer_frames = outer_frames,
     };
     const cond = try eval.evalExpr(ctx, w);
     defer ops.freeValue(allocator, cond);

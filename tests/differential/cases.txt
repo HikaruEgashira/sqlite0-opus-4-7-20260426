@@ -818,3 +818,26 @@ CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); UPDATE t22c SET x = 9
 SELECT NULL IN ()
 # EXISTS (SELECT NULL) — verify the row-with-NULL still counts as existing
 SELECT EXISTS (SELECT NULL)
+# Iter22.D: correlated subqueries (outer_frames in EvalContext)
+# qualified outer ref via EXISTS
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(3); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE b22d.x = a22d.x) ORDER BY a22d.x
+# qualified outer ref via NOT EXISTS
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(3); SELECT a22d.x FROM a22d WHERE NOT EXISTS (SELECT 1 FROM b22d WHERE b22d.x = a22d.x) ORDER BY a22d.x
+# correlated scalar in SELECT list
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(3); SELECT a22d.x, (SELECT max(b22d.x) FROM b22d WHERE b22d.x <= a22d.x) FROM a22d ORDER BY a22d.x
+# inner-bare-name binds to inner FROM (sqlite3 inner-wins rule)
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (10); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE x = a22d.x)
+# inner has no x → bare x falls through to outer
+CREATE TABLE a22d(x); INSERT INTO a22d VALUES (1),(2); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 WHERE x = a22d.x) ORDER BY a22d.x
+# correlated IN: outer row drives inner WHERE
+CREATE TABLE a22d(x); CREATE TABLE b22d(k, y); INSERT INTO a22d VALUES (1),(2),(3); INSERT INTO b22d VALUES (1, 100),(3, 300); SELECT a22d.x FROM a22d WHERE a22d.x IN (SELECT k FROM b22d WHERE b22d.y > 50) ORDER BY a22d.x
+# correlated IN with explicit outer ref in inner WHERE
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2),(3); INSERT INTO b22d VALUES (1),(2),(3); SELECT a22d.x FROM a22d WHERE a22d.x IN (SELECT b22d.x FROM b22d WHERE b22d.x = a22d.x) ORDER BY a22d.x
+# correlated subquery in DELETE WHERE
+CREATE TABLE a22d(x); CREATE TABLE b22d(k); INSERT INTO a22d VALUES (1),(2),(3); INSERT INTO b22d VALUES (2); DELETE FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE b22d.k = a22d.x); SELECT x FROM a22d ORDER BY x
+# correlated scalar with no inner match → NULL
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2),(99); INSERT INTO b22d VALUES (1),(2); SELECT a22d.x, (SELECT b22d.x FROM b22d WHERE b22d.x = a22d.x) FROM a22d ORDER BY a22d.x
+# nested correlated: inner subquery references outermost a
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(2); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE EXISTS (SELECT 1 WHERE b22d.x = a22d.x)) ORDER BY a22d.x
+# DELETE + same-table IN: subquery materialised once before deletion (sqlite3 atomic semantics)
+CREATE TABLE t22d_self(x); INSERT INTO t22d_self VALUES (1),(2),(3); DELETE FROM t22d_self WHERE x IN (SELECT x FROM t22d_self WHERE x > 1); SELECT x FROM t22d_self ORDER BY x

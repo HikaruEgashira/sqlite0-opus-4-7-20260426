@@ -13,6 +13,7 @@ const ast = @import("ast.zig");
 const stmt_mod = @import("stmt.zig");
 const select_post = @import("select_post.zig");
 const database = @import("database.zig");
+const eval = @import("eval.zig");
 
 const Value = value_mod.Value;
 const SetopKind = stmt_mod.SetopKind;
@@ -90,6 +91,7 @@ pub fn applySetopPostProcess(
     order_by: []const stmt_mod.OrderTerm,
     limit: ?*ast.Expr,
     offset: ?*ast.Expr,
+    outer_frames: []const eval.OuterFrame,
 ) Error![][]Value {
     const current = rows;
     if (order_by.len > 0 and current.len > 1) {
@@ -114,5 +116,5 @@ pub fn applySetopPostProcess(
         .limit = limit,
         .offset = offset,
     };
-    return select_post.applyLimitOffset(arena, db, current, pp);
+    return select_post.applyLimitOffset(arena, db, current, pp, outer_frames);
 }

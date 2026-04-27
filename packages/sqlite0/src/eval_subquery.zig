@@ -23,6 +23,21 @@ const eval = @import("eval.zig");
 const Value = value_mod.Value;
 const Error = ops.Error;
 
+/// Build the outer-frame stack the inner SELECT will see: the caller's
+/// existing outer_frames extended by one — the caller's *current* frame
+/// (per-row binding plus column metadata). Allocated in `ctx.allocator`
+/// (per-statement arena), so freeing is implicit at statement teardown.
+fn extendOuter(ctx: eval.EvalContext) Error![]eval.OuterFrame {
+    const out = try ctx.allocator.alloc(eval.OuterFrame, ctx.outer_frames.len + 1);
+    @memcpy(out[0..ctx.outer_frames.len], ctx.outer_frames);
+    out[ctx.outer_frames.len] = .{
+        .current_row = ctx.current_row,
+        .columns = ctx.columns,
+        .column_qualifiers = ctx.column_qualifiers,
+    };
+    return out;
+}
+
 /// Run a scalar subquery (`(SELECT ...)`) and reduce it to a single Value.
 /// Semantics match sqlite3 (verified against 3.51.0 on 2026-04-26):
 /// - 0 rows                         → NULL
@@ -35,7 +50,8 @@ const Error = ops.Error;
 pub fn evalScalarSubquery(ctx: eval.EvalContext, sq: *const stmt_mod.ParsedSelect) Error!Value {
     const db = ctx.db orelse return Error.SyntaxError;
     const engine = @import("engine.zig");
-    const rows = try engine.executeSelect(db, ctx.allocator, sq.*);
+    const outer = try extendOuter(ctx);
+    const rows = try engine.executeSelectWithOuter(db, ctx.allocator, sq.*, outer);
     if (rows.len == 0) return Value.null;
     const first = rows[0];
     if (first.len != 1) return Error.ColumnCountMismatch;
@@ -54,7 +70,8 @@ pub fn evalInSubquery(ctx: eval.EvalContext, is: ast.Expr.InSubquery) Error!Valu
     const left = try eval.evalExpr(ctx, is.value);
     defer ops.freeValue(ctx.allocator, left);
 
-    const rows = try engine.executeSelect(db, ctx.allocator, is.subquery.*);
+    const outer = try extendOuter(ctx);
+    const rows = try engine.executeSelectWithOuter(db, ctx.allocator, is.subquery.*, outer);
     if (rows.len > 0 and rows[0].len != 1) return Error.ColumnCountMismatch;
 
     var items: std.ArrayList(Value) = .empty;
@@ -74,6 +91,7 @@ pub fn evalInSubquery(ctx: eval.EvalContext, is: ast.Expr.InSubquery) Error!Valu
 pub fn evalExists(ctx: eval.EvalContext, sq: *const stmt_mod.ParsedSelect) Error!Value {
     const db = ctx.db orelse return Error.SyntaxError;
     const engine = @import("engine.zig");
-    const rows = try engine.executeSelect(db, ctx.allocator, sq.*);
+    const outer = try extendOuter(ctx);
+    const rows = try engine.executeSelectWithOuter(db, ctx.allocator, sq.*, outer);
     return ops.boolValue(rows.len > 0);
 }

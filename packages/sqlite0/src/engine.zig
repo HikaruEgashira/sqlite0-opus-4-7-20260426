@@ -136,7 +136,7 @@ fn projectedColumnNames(
             .star => |q| {
                 if (cart_opt == null) {
                     if (ps.from.len == 0) return Error.SyntaxError;
-                    cart_opt = try engine_from.cartesianFromSources(db, alloc, ps.from);
+                    cart_opt = try engine_from.cartesianFromSources(db, alloc, ps.from, &.{});
                 }
                 const cart = cart_opt.?;
                 for (cart.columns, cart.qualifiers) |col, qual| {
@@ -185,19 +185,33 @@ fn bareColumnRefName(e: *const ast.Expr) ?[]const u8 {
 /// (verified against sqlite3 3.51.0); without this check the non-aggregate
 /// path would silently drop the predicate.
 pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) Error![][]Value {
+    return executeSelectWithOuter(db, alloc, ps, &.{});
+}
+
+/// Iter22.D entry point: run a parsed SELECT with an outer-frame stack so
+/// correlated subqueries can resolve column refs against enclosing rows.
+/// Top-level callers (CLI, dispatchOne) use `executeSelect` (empty stack);
+/// subquery callers in `eval_subquery` extend `outer_frames` by one (the
+/// caller's current frame) and forward here.
+pub fn executeSelectWithOuter(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    ps: stmt_mod.ParsedSelect,
+    outer_frames: []const eval.OuterFrame,
+) Error![][]Value {
     if (ps.branches.len == 0) {
         const pp = try postProcessFromParsed(alloc, ps);
-        return executeOneSelect(db, alloc, ps, pp);
+        return executeOneSelect(db, alloc, ps, pp, outer_frames);
     }
 
     // Setop chain: every branch (and the leftmost SELECT) executes WITHOUT
     // chain-level ORDER BY/LIMIT/OFFSET — those bind to the combined result
     // and are applied last. Per-branch DISTINCT inside a SELECT still goes
     // through (`SELECT DISTINCT x ... UNION ...`).
-    var current = try executeOneSelect(db, alloc, ps, postProcessForBranch(ps));
+    var current = try executeOneSelect(db, alloc, ps, postProcessForBranch(ps), outer_frames);
     var left_arity = arityOf(ps, current);
     for (ps.branches) |branch| {
-        const right = try executeOneSelect(db, alloc, branch.select, postProcessForBranch(branch.select));
+        const right = try executeOneSelect(db, alloc, branch.select, postProcessForBranch(branch.select), outer_frames);
         const right_arity = arityOf(branch.select, right);
         if (left_arity != null and right_arity != null and left_arity.? != right_arity.?) {
             return Error.ColumnCountMismatch;
@@ -205,7 +219,7 @@ pub fn executeSelect(db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.Parse
         current = try engine_setop.combine(alloc, branch.kind, current, right);
         if (left_arity == null) left_arity = right_arity;
     }
-    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset);
+    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, outer_frames);
 }
 
 /// Execute one ParsedSelect with the given PostProcess. Stripped out of
@@ -216,6 +230,7 @@ fn executeOneSelect(
     alloc: std.mem.Allocator,
     ps: stmt_mod.ParsedSelect,
     pp: select_mod.PostProcess,
+    outer_frames: []const eval.OuterFrame,
 ) ![][]Value {
     const has_aggregates = aggregate.selectHasAggregates(ps.items, ps.having, pp.order_by);
     if (ps.having != null and ps.group_by.len == 0 and !has_aggregates) return Error.SyntaxError;
@@ -226,20 +241,20 @@ fn executeOneSelect(
         if (wants_grouping) {
             const empty_row: []const Value = &.{};
             var synthetic = [_][]const Value{empty_row};
-            return aggregate.executeAggregated(alloc, db, ps.items, synthetic[0..], &.{}, &.{}, ps.where, ps.group_by, ps.having, pp);
+            return aggregate.executeAggregated(alloc, db, ps.items, synthetic[0..], &.{}, &.{}, ps.where, ps.group_by, ps.having, pp, outer_frames);
         }
-        return select_mod.executeWithoutFrom(alloc, db, ps.items, ps.where, pp);
+        return select_mod.executeWithoutFrom(alloc, db, ps.items, ps.where, pp, outer_frames);
     }
 
-    const cart = try engine_from.cartesianFromSources(db, alloc, ps.from);
+    const cart = try engine_from.cartesianFromSources(db, alloc, ps.from, outer_frames);
     if (wants_grouping) {
         const inputs = try alloc.alloc([]const Value, cart.rows.len);
         for (cart.rows, inputs) |src, *slot| slot.* = src;
-        return aggregate.executeAggregated(alloc, db, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp);
+        return aggregate.executeAggregated(alloc, db, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp, outer_frames);
     }
     const rows_const = try alloc.alloc([]const Value, cart.rows.len);
     for (cart.rows, rows_const) |src, *slot| slot.* = src;
-    return select_mod.executeWithFrom(alloc, db, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp);
+    return select_mod.executeWithFrom(alloc, db, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp, outer_frames);
 }
 
 /// PostProcess for one branch of a setop chain: keep the per-branch DISTINCT

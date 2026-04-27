@@ -33,6 +33,11 @@ const Error = ops.Error;
 /// failures leave the table unchanged (all-or-nothing — ADR-0003 §1).
 pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedDelete) !u64 {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
+    // Build the per-table-row qualifier vector once: each column is
+    // qualified by the (unaliased) table name so correlated subqueries can
+    // reference `<table>.<col>` from the WHERE predicate's outer frame.
+    const dml_qualifiers = try arena.alloc([]const u8, t.columns.len);
+    for (dml_qualifiers) |*q| q.* = parsed.table;
     if (parsed.where) |w_ast| {
         var survivors: std.ArrayList([]Value) = .empty;
         errdefer survivors.deinit(arena);
@@ -44,6 +49,7 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
                 .allocator = arena,
                 .current_row = row,
                 .columns = t.columns,
+                .column_qualifiers = dml_qualifiers,
                 .db = db,
             };
             const cond = try eval.evalExpr(ctx, w_ast);
@@ -98,6 +104,9 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         idx.* = findTableColumn(t, a.column) orelse return Error.SyntaxError;
     }
 
+    const dml_qualifiers = try arena.alloc([]const u8, t.columns.len);
+    for (dml_qualifiers) |*q| q.* = parsed.table;
+
     var changed: u64 = 0;
     for (t.rows.items) |*row_ptr| {
         if (parsed.where) |w_ast| {
@@ -105,6 +114,7 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
                 .allocator = arena,
                 .current_row = row_ptr.*,
                 .columns = t.columns,
+                .column_qualifiers = dml_qualifiers,
                 .db = db,
             };
             const cond = try eval.evalExpr(ctx, w_ast);
@@ -115,6 +125,7 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             .allocator = arena,
             .current_row = row_ptr.*,
             .columns = t.columns,
+            .column_qualifiers = dml_qualifiers,
             .db = db,
         };
         const new_values = try arena.alloc(Value, parsed.assignments.len);

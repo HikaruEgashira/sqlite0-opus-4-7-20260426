@@ -54,6 +54,7 @@ pub fn cartesianFromSources(
     db: *Database,
     alloc: std.mem.Allocator,
     terms: []FromTerm,
+    outer_frames: []const eval.OuterFrame,
 ) !Cartesian {
     std.debug.assert(terms.len >= 1);
     const first = try resolveSource(db, alloc, terms[0].source);
@@ -90,6 +91,7 @@ pub fn cartesianFromSources(
                         .columns = merged_columns,
                         .column_qualifiers = merged_qualifiers,
                         .db = db,
+                        .outer_frames = outer_frames,
                     };
                     const cond = try eval.evalExpr(ctx, on);
                     defer ops.freeValue(alloc, cond);

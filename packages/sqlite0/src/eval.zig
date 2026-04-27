@@ -20,6 +20,7 @@ const func_util = @import("func_util.zig");
 const database = @import("database.zig");
 const eval_match = @import("eval_match.zig");
 const eval_subquery = @import("eval_subquery.zig");
+const eval_column = @import("eval_column.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -59,6 +60,25 @@ pub const EvalContext = struct {
     /// path (`stmt.parseValuesTuple`); subqueries there will surface a
     /// runtime error in 22.B.
     db: ?*database.Database = null,
+    /// Stack of enclosing-SELECT frames for correlated subqueries (Iter22.D).
+    /// Innermost outer is `outer_frames[outer_frames.len - 1]`. Empty for
+    /// non-correlated paths. `evalColumnRef` falls back here when neither
+    /// `current_row`/`columns` resolve a name. `eval_subquery.*` extends
+    /// this slice (current frame is appended) when dispatching into an
+    /// inner SELECT, so an arbitrarily-nested correlated query sees every
+    /// enclosing scope from innermost out.
+    outer_frames: []const OuterFrame = &.{},
+};
+
+/// One enclosing-SELECT frame snapshot. Mirrors the per-row fields of
+/// `EvalContext` so `evalColumnRef` can apply the same resolution rules
+/// (qualified-match by alias, bare-name match, ambiguity check). Bytes
+/// inside `current_row` are borrowed from the outer frame's row producer
+/// — same lifetime contract as `EvalContext.current_row`.
+pub const OuterFrame = struct {
+    current_row: []const Value = &.{},
+    columns: []const []const u8 = &.{},
+    column_qualifiers: []const []const u8 = &.{},
 };
 
 /// Pointer-keyed map from func_call AST nodes to their finalised aggregate
@@ -67,8 +87,8 @@ pub const AggregateValues = std.AutoHashMapUnmanaged(*const ast.Expr, Value);
 
 pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
     return switch (expr.*) {
-        .literal => |v| dupeLiteral(ctx.allocator, v),
-        .column_ref => |cr| try evalColumnRef(ctx, cr),
+        .literal => |v| func_util.dupeValue(ctx.allocator, v),
+        .column_ref => |cr| try eval_column.evalColumnRef(ctx, cr),
         .binary_arith => |b| try evalBinaryArith(ctx, b),
         .binary_concat => |b| try evalBinaryConcat(ctx, b),
         .unary_negate => |operand| try evalUnaryNegate(ctx, operand),
@@ -243,7 +263,7 @@ fn evalFuncCall(ctx: EvalContext, expr: *const Expr, fc: Expr.FuncCall) Error!Va
     // resolve in the per-group scope (the value was already accumulated
     // in the source-row scope during the group scan).
     if (ctx.agg_values) |map| {
-        if (map.get(expr)) |v| return dupeLiteral(ctx.allocator, v);
+        if (map.get(expr)) |v| return func_util.dupeValue(ctx.allocator, v);
     }
     var arg_values: std.ArrayList(Value) = .empty;
     defer {
@@ -255,45 +275,6 @@ fn evalFuncCall(ctx: EvalContext, expr: *const Expr, fc: Expr.FuncCall) Error!Va
         arg_values.appendAssumeCapacity(try evalExpr(ctx, arg_expr));
     }
     return funcs.call(ctx.allocator, fc.name, arg_values.items);
-}
-
-/// Resolve a column reference against the current row. Case-insensitive
-/// match per SQL's identifier rules. Returns a fresh `Value` owned by
-/// `ctx.allocator` (TEXT/BLOB bytes duped). Unknown name → SyntaxError.
-///
-/// Qualified refs (`t.x`) require the source's effective qualifier (alias
-/// if given, else table name) to match `t`. When `column_qualifiers` is
-/// empty (no FROM, or pre-Iter19.A code paths), qualified refs cannot
-/// match — sqlite3 reports "no such column" for that, which we surface as
-/// SyntaxError.
-///
-/// Bare refs are subject to ambiguity detection when `column_qualifiers`
-/// is populated: matching against multiple sources errors as
-/// "ambiguous column name" (also SyntaxError here — differential
-/// equivalence is on error/no-error, not message wording).
-fn evalColumnRef(ctx: EvalContext, ref: ast.Expr.ColumnRef) Error!Value {
-    var found: ?usize = null;
-    for (ctx.columns, 0..) |col, i| {
-        if (!func_util.eqlIgnoreCase(ref.name, col)) continue;
-        if (ref.qualifier) |q| {
-            if (i >= ctx.column_qualifiers.len) continue;
-            if (!func_util.eqlIgnoreCase(q, ctx.column_qualifiers[i])) continue;
-        }
-        if (found != null) return Error.SyntaxError; // ambiguous
-        found = i;
-    }
-    if (found) |idx| return dupeLiteral(ctx.allocator, ctx.current_row[idx]);
-    return Error.SyntaxError;
-}
-
-/// Dupe TEXT/BLOB bytes so the returned Value outlives the AST node that
-/// produced it. INTEGER/REAL/NULL are by-value and copy implicitly.
-fn dupeLiteral(allocator: std.mem.Allocator, v: Value) Error!Value {
-    return switch (v) {
-        .text => |t| Value{ .text = try allocator.dupe(u8, t) },
-        .blob => |b| Value{ .blob = try allocator.dupe(u8, b) },
-        else => v,
-    };
 }
 
 test "eval: literal integer" {
