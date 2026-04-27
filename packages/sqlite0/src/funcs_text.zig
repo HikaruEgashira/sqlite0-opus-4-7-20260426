@@ -89,7 +89,10 @@ pub fn fnReplace(allocator: std.mem.Allocator, args: []const Value) Error!Value 
 
 pub fn fnHex(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len != 1) return Error.WrongArgumentCount;
-    if (args[0] == .null) return Value.null;
+    // sqlite3 quirk: hex(NULL) returns empty TEXT, not SQL NULL — distinct
+    // from most scalar fns which propagate NULL. The empty-string return
+    // mirrors hex() of an empty BLOB.
+    if (args[0] == .null) return Value{ .text = try allocator.dupe(u8, "") };
     const bytes = try util.ensureBytes(allocator, args[0]);
     defer allocator.free(bytes);
 
@@ -233,7 +236,11 @@ pub fn fnChar(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     for (args) |a| {
-        const cp = try util.toIntCoerce(a);
+        // sqlite3 quirk: NULL args coerce to codepoint 0 (NUL byte) rather
+        // than collapsing the whole call to NULL. `char(65, NULL, 66)`
+        // emits `'A\0B'`, three bytes wide, even though the terminal /
+        // sqlite3 CLI stops display at the embedded NUL.
+        const cp: i64 = if (a == .null) 0 else try util.toIntCoerce(a);
         if (cp < 0 or cp > 0x10FFFF) {
             try out.appendSlice(allocator, "\xEF\xBF\xBD");
             continue;

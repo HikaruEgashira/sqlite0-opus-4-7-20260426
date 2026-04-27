@@ -2575,3 +2575,15 @@ SELECT trunc('5abc')
 SELECT trunc('  5  ')
 SELECT trunc('1.5xyz')
 SELECT typeof(trunc('5abc'))
+
+# --- Iter30.H: char(NULL) emits NUL byte; hex(NULL) returns empty TEXT
+# sqlite3 char() coerces NULL args to codepoint 0, not NULL-propagation.
+SELECT length(char(NULL))
+SELECT length(char(NULL, 65))
+SELECT length(char(65, NULL, 66))
+SELECT typeof(char(NULL))
+# hex(NULL) returns empty TEXT (mirrors hex of an empty BLOB).
+SELECT hex(NULL)
+SELECT typeof(hex(NULL))
+SELECT length(hex(NULL))
+SELECT hex(NULL) IS NULL
