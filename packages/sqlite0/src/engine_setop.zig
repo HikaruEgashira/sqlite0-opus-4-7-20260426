@@ -14,6 +14,7 @@ const stmt_mod = @import("stmt.zig");
 const select_post = @import("select_post.zig");
 const database = @import("database.zig");
 const eval = @import("eval.zig");
+const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const SetopKind = stmt_mod.SetopKind;
@@ -79,11 +80,16 @@ fn rowExistsIn(set: []const []Value, row: []const Value) bool {
 }
 
 /// Apply chain-level ORDER BY / LIMIT / OFFSET to combined setop rows.
-/// ORDER BY is restricted to position-based references (`ORDER BY 1`); the
-/// expression-against-source-row path doesn't apply once we've left every
-/// branch's source scope. sqlite3 also rejects most non-position ORDER BY
-/// inside a UNION ("1st ORDER BY term does not match any column in the
-/// result set" for `SELECT 1 UNION SELECT 2 ORDER BY abs(1)`).
+///
+/// ORDER BY in a setop chain is restricted to two forms (matching sqlite3):
+///   - `ORDER BY <position>` — `ORDER BY 1` sorts by the first projected column.
+///   - `ORDER BY <name>` — bare column-ref whose name appears in the leftmost
+///     branch's projection. Resolution is case-insensitive (`ORDER BY X`
+///     matches column `x`); ties resolve to the first matching column.
+///
+/// Other expressions (`ORDER BY abs(1)`, `ORDER BY a + b`) are rejected.
+/// sqlite3 reports "1st ORDER BY term does not match any column in the
+/// result set" for these — we surface the same case as `SyntaxError`.
 pub fn applySetopPostProcess(
     arena: std.mem.Allocator,
     db: ?*Database,
@@ -91,22 +97,24 @@ pub fn applySetopPostProcess(
     order_by: []const stmt_mod.OrderTerm,
     limit: ?*ast.Expr,
     offset: ?*ast.Expr,
+    leftmost_columns: []const []const u8,
     outer_frames: []const eval.OuterFrame,
 ) Error![][]Value {
     const current = rows;
     if (order_by.len > 0 and current.len > 1) {
         const keys = try arena.alloc([]Value, current.len);
+        const so_terms = try arena.alloc(select_post.OrderTerm, order_by.len);
+        for (order_by, so_terms) |s, *o| {
+            const resolved = try resolveSetopOrderPosition(s, leftmost_columns);
+            o.* = .{ .expr = s.expr, .position = resolved, .descending = s.dir == .desc };
+        }
         for (current, keys) |row, *slot| {
             const key = try arena.alloc(Value, order_by.len);
-            for (order_by, key) |term, *kv| {
-                const pos = term.position orelse return Error.SyntaxError;
+            for (so_terms, key) |term, *kv| {
+                const pos = term.position.?;
                 kv.* = if (pos > 0 and pos <= row.len) row[pos - 1] else Value.null;
             }
             slot.* = key;
-        }
-        const so_terms = try arena.alloc(select_post.OrderTerm, order_by.len);
-        for (order_by, so_terms) |s, *o| {
-            o.* = .{ .expr = s.expr, .position = s.position, .descending = s.dir == .desc };
         }
         try select_post.sortRowsByKeys(arena, current, keys, so_terms);
     }
@@ -117,4 +125,27 @@ pub fn applySetopPostProcess(
         .offset = offset,
     };
     return select_post.applyLimitOffset(arena, db, current, pp, outer_frames);
+}
+
+/// Reduce a setop ORDER BY term to a 1-based column position. Position-form
+/// passes through; bare column-refs resolve against `leftmost_columns`
+/// (case-insensitive, first match wins). Anything else is a syntax error
+/// — sqlite3's "does not match any column in the result set" surfaces here.
+fn resolveSetopOrderPosition(
+    term: stmt_mod.OrderTerm,
+    leftmost_columns: []const []const u8,
+) Error!usize {
+    if (term.position) |p| return p;
+    switch (term.expr.*) {
+        .column_ref => |c| {
+            // Qualified refs (`t.x`) never match — once we've left every
+            // branch's source scope, table aliases no longer exist.
+            if (c.qualifier != null) return Error.SyntaxError;
+            for (leftmost_columns, 1..) |col, idx| {
+                if (func_util.eqlIgnoreCase(c.name, col)) return idx;
+            }
+            return Error.SyntaxError;
+        },
+        else => return Error.SyntaxError,
+    }
 }

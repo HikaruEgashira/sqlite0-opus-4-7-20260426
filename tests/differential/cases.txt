@@ -861,3 +861,22 @@ SELECT strftime('%J', NULL)
 # strftime %s: invalid date → NULL
 SELECT strftime('%s', 'bogus')
 SELECT strftime('%J', '2024-13-01')
+# Iter20.A: setop chain ORDER BY <name> resolves against leftmost branch
+SELECT 1 AS x UNION SELECT 2 ORDER BY x
+SELECT 1 AS x UNION SELECT 2 ORDER BY x DESC
+# leftmost-wins: alias from branch 1 binds even when branch 2 has no alias
+SELECT 2 AS k UNION SELECT 1 ORDER BY k
+# case-insensitive match on the leftmost name
+SELECT 1 AS x UNION SELECT 2 ORDER BY X
+# multi-column: ORDER BY <name> picks the right column
+SELECT 3 AS a, 1 AS b UNION SELECT 1, 2 UNION SELECT 2, 3 ORDER BY b
+# table source's column name flows through
+CREATE TABLE t20o(name); INSERT INTO t20o VALUES ('b'),('a'),('c'); SELECT name FROM t20o UNION SELECT 'z' ORDER BY name
+# ORDER BY <name> chained with INTERSECT
+CREATE TABLE x20o(v); CREATE TABLE y20o(v); INSERT INTO x20o VALUES (3),(1),(2); INSERT INTO y20o VALUES (2),(1); SELECT v FROM x20o INTERSECT SELECT v FROM y20o ORDER BY v
+# expression ORDER BY in setop chain → both engines reject
+SELECT 1 AS x UNION SELECT 2 ORDER BY abs(x)
+# unknown name → both engines reject
+SELECT 1 AS x UNION SELECT 2 ORDER BY z
+# qualified name in chain ORDER BY → both engines reject (no source scope)
+SELECT 1 AS x UNION SELECT 2 ORDER BY t.x

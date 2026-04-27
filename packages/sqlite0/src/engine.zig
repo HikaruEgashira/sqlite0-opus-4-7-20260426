@@ -219,7 +219,16 @@ pub fn executeSelectWithOuter(
         current = try engine_setop.combine(alloc, branch.kind, current, right);
         if (left_arity == null) left_arity = right_arity;
     }
-    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, outer_frames);
+    // ORDER BY <name> in a setop chain resolves against the leftmost branch's
+    // projection (sqlite3 quirk: `SELECT 1 AS a UNION SELECT 2 ORDER BY a` is
+    // valid; the alias from branch 1 wins). Computing names lazily — only
+    // when the chain actually has an ORDER BY — keeps the no-ORDER-BY path
+    // free of a second FROM-resolution pass.
+    const leftmost_columns: []const []const u8 = if (ps.order_by.len > 0)
+        try projectedColumnNames(db, alloc, ps)
+    else
+        &.{};
+    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, leftmost_columns, outer_frames);
 }
 
 /// Execute one ParsedSelect with the given PostProcess. Stripped out of
