@@ -117,11 +117,28 @@ fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const V
             'Y' => try writeZeroPadded(allocator, &out, dt.year, 4),
             'm' => try writeZeroPadded(allocator, &out, dt.month, 2),
             'd' => try writeZeroPadded(allocator, &out, dt.day, 2),
+            'e' => try writeSpacePadded(allocator, &out, dt.day, 2),
             'H' => try writeZeroPadded(allocator, &out, dt.hour, 2),
+            'I' => try writeZeroPadded(allocator, &out, twelveHour(dt.hour), 2),
             'M' => try writeZeroPadded(allocator, &out, dt.minute, 2),
             'S' => try writeZeroPadded(allocator, &out, dt.second, 2),
             'j' => try writeZeroPadded(allocator, &out, calendar.dayOfYear(dt), 3),
             'w' => try writeZeroPadded(allocator, &out, calendar.dayOfWeek(dt), 1),
+            'u' => try writeZeroPadded(allocator, &out, isoWeekday(calendar.dayOfWeek(dt)), 1),
+            'p' => try out.appendSlice(allocator, if (dt.hour < 12) "AM" else "PM"),
+            'P' => try out.appendSlice(allocator, if (dt.hour < 12) "am" else "pm"),
+            'R' => {
+                try writeZeroPadded(allocator, &out, dt.hour, 2);
+                try out.append(allocator, ':');
+                try writeZeroPadded(allocator, &out, dt.minute, 2);
+            },
+            'T' => {
+                try writeZeroPadded(allocator, &out, dt.hour, 2);
+                try out.append(allocator, ':');
+                try writeZeroPadded(allocator, &out, dt.minute, 2);
+                try out.append(allocator, ':');
+                try writeZeroPadded(allocator, &out, dt.second, 2);
+            },
             's' => try writeI64(allocator, &out, calendar.unixEpochSeconds(dt)),
             'J' => try writeJulianDay(allocator, &out, dt),
             else => {
@@ -177,6 +194,40 @@ fn writeI64(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64) !
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
     try out.appendSlice(allocator, s);
+}
+
+/// 12-hour clock: 0 → 12, 1..11 → 1..11, 12 → 12, 13..23 → 1..11. Matches
+/// sqlite3 strftime `%I` (`hh` mod 12, with the noon/midnight 0 → 12 quirk).
+fn twelveHour(h: u16) u16 {
+    const m = h % 12;
+    return if (m == 0) 12 else m;
+}
+
+/// ISO 8601 weekday: Mon=1, Tue=2, ..., Sun=7. sqlite3 `%w` (0=Sun..6=Sat)
+/// remaps to `%u` by sending Sunday from 0 to 7.
+fn isoWeekday(w: u8) u16 {
+    return if (w == 0) 7 else w;
+}
+
+fn writeSpacePadded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16, width: u8) !void {
+    var buf: [8]u8 = undefined;
+    var i: usize = buf.len;
+    var v = value;
+    if (v == 0) {
+        i -= 1;
+        buf[i] = '0';
+    } else {
+        while (v > 0) : (v /= 10) {
+            i -= 1;
+            buf[i] = '0' + @as(u8, @intCast(v % 10));
+        }
+    }
+    const digits = buf[i..];
+    var pad: usize = 0;
+    while (digits.len + pad < width) : (pad += 1) {
+        try out.append(allocator, ' ');
+    }
+    try out.appendSlice(allocator, digits);
 }
 
 fn writeZeroPadded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16, width: u8) !void {

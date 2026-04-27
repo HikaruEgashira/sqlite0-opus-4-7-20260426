@@ -2071,6 +2071,28 @@ SELECT typeof(unixepoch('2024-01-01'))
 SELECT unixepoch('not a date')
 SELECT unixepoch('2024-01-31', '+1 day')
 SELECT unixepoch('2024-01-01', '+1 hour')
+# Iter29.AM: strftime spec letters %R %T %e %I %p %P %u (sqlite3 datefunc.c).
+# Composite specs: %R = %H:%M, %T = %H:%M:%S. Day padding: %e is space-padded
+# (` 5` for 5th, vs %d zero-padded `05`). 12-hour clock: %I is 1..12 with
+# midnight/noon mapped to 12 (`hh % 12 ? hh % 12 : 12`). AM/PM: %p uppercase
+# (AM before noon, PM at-or-after), %P lowercase. ISO weekday %u is Mon=1
+# through Sun=7 (vs %w which is Sun=0 through Sat=6).
+SELECT strftime('%R', '2024-01-01 12:34:56')
+SELECT strftime('%T', '2024-01-01 12:34:56')
+SELECT strftime('%e', '2024-01-05')
+SELECT strftime('%e', '2024-01-15')
+SELECT strftime('%I', '2024-01-01 00:00:00')
+SELECT strftime('%I', '2024-01-01 12:00:00')
+SELECT strftime('%I', '2024-01-01 23:00:00')
+SELECT strftime('%I', '2024-01-01 13:34:56')
+SELECT strftime('%p', '2024-01-01 11:59:59')
+SELECT strftime('%p', '2024-01-01 12:00:00')
+SELECT strftime('%p', '2024-01-01 00:00:00')
+SELECT strftime('%P', '2024-01-01 13:34:56')
+SELECT strftime('%P', '2024-01-01 09:00:00')
+SELECT strftime('%u', '2024-01-15')
+SELECT strftime('%u', '2024-01-21')
+SELECT strftime('%u %d', '2024-01-15')
 
 
 
