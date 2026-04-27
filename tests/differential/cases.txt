@@ -1763,3 +1763,89 @@ CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t WHERE TRUE
 CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t WHERE FALSE
 CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT count(*) FROM t WHERE TRUE
 
+# Iter29.Z: scalar `like(pattern, text [, escape])` and `glob(pattern, text)`
+# functions. sqlite3 exposes these as fallback-keyword call forms with
+# *pattern first* (opposite of the binary `text LIKE pattern` operator).
+# Any NULL arg → NULL (escape included). 3-arg `like` requires the escape to
+# be a single UTF-8 character; multi-char escape is a runtime error. Bare
+# `like` / `glob` (no parens, no operator) is still a syntax error.
+SELECT like('a%','abc')
+SELECT like('A%','abc')
+SELECT like('a_c','abc')
+SELECT like('a%c','adc')
+SELECT like('a','b')
+SELECT like('','')
+SELECT like('','abc')
+SELECT typeof(like('a','a'))
+SELECT like(NULL,'a')
+SELECT like('a',NULL)
+SELECT like('a%','abc','b')
+SELECT like('100%','100','%')
+SELECT like('100\%','100%','\')
+SELECT like('a','b',NULL)
+SELECT like('a','b','XY')
+SELECT like('a','b','あ')
+SELECT like('foo!','foo','!')
+SELECT 'foo' LIKE 'foo!' ESCAPE '!'
+SELECT like()
+SELECT like('a')
+SELECT like('a','b','c','d')
+SELECT glob('a*','abc')
+SELECT glob('A*','abc')
+SELECT glob('a?c','abc')
+SELECT glob('[abc]','b')
+SELECT glob('[^abc]','d')
+SELECT typeof(glob('a','a'))
+SELECT glob(NULL,'a')
+SELECT glob('a',NULL)
+SELECT glob()
+SELECT glob('a')
+SELECT glob('a','b','c')
+
+# Iter29.Z: printf SQL-quoting specs `%q` / `%Q` / `%w`. sqlite3 quirks:
+# `%q` doubles single-quotes (escape for SQL string literal body), `%Q`
+# additionally wraps in single quotes (full SQL string literal — and emits
+# the bare keyword `NULL` for SQL NULL, NOT `''`). `%w` doubles double-quotes
+# for SQL identifier quoting. NULL → `(NULL)` for q/w (parens included), and
+# bare `NULL` for Q. Precision applies to the *raw* input chars BEFORE
+# doubling. C-string convention truncates at embedded NUL byte.
+SELECT printf('%q','it''s')
+SELECT printf('%q','no quotes')
+SELECT printf('%q','')
+SELECT printf('%q',123)
+SELECT printf('%q',1.5)
+SELECT printf('%q',NULL)
+SELECT printf('%Q','it''s')
+SELECT printf('%Q','x')
+SELECT printf('%Q','')
+SELECT printf('%Q',123)
+SELECT printf('%Q',NULL)
+SELECT printf('%w','a"b')
+SELECT printf('%w','x')
+SELECT printf('%w','')
+SELECT printf('%w',NULL)
+SELECT printf('%w',x'4142')
+SELECT printf('%5q','a''b')
+SELECT printf('%-5q|','a')
+SELECT printf('%5Q','x')
+SELECT printf('%-5Q|','x')
+SELECT printf('%5w','a"b')
+SELECT printf('%.3q','abcdefg')
+SELECT printf('%.3q','ab''cdef')
+SELECT printf('%.0q','abc')
+SELECT printf('%.0Q','abc')
+SELECT printf('%5.3q','abcdefg')
+SELECT printf('%05q','a')
+SELECT printf('%10q',NULL)
+SELECT printf('%10Q',NULL)
+SELECT printf('%10w',NULL)
+SELECT printf('%-10q|',NULL)
+SELECT printf('%-10Q|',NULL)
+SELECT printf('%.4q',NULL)
+SELECT printf('%.4Q',NULL)
+SELECT printf('|%q|',NULL)
+SELECT printf('|%Q|',NULL)
+SELECT printf('|%w|',NULL)
+SELECT length(printf('%q', cast(x'27270027' as text)))
+SELECT hex(printf('%Q', cast(x'27270027' as text)))
+

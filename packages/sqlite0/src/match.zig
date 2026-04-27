@@ -9,6 +9,7 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
+const util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -64,7 +65,12 @@ pub fn matchLike(text: []const u8, pattern: []const u8, escape: ?u8) bool {
     var pi: usize = 0;
     while (pi < pattern.len) {
         const pc = pattern[pi];
-        if (escape) |esc| if (pc == esc and pi + 1 < pattern.len) {
+        if (escape) |esc| if (pc == esc) {
+            // Trailing escape is malformed → no match (sqlite3
+            // `patternCompare` returns SQLITE_NOMATCH when the byte after
+            // ESC is end-of-pattern; otherwise the next byte loses its
+            // wildcard meaning even if it's the escape char itself).
+            if (pi + 1 >= pattern.len) return false;
             const lit = pattern[pi + 1];
             if (ti >= text.len or !asciiEqIgnoreCase(text[ti], lit)) return false;
             ti += 1;
@@ -195,6 +201,35 @@ fn matchClass(class: []const u8, c: u8) bool {
     return if (negated) !found else found;
 }
 
+/// `like(pattern, text [, escape])` scalar function. sqlite3 exposes the LIKE
+/// operator as a callable function with the *pattern first*, opposite of the
+/// operator form (`text LIKE pattern`). Any NULL argument — including the
+/// optional escape — short-circuits to NULL. The 3-arg form requires escape
+/// to be exactly one UTF-8 character (sqlite3 checks char count, not byte
+/// length); we accept the same surface but the matcher only consults the
+/// first byte, so a multi-byte single-char escape only escapes when the
+/// pattern's lead byte matches — see Deferred note.
+pub fn fnLike(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 2 and args.len != 3) return Error.WrongArgumentCount;
+    if (args[0] == .null or args[1] == .null) return Value.null;
+    const escape: ?u8 = if (args.len == 3) blk: {
+        if (args[2] == .null) return Value.null;
+        const esc_bytes = try util.ensureText(allocator, args[2]);
+        defer allocator.free(esc_bytes);
+        if (util.utf8CharCount(esc_bytes) != 1) return Error.SyntaxError;
+        break :blk esc_bytes[0];
+    } else null;
+    return applyLike(allocator, args[1], args[0], escape);
+}
+
+/// `glob(pattern, text)` scalar function — strict 2-arg, pattern-first
+/// (mirrors `fnLike`'s arg-order swap). Either NULL → NULL.
+pub fn fnGlob(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 2) return Error.WrongArgumentCount;
+    if (args[0] == .null or args[1] == .null) return Value.null;
+    return applyGlob(allocator, args[1], args[0]);
+}
+
 test "match: matchLike basic %" {
     try std.testing.expect(matchLike("abc", "a%", null));
     try std.testing.expect(matchLike("abc", "%c", null));
@@ -259,4 +294,49 @@ test "match: matchGlob unmatched bracket" {
 test "match: applyGlob NULL propagation" {
     try std.testing.expectEqual(Value.null, try applyGlob(std.testing.allocator, .null, .{ .text = "*" }));
     try std.testing.expectEqual(Value.null, try applyGlob(std.testing.allocator, .{ .text = "a" }, .null));
+}
+
+test "match: fnLike pattern-first arg order" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "a%" }, .{ .text = "abc" } };
+    const r = try fnLike(a, &args);
+    try std.testing.expectEqual(@as(i64, 1), r.integer);
+}
+
+test "match: fnLike NULL escape returns NULL" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "a" }, .{ .text = "a" }, .null };
+    const r = try fnLike(a, &args);
+    try std.testing.expectEqual(Value.null, r);
+}
+
+test "match: fnLike multi-byte 1-char escape accepted" {
+    const a = std.testing.allocator;
+    // 'あ' is 1 UTF-8 char (3 bytes). sqlite3 accepts; we should too.
+    var args = [_]Value{ .{ .text = "a" }, .{ .text = "b" }, .{ .text = "あ" } };
+    const r = try fnLike(a, &args);
+    try std.testing.expectEqual(@as(i64, 0), r.integer);
+}
+
+test "match: fnLike rejects multi-char escape" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "a" }, .{ .text = "a" }, .{ .text = "XY" } };
+    try std.testing.expectError(Error.SyntaxError, fnLike(a, &args));
+}
+
+test "match: fnGlob pattern-first arg order" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "a*" }, .{ .text = "abc" } };
+    const r = try fnGlob(a, &args);
+    try std.testing.expectEqual(@as(i64, 1), r.integer);
+}
+
+test "match: fnGlob arg-count" {
+    const a = std.testing.allocator;
+    var two = [_]Value{ .{ .text = "*" }, .{ .text = "a" } };
+    _ = try fnGlob(a, &two);
+    var one = [_]Value{.{ .text = "*" }};
+    try std.testing.expectError(Error.WrongArgumentCount, fnGlob(a, &one));
+    var three = [_]Value{ .{ .text = "*" }, .{ .text = "a" }, .{ .text = "b" } };
+    try std.testing.expectError(Error.WrongArgumentCount, fnGlob(a, &three));
 }

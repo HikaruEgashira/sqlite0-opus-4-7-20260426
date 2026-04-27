@@ -11,10 +11,20 @@
 //!   * NULL (any spec)  → empty string for `%s`, `0` / `0.0` for numeric
 //!   * missing arg      → same defaults as NULL
 //!
-//! Out-of-spec specifiers (`%e`, `%g`, `%q`, `%Q`, ...) are left unimplemented
-//! and the formatter writes the literal `%X` for X (matches sqlite3's
-//! "unknown spec" passthrough behavior closely enough for the differential
-//! cases we care about).
+//! Out-of-spec specifiers (`%e`, `%g`, ...) are left unimplemented and the
+//! formatter writes the literal `%X` for X (matches sqlite3's "unknown spec"
+//! passthrough behavior closely enough for the differential cases we care
+//! about).
+//!
+//! SQL-quoting specs (added Iter29.Z):
+//!   * `%q` — escape single-quotes by doubling. NULL → literal `(NULL)`.
+//!   * `%Q` — like `%q` and wrap in single quotes. NULL → literal `NULL`
+//!     (no quotes; this is the only NULL-distinct quoting form).
+//!   * `%w` — escape double-quotes by doubling (SQL identifier quoting).
+//!     NULL → literal `(NULL)`.
+//! Width/precision apply: precision truncates the *raw* input first, doubling
+//! and (for `%Q`) wrapping then run, and width pads the final body. sqlite3's
+//! C-string convention truncates these at the first NUL byte; we mirror.
 
 const std = @import("std");
 const util = @import("func_util.zig");
@@ -100,6 +110,21 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
                 try writeFloat(allocator, &out, v, spec);
+            },
+            'q' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try writeQuoted(allocator, &out, v, spec, '\'', false);
+            },
+            'Q' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try writeQuoted(allocator, &out, v, spec, '\'', true);
+            },
+            'w' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try writeQuoted(allocator, &out, v, spec, '"', false);
             },
             else => {
                 // Unknown spec: write the original `%X` literally.
@@ -298,6 +323,62 @@ fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) !v
     if (s.len > 0) try out.append(allocator, s[0]);
 }
 
+/// Render a value as an SQL-quoted body and append with width padding.
+/// `qc` is the quote byte to double (`'` for `%q`/`%Q`, `"` for `%w`).
+/// `wrap` (true only for `%Q`) wraps the doubled body in `qc` and uses the
+/// literal `NULL` (no quotes) as the NULL rendering. `%q`/`%w` emit `(NULL)`
+/// for NULL — sqlite3 distinguishes these to keep `%Q` round-trippable as
+/// SQL while keeping `%q`/`%w` debug-readable.
+fn writeQuoted(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    v: Value,
+    spec: Spec,
+    qc: u8,
+    wrap: bool,
+) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+
+    if (v == .null) {
+        const s: []const u8 = if (wrap) "NULL" else "(NULL)";
+        const slice = if (spec.precision) |p| s[0..@min(p, s.len)] else s;
+        try body.appendSlice(allocator, slice);
+    } else {
+        var owned: ?[]u8 = null;
+        defer if (owned) |b| allocator.free(b);
+        const raw_full: []const u8 = switch (v) {
+            .text => |t| t,
+            .blob => |b| b,
+            else => blk: {
+                owned = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
+                    error.OutOfMemory => return Error.OutOfMemory,
+                    error.NotConvertible => return Error.UnsupportedFeature,
+                };
+                break :blk owned.?;
+            },
+        };
+        // sqlite3's C-string convention stops scanning at the first NUL byte —
+        // mirror that so embedded-NUL inputs produce byte-equal output.
+        const raw_to_nul: []const u8 = if (std.mem.indexOfScalar(u8, raw_full, 0)) |n|
+            raw_full[0..n]
+        else
+            raw_full;
+        const slice = if (spec.precision) |p| raw_to_nul[0..@min(p, raw_to_nul.len)] else raw_to_nul;
+        if (wrap) try body.append(allocator, qc);
+        for (slice) |c| {
+            try body.append(allocator, c);
+            if (c == qc) try body.append(allocator, qc);
+        }
+        if (wrap) try body.append(allocator, qc);
+    }
+
+    const pad: usize = if (body.items.len < spec.width) spec.width - body.items.len else 0;
+    if (!spec.left_align) try appendN(allocator, out, ' ', pad);
+    try out.appendSlice(allocator, body.items);
+    if (spec.left_align) try appendN(allocator, out, ' ', pad);
+}
+
 fn writeFloat(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(u8),
@@ -332,4 +413,63 @@ fn writeFloat(
 fn appendN(allocator: std.mem.Allocator, out: *std.ArrayList(u8), c: u8, n: usize) !void {
     var i: usize = 0;
     while (i < n) : (i += 1) try out.append(allocator, c);
+}
+
+test "fnPrintf: %q doubles single quotes" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%q" }, .{ .text = "it's" } };
+    const r = try fnPrintf(a, &args);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("it''s", r.text);
+}
+
+test "fnPrintf: %Q wraps and quotes; NULL → bare NULL" {
+    const a = std.testing.allocator;
+    var args1 = [_]Value{ .{ .text = "%Q" }, .{ .text = "x" } };
+    const r1 = try fnPrintf(a, &args1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("'x'", r1.text);
+
+    var args2 = [_]Value{ .{ .text = "%Q" }, .null };
+    const r2 = try fnPrintf(a, &args2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("NULL", r2.text);
+}
+
+test "fnPrintf: %w doubles double quotes" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%w" }, .{ .text = "a\"b" } };
+    const r = try fnPrintf(a, &args);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("a\"\"b", r.text);
+}
+
+test "fnPrintf: %.3q truncates BEFORE doubling" {
+    // sqlite3: precision counts input chars before quote-doubling expands.
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%.3q" }, .{ .text = "ab'cdef" } };
+    const r = try fnPrintf(a, &args);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("ab''", r.text);
+}
+
+test "fnPrintf: %q truncates at embedded NUL byte (C-string convention)" {
+    const a = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%q" }, .{ .text = "ab\x00cd" } };
+    const r = try fnPrintf(a, &args);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("ab", r.text);
+}
+
+test "fnPrintf: %q NULL → (NULL); %Q NULL → NULL; precision applies" {
+    const a = std.testing.allocator;
+    var p1 = [_]Value{ .{ .text = "%q" }, .null };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("(NULL)", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "%.4q" }, .null };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("(NUL", r2.text);
 }

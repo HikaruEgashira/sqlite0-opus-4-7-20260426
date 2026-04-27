@@ -6,6 +6,7 @@ const fmt_mod = @import("funcs_format.zig");
 const time_mod = @import("funcs_time.zig");
 const math_mod = @import("funcs_math.zig");
 const json_mod = @import("funcs_json.zig");
+const match = @import("match.zig");
 const database = @import("database.zig");
 
 const Value = util.Value;
@@ -42,6 +43,8 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "ltrim")) return text.fnTrim(allocator, args, .left);
     if (util.eqlIgnoreCase(name, "rtrim")) return text.fnTrim(allocator, args, .right);
     if (util.eqlIgnoreCase(name, "instr")) return text.fnInstr(allocator, args);
+    if (util.eqlIgnoreCase(name, "like")) return match.fnLike(allocator, args);
+    if (util.eqlIgnoreCase(name, "glob")) return match.fnGlob(allocator, args);
     if (util.eqlIgnoreCase(name, "char")) return text.fnChar(allocator, args);
     if (util.eqlIgnoreCase(name, "unicode")) return text.fnUnicode(allocator, args);
     if (util.eqlIgnoreCase(name, "random")) return fnRandom(args);

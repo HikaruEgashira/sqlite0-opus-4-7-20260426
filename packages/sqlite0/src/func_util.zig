@@ -45,6 +45,20 @@ pub fn ensureBytes(allocator: std.mem.Allocator, v: Value) Error![]u8 {
     return ensureText(allocator, v);
 }
 
+/// Count UTF-8 *characters* in `bytes` using sqlite3's lead-byte rule (every
+/// non-continuation byte starts a new character). Used both by `length()`
+/// (UTF-8 char count) and by `like()` ESCAPE-arg validation (sqlite3 requires
+/// the escape to be exactly one UTF-8 character, not byte). Invalid input
+/// (orphan leaders) counts each non-continuation byte as one — matches the
+/// `SQLITE_SKIP_UTF8` loop.
+pub fn utf8CharCount(bytes: []const u8) usize {
+    var n: usize = 0;
+    for (bytes) |b| {
+        if ((b & 0xC0) != 0x80) n += 1;
+    }
+    return n;
+}
+
 pub fn toIntCoerce(v: Value) Error!i64 {
     return switch (v) {
         .integer => |i| i,

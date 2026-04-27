@@ -384,6 +384,19 @@ pub const Parser = struct {
                 self.advance();
                 return ast.makeLiteral(self.allocator, Value{ .integer = 0 });
             },
+            .keyword_like, .keyword_glob => {
+                // sqlite3's grammar treats `LIKE` / `GLOB` as fallback
+                // keywords: when they appear in expression-start position
+                // followed by `(`, they are scalar function calls
+                // (`like(pattern, text)` / `glob(pattern, text)`). In any
+                // other position they are operator-only — we don't
+                // synthesize an identifier here, only the call form, so
+                // a bare `SELECT like` still errors.
+                const fname_tok = self.cur;
+                self.advance();
+                if (self.cur.kind != .lparen) return Error.SyntaxError;
+                return parser_call.parseFunctionCallTail(self, fname_tok.slice(self.src));
+            },
             .lparen => {
                 self.advance();
                 if (self.cur.kind == .keyword_select) {

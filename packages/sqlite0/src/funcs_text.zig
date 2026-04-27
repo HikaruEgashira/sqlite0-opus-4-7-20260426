@@ -9,27 +9,12 @@ const util = @import("func_util.zig");
 const Value = util.Value;
 const Error = util.Error;
 
-/// Count UTF-8 *characters* in `bytes` using sqlite3's lead-byte rule:
-/// every byte that is not a UTF-8 continuation byte (`0x80..0xBF`) starts
-/// a new character. Invalid sequences (orphan leaders, lone continuations)
-/// are counted as if each non-continuation byte were its own character —
-/// this matches the loop in sqlite3 `func.c::lengthFunc` (`SQLITE_SKIP_UTF8`
-/// stops at the next non-continuation byte even when the prior leader
-/// promised more), so byte-equal output is preserved on malformed input.
-fn utf8CharCount(bytes: []const u8) usize {
-    var n: usize = 0;
-    for (bytes) |b| {
-        if ((b & 0xC0) != 0x80) n += 1;
-    }
-    return n;
-}
-
 pub fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len != 1) return Error.WrongArgumentCount;
     const v = args[0];
     return switch (v) {
         .null => Value.null,
-        .text => |t| Value{ .integer = @intCast(utf8CharCount(t)) },
+        .text => |t| Value{ .integer = @intCast(util.utf8CharCount(t)) },
         .blob => |b| Value{ .integer = @intCast(b.len) },
         .integer, .real => blk: {
             const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
