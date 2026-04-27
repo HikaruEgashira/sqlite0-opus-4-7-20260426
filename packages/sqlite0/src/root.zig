@@ -19,6 +19,7 @@ pub const eval_subquery = @import("eval_subquery.zig");
 pub const eval_column = @import("eval_column.zig");
 pub const parser = @import("parser.zig");
 pub const parser_predicate = @import("parser_predicate.zig");
+pub const parser_call = @import("parser_call.zig");
 pub const select = @import("select.zig");
 pub const select_post = @import("select_post.zig");
 pub const stmt = @import("stmt.zig");

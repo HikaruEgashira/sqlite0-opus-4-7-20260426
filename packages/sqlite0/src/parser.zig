@@ -6,6 +6,7 @@ const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 const parser_predicate = @import("parser_predicate.zig");
 const parser_cast = @import("parser_cast.zig");
+const parser_call = @import("parser_call.zig");
 const database = @import("database.zig");
 
 const Token = lex.Token;
@@ -321,7 +322,7 @@ pub const Parser = struct {
                 return inner;
             },
             .identifier => return self.parseIdentifierExpr(),
-            .keyword_case => return self.parseCase(),
+            .keyword_case => return parser_call.parseCase(self),
             .keyword_exists => {
                 self.advance();
                 return parser_predicate.parseExists(self);
@@ -346,7 +347,7 @@ pub const Parser = struct {
         const name = self.cur.slice(self.src);
         self.advance();
         if (self.cur.kind == .lparen) {
-            return self.parseFunctionCallTail(name);
+            return parser_call.parseFunctionCallTail(self, name);
         }
         if (self.cur.kind == .dot) {
             self.advance();
@@ -358,109 +359,6 @@ pub const Parser = struct {
         return ast.makeColumnRef(self.allocator, null, name);
     }
 
-    /// Function-call body parser, called after the name and `(` have been
-    /// consumed by `parseIdentifierExpr`.
-    ///
-    /// `name(*)` is the aggregate-`*` form (`count(*)`). It's modeled as a
-    /// 0-arg call because `count()`/`count(*)`/`count(1)` all behave
-    /// identically as "count rows" once aggregate dispatch sees a 0-arg or
-    /// always-truthy arg. The `*` is consumed silently — distinguishing it
-    /// from a true 0-arg call would require an AST shape we don't need.
-    fn parseFunctionCallTail(self: *Parser, name: []const u8) Error!*ast.Expr {
-        self.advance(); // consume lparen
-        var args: std.ArrayList(*ast.Expr) = .empty;
-        errdefer {
-            for (args.items) |a| a.deinit(self.allocator);
-            args.deinit(self.allocator);
-        }
-        // Optional DISTINCT modifier (sqlite3 allows this on any function call;
-        // aggregate dispatch enforces the "exactly one argument" rule). `ALL`
-        // is accepted as the explicit non-distinct counterpart to keep parity
-        // with sqlite3 (`count(ALL x)`).
-        var distinct = false;
-        if (self.cur.kind == .keyword_distinct) {
-            distinct = true;
-            self.advance();
-        } else if (self.cur.kind == .keyword_all) {
-            self.advance();
-        }
-        if (self.cur.kind == .star) {
-            self.advance();
-        } else if (self.cur.kind != .rparen) {
-            try args.ensureUnusedCapacity(self.allocator, 1);
-            args.appendAssumeCapacity(try self.parseExpr());
-            while (self.cur.kind == .comma) {
-                self.advance();
-                try args.ensureUnusedCapacity(self.allocator, 1);
-                args.appendAssumeCapacity(try self.parseExpr());
-            }
-        }
-        try self.expect(.rparen);
-        const args_slice = try args.toOwnedSlice(self.allocator);
-        return ast.makeFuncCall(self.allocator, name, args_slice, distinct) catch |err| {
-            for (args_slice) |a| a.deinit(self.allocator);
-            self.allocator.free(args_slice);
-            return err;
-        };
-    }
-
-    /// SQL CASE expression. Two forms:
-    ///   simple:   CASE expr WHEN v1 THEN r1 ... [ELSE rd] END
-    ///             — first WHEN whose value `=` the subject wins (truthy
-    ///             check; NULL = NULL is NULL → false, so NULL never matches)
-    ///   searched: CASE WHEN c1 THEN r1 ... [ELSE rd] END
-    ///             — first WHEN whose condition is truthy wins
-    /// Returns NULL when no WHEN matches and no ELSE is provided.
-    fn parseCase(self: *Parser) Error!*ast.Expr {
-        self.advance(); // consume CASE
-
-        var scrutinee: ?*ast.Expr = null;
-        errdefer if (scrutinee) |s| s.deinit(self.allocator);
-
-        if (self.cur.kind != .keyword_when) {
-            scrutinee = try self.parseExpr();
-        }
-
-        var branches: std.ArrayList(ast.Expr.CaseBranch) = .empty;
-        errdefer {
-            for (branches.items) |b| {
-                b.when.deinit(self.allocator);
-                b.then.deinit(self.allocator);
-            }
-            branches.deinit(self.allocator);
-        }
-
-        if (self.cur.kind != .keyword_when) return Error.SyntaxError;
-
-        while (self.cur.kind == .keyword_when) {
-            self.advance();
-            const when = try self.parseExpr();
-            errdefer when.deinit(self.allocator);
-            try self.expect(.keyword_then);
-            const then_expr = try self.parseExpr();
-            errdefer then_expr.deinit(self.allocator);
-            try branches.ensureUnusedCapacity(self.allocator, 1);
-            branches.appendAssumeCapacity(.{ .when = when, .then = then_expr });
-        }
-
-        var else_branch: ?*ast.Expr = null;
-        errdefer if (else_branch) |eb| eb.deinit(self.allocator);
-        if (self.cur.kind == .keyword_else) {
-            self.advance();
-            else_branch = try self.parseExpr();
-        }
-        try self.expect(.keyword_end);
-
-        const branches_slice = try branches.toOwnedSlice(self.allocator);
-        return ast.makeCaseExpr(self.allocator, scrutinee, branches_slice, else_branch) catch |err| {
-            for (branches_slice) |b| {
-                b.when.deinit(self.allocator);
-                b.then.deinit(self.allocator);
-            }
-            self.allocator.free(branches_slice);
-            return err;
-        };
-    }
 };
 
 /// Decode one ASCII hex digit. Caller must ensure the byte was already
