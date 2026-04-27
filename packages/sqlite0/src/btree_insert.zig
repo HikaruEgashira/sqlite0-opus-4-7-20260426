@@ -239,7 +239,7 @@ test "insertLeafTableCell: into empty page" {
     defer testing.allocator.free(cells);
     try testing.expectEqual(@as(usize, 1), cells.len);
     try testing.expectEqual(@as(i64, 1), cells[0].rowid);
-    try testing.expectEqualSlices(u8, &rec, cells[0].record_bytes);
+    try testing.expectEqualSlices(u8, &rec, cells[0].inline_bytes);
 }
 
 test "insertLeafTableCell: maintains rowid sort order on out-of-order insert" {
@@ -263,7 +263,7 @@ test "insertLeafTableCell: maintains rowid sort order on out-of-order insert" {
     try testing.expectEqual(@as(i64, 1), cells[0].rowid);
     try testing.expectEqual(@as(i64, 2), cells[1].rowid);
     try testing.expectEqual(@as(i64, 3), cells[2].rowid);
-    try testing.expectEqualSlices(u8, &r2, cells[1].record_bytes);
+    try testing.expectEqualSlices(u8, &r2, cells[1].inline_bytes);
 }
 
 test "insertLeafTableCell: appends to non-empty page (rowid > all)" {
@@ -338,7 +338,7 @@ test "rebuildLeafTablePage: round-trip three cells" {
     try testing.expectEqual(@as(i64, 1), parsed[0].rowid);
     try testing.expectEqual(@as(i64, 2), parsed[1].rowid);
     try testing.expectEqual(@as(i64, 3), parsed[2].rowid);
-    try testing.expectEqualSlices(u8, &r2, parsed[1].record_bytes);
+    try testing.expectEqualSlices(u8, &r2, parsed[1].inline_bytes);
 }
 
 test "rebuildLeafTablePage: empty cell list yields valid empty leaf" {

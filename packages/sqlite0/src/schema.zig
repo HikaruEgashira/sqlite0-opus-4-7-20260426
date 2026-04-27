@@ -29,6 +29,7 @@ const database = @import("database.zig");
 const pager_mod = @import("pager.zig");
 const btree = @import("btree.zig");
 const btree_walk = @import("btree_walk.zig");
+const btree_overflow = @import("btree_overflow.zig");
 const btree_insert = @import("btree_insert.zig");
 const record = @import("record.zig");
 const record_encode = @import("record_encode.zig");
@@ -69,14 +70,21 @@ pub fn loadFromPager(db: *database.Database, p: *pager_mod.Pager) Error!void {
     var walker = btree_walk.TableLeafWalker.init(a, p, 1);
     defer walker.deinit();
 
+    const usable_size = try p.usableSize();
     while (try walker.next()) |leaf| {
         const cells = try btree.parseLeafTablePage(
             a,
             leaf.bytes,
             leaf.header_offset,
-            pager_mod.PAGE_SIZE,
+            usable_size,
         );
-        for (cells) |cell| try registerCell(db, a, cell.record_bytes);
+        for (cells) |cell| {
+            // Assemble the full payload (chain walk for overflow cells;
+            // direct slice when inline-only). sqlite_schema rows are
+            // typically tiny but a long CREATE TRIGGER body could spill.
+            const full = try btree_overflow.assemblePayload(a, p, cell, usable_size);
+            try registerCell(db, a, full);
+        }
     }
 }
 

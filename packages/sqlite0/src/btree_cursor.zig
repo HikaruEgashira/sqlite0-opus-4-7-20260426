@@ -33,6 +33,7 @@ const value_mod = @import("value.zig");
 const cursor_mod = @import("cursor.zig");
 const btree = @import("btree.zig");
 const btree_walk = @import("btree_walk.zig");
+const btree_overflow = @import("btree_overflow.zig");
 const pager_mod = @import("pager.zig");
 const record = @import("record.zig");
 
@@ -57,6 +58,12 @@ pub const BtreeCursor = struct {
     column_names: []const []const u8,
 
     walker: TableLeafWalker,
+    /// Cached usable_size (PAGE_SIZE − reserved). Read once on first
+    /// advance and reused — evaluating `pager.usableSize()` on every
+    /// leaf would re-fetch page 1, which evicts the just-loaded leaf
+    /// when `cache_capacity` is at the minimum (the page-churn test
+    /// exercises exactly this).
+    usable_size: ?usize = null,
     /// Cells of the current leaf, owned by `arena`. `null` before
     /// `rewind()` and after EOF.
     current_cells: ?[]LeafTableCell = null,
@@ -89,12 +96,28 @@ pub const BtreeCursor = struct {
         self.walker.deinit();
     }
 
+    /// Memoised `pager.usableSize()`. Computing it eagerly per leaf
+    /// would re-fetch page 1 between every parse, which evicts the
+    /// just-loaded leaf when `cache_capacity == 1` (the page-churn
+    /// test exercises exactly this).
+    fn cachedUsableSize(self: *BtreeCursor) Error!usize {
+        if (self.usable_size) |u| return u;
+        const u = try self.pager.usableSize();
+        self.usable_size = u;
+        return u;
+    }
+
     pub fn cursor(self: *BtreeCursor) Cursor {
         return .{ .impl = self, .vtable = &btree_vtable };
     }
 
     fn rewindFn(impl: *anyopaque) Error!void {
         const self: *BtreeCursor = @ptrCast(@alignCast(impl));
+        // Prime the cached usable_size BEFORE any walker.next() call.
+        // The first cachedUsableSize() pulls page 1, which can evict
+        // a freshly-cached leaf when cache_capacity == 1 — and the
+        // walker hands back a borrowed slice into that buffer.
+        _ = try self.cachedUsableSize();
         // TableLeafWalker has no rewind primitive; tear down and re-init.
         self.walker.deinit();
         self.walker = TableLeafWalker.init(self.arena, self.pager, self.root_page);
@@ -153,13 +176,11 @@ pub const BtreeCursor = struct {
                 return;
             }
             const leaf = next_leaf.?;
-            // PAGE_SIZE is also the usable_size in Iter25 (no reserved
-            // space yet — Phase 4 may surface a tunable).
             const cells = try btree.parseLeafTablePage(
                 self.arena,
                 leaf.bytes,
                 leaf.header_offset,
-                pager_mod.PAGE_SIZE,
+                try self.cachedUsableSize(),
             );
             self.current_cells = cells;
             self.cell_idx = 0;
@@ -169,7 +190,16 @@ pub const BtreeCursor = struct {
     fn decodeCurrentRow(self: *BtreeCursor) Error!void {
         const cells = self.current_cells.?;
         const cell = cells[self.cell_idx];
-        const raw = try record.decodeRecord(self.arena, cell.record_bytes);
+        // Assemble the full payload — for inline-only cells this returns
+        // `cell.inline_bytes` directly (no copy); for overflow cells it
+        // walks the chain into an arena buffer.
+        const full = try btree_overflow.assemblePayload(
+            self.arena,
+            self.pager,
+            cell,
+            try self.cachedUsableSize(),
+        );
+        const raw = try record.decodeRecord(self.arena, full);
         // Dupe TEXT/BLOB into the arena so the Values survive page
         // eviction (the unified arena lifetime contract).
         for (raw) |*v| {
@@ -197,277 +227,5 @@ pub const BtreeCursor = struct {
     };
 };
 
-// -- tests --
-
-const testing = std.testing;
-const test_util = @import("btree_test_util.zig");
-const PAGE_SIZE = pager_mod.PAGE_SIZE;
-
-var bc_test_counter: std.atomic.Value(u32) = .init(0);
-
-fn makeTempPath(suffix: []const u8) ![]u8 {
-    const tmpdir_raw = std.c.getenv("TMPDIR");
-    const tmpdir_slice: []const u8 = if (tmpdir_raw) |p| std.mem.span(@as([*:0]const u8, p)) else "/tmp";
-    const trimmed = std.mem.trimEnd(u8, tmpdir_slice, "/");
-    const pid = std.c.getpid();
-    const seq = bc_test_counter.fetchAdd(1, .seq_cst);
-    return std.fmt.allocPrint(testing.allocator, "{s}/sqlite0-bcursor-test-{d}-{d}-{s}.db", .{ trimmed, pid, seq, suffix });
-}
-
-fn unlinkPath(path: []const u8) void {
-    const path_z = testing.allocator.dupeZ(u8, path) catch return;
-    defer testing.allocator.free(path_z);
-    _ = std.c.unlink(path_z.ptr);
-}
-
-fn writePages(path: []const u8, pages: []const []const u8) !void {
-    const path_z = try testing.allocator.dupeZ(u8, path);
-    defer testing.allocator.free(path_z);
-    const flags: std.c.O = .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true };
-    const fd = std.c.open(path_z.ptr, flags, @as(std.c.mode_t, 0o644));
-    if (fd < 0) return error.OpenFailed;
-    defer _ = std.c.close(fd);
-    const total = pages.len * PAGE_SIZE;
-    const buf = try testing.allocator.alloc(u8, total);
-    defer testing.allocator.free(buf);
-    @memset(buf, 0);
-    for (pages, 0..) |p, i| {
-        std.debug.assert(p.len == PAGE_SIZE);
-        @memcpy(buf[i * PAGE_SIZE .. (i + 1) * PAGE_SIZE], p);
-    }
-    const w = std.c.write(fd, buf.ptr, total);
-    if (w != @as(isize, @intCast(total))) return error.WriteFailed;
-}
-
-test "BtreeCursor: empty B-tree (root leaf, 0 cells)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const path = try makeTempPath("empty");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    const empty_inputs = [_]test_util.TestCellInput{};
-    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &empty_inputs);
-    defer testing.allocator.free(page1);
-    try writePages(path, &[_][]const u8{page1});
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
-    defer bc.deinit();
-    const c = bc.cursor();
-
-    try c.rewind();
-    try testing.expect(c.isEof());
-}
-
-test "BtreeCursor: walks rows in rowid order, decodes columns" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const path = try makeTempPath("walk");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    // 3 rows on page 1: each has one INTEGER column.
-    const r1 = [_]u8{ 0x02, 0x01, 0x05 };
-    const r2 = [_]u8{ 0x02, 0x01, 0x0a };
-    const r3 = [_]u8{ 0x02, 0x01, 0x0f };
-    const inputs = [_]test_util.TestCellInput{
-        .{ .rowid = 1, .record = &r1 },
-        .{ .rowid = 2, .record = &r2 },
-        .{ .rowid = 3, .record = &r3 },
-    };
-    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &inputs);
-    defer testing.allocator.free(page1);
-    try writePages(path, &[_][]const u8{page1});
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
-    defer bc.deinit();
-    const c = bc.cursor();
-
-    try c.rewind();
-    var seen: usize = 0;
-    while (!c.isEof()) : (try c.next()) {
-        const v = try c.column(0);
-        const expected: i64 = @intCast(5 * (seen + 1));
-        try testing.expectEqual(expected, v.integer);
-        seen += 1;
-    }
-    try testing.expectEqual(@as(usize, 3), seen);
-}
-
-test "BtreeCursor: TEXT survives page churn (arena dupe)" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const path = try makeTempPath("textchurn");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    // page 1 = blank (sqlite_schema slot — unused for this test)
-    // page 2 = interior, single cell pointing left=3, right=4
-    // page 3 = leaf with rowid 1, record = 1 column TEXT "alpha"
-    // page 4 = leaf with rowid 2, record = 1 column TEXT "bravo"
-    // Repeating both leaves under one interior forces the walker to
-    // pull page 3, then page 4 — which would evict page 3's bytes
-    // from the cache once we lower cache_capacity to 1.
-    const blank = try testing.allocator.alloc(u8, PAGE_SIZE);
-    defer testing.allocator.free(blank);
-    @memset(blank, 0);
-
-    const interior_cells = [_]test_util.TestInteriorCellInput{.{ .left_child = 3, .key = 1 }};
-    const page2 = try test_util.buildInteriorTablePage(testing.allocator, PAGE_SIZE, 0, 4, &interior_cells);
-    defer testing.allocator.free(page2);
-
-    // serial type for TEXT of length n: 13 + 2n. "alpha" = len 5 → 23.
-    // "bravo" = len 5 → 23. Header (1-byte varint = 1 byte total payload?
-    //   header_len varint + serial-type varint(s) → 1 + 1 = 2 bytes header.
-    //   Bytes: header_len = 0x02, serial_type = 0x17, payload = "alpha".
-    const r3 = [_]u8{ 0x02, 0x17, 'a', 'l', 'p', 'h', 'a' };
-    const r4 = [_]u8{ 0x02, 0x17, 'b', 'r', 'a', 'v', 'o' };
-    const in3 = [_]test_util.TestCellInput{.{ .rowid = 1, .record = &r3 }};
-    const in4 = [_]test_util.TestCellInput{.{ .rowid = 2, .record = &r4 }};
-    const page3 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 0, &in3);
-    defer testing.allocator.free(page3);
-    const page4 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 0, &in4);
-    defer testing.allocator.free(page4);
-
-    try writePages(path, &[_][]const u8{ blank, page2, page3, page4 });
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-    p.cache_capacity = 1; // force eviction between leaves
-
-    const names = [_][]const u8{"name"};
-    var bc = BtreeCursor.open(a, &p, 2, &names);
-    defer bc.deinit();
-    const c = bc.cursor();
-
-    try c.rewind();
-    const first = try c.column(0);
-    // Read first BEFORE advancing so we can hold it across next().
-    try testing.expectEqualStrings("alpha", first.text);
-    try c.next();
-    try testing.expect(!c.isEof());
-    const second = try c.column(0);
-    try testing.expectEqualStrings("bravo", second.text);
-    // Critical: after advancing to row 2, the bytes the FIRST Value
-    // points at are no longer in the page cache. If column() returned
-    // a borrowed slice into page 3, the next assertion would read freed
-    // memory (or the same bytes as page 4). Because BtreeCursor dupes
-    // into the arena, `first.text` is still "alpha".
-    try testing.expectEqualStrings("alpha", first.text);
-    try c.next();
-    try testing.expect(c.isEof());
-}
-
-test "BtreeCursor: rewind re-reads from the start" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const path = try makeTempPath("rewind");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    const r1 = [_]u8{ 0x02, 0x01, 0x07 };
-    const r2 = [_]u8{ 0x02, 0x01, 0x0e };
-    const inputs = [_]test_util.TestCellInput{
-        .{ .rowid = 1, .record = &r1 },
-        .{ .rowid = 2, .record = &r2 },
-    };
-    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &inputs);
-    defer testing.allocator.free(page1);
-    try writePages(path, &[_][]const u8{page1});
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
-    defer bc.deinit();
-    const c = bc.cursor();
-
-    try c.rewind();
-    try c.next();
-    try c.next();
-    try testing.expect(c.isEof());
-
-    try c.rewind();
-    try testing.expect(!c.isEof());
-    const v = try c.column(0);
-    try testing.expectEqual(@as(i64, 7), v.integer);
-}
-
-test "BtreeCursor: short record yields NULL for missing trailing columns" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const path = try makeTempPath("short");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    // Schema = 3 columns; record only encodes 1.
-    // header_len = 2, serial_type = 1 (1-byte int), value = 0x2a
-    const r = [_]u8{ 0x02, 0x01, 0x2a };
-    const inputs = [_]test_util.TestCellInput{.{ .rowid = 1, .record = &r }};
-    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &inputs);
-    defer testing.allocator.free(page1);
-    try writePages(path, &[_][]const u8{page1});
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    const names = [_][]const u8{ "a", "b", "c" };
-    var bc = BtreeCursor.open(a, &p, 1, &names);
-    defer bc.deinit();
-    const c = bc.cursor();
-
-    try c.rewind();
-    try testing.expectEqual(@as(usize, 3), c.columns().len);
-    const v0 = try c.column(0);
-    try testing.expectEqual(@as(i64, 0x2a), v0.integer);
-    const v1 = try c.column(1);
-    try testing.expect(v1 == .null);
-    const v2 = try c.column(2);
-    try testing.expect(v2 == .null);
-    try testing.expectError(Error.SyntaxError, c.column(3));
-}
-
-test "BtreeCursor: column() before rewind returns SyntaxError" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const path = try makeTempPath("noread");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    const inputs = [_]test_util.TestCellInput{};
-    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &inputs);
-    defer testing.allocator.free(page1);
-    try writePages(path, &[_][]const u8{page1});
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    const names = [_][]const u8{"x"};
-    var bc = BtreeCursor.open(a, &p, 1, &names);
-    defer bc.deinit();
-    const c = bc.cursor();
-    // Note: eof defaults to true before rewind() is called. column() on
-    // an EOF cursor returns SyntaxError per the contract.
-    try testing.expectError(Error.SyntaxError, c.column(0));
-}
+// Unit tests live in `btree_cursor_test.zig` to keep this file under
+// the 500-line discipline (CLAUDE.md "Module Splitting Rules").

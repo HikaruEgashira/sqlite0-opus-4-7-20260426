@@ -41,12 +41,14 @@ pub const pager_write_test = @import("pager_write_test.zig");
 pub const record = @import("record.zig");
 pub const record_encode = @import("record_encode.zig");
 pub const btree = @import("btree.zig");
+pub const btree_overflow = @import("btree_overflow.zig");
 pub const btree_test_util = @import("btree_test_util.zig");
 pub const btree_walk = @import("btree_walk.zig");
 pub const btree_insert = @import("btree_insert.zig");
 pub const btree_split = @import("btree_split.zig");
 pub const btree_split_test = @import("btree_split_test.zig");
 pub const btree_cursor = @import("btree_cursor.zig");
+pub const btree_cursor_test = @import("btree_cursor_test.zig");
 pub const schema = @import("schema.zig");
 pub const test_db_util = @import("test_db_util.zig");
 

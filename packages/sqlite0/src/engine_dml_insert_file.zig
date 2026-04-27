@@ -110,7 +110,11 @@ fn insertIntoLeafRoot(
     var combined: std.ArrayList(btree_insert.RebuildCell) = .empty;
     var max_rowid: i64 = 0;
     for (existing) |c| {
-        const dup = try a.dupe(u8, c.record_bytes);
+        // Iter26.C.1: existing oversize cells (overflow_head != 0)
+        // must round-trip through chain re-emit, which lands in C.2
+        // when RebuildCell gains an overflow_head field.
+        if (c.overflow_head != 0) return Error.UnsupportedFeature;
+        const dup = try a.dupe(u8, c.inline_bytes);
         try combined.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
         if (c.rowid > max_rowid) max_rowid = c.rowid;
     }
@@ -191,7 +195,8 @@ fn insertIntoInteriorRoot(
     }
     var combined: std.ArrayList(btree_insert.RebuildCell) = .empty;
     for (right_cells) |c| {
-        const dup = try a.dupe(u8, c.record_bytes);
+        if (c.overflow_head != 0) return Error.UnsupportedFeature; // C.2 scope
+        const dup = try a.dupe(u8, c.inline_bytes);
         try combined.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
         if (c.rowid > max_rowid) max_rowid = c.rowid;
     }

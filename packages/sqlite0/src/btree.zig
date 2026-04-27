@@ -18,13 +18,18 @@
 //! the page (counted from byte 0), so cell iteration is uniform once
 //! the header is located.
 //!
-//! ## Overflow stance
+//! ## Overflow stance (Iter26.C)
 //!
-//! Table-leaf cells whose total payload exceeds X = `usable_size - 35`
-//! spill into overflow pages with a 4-byte trailing page number. Iter25.B.2
-//! **rejects** overflow cells with `Error.IoError`. Iter26.B will add the
-//! overflow chain walk. The fail-loud rejection means real fixtures with
-//! large rows surface the limitation instead of silently truncating.
+//! Table-leaf cells whose total payload exceeds X = `usable_size − 35`
+//! spill into overflow pages with a 4-byte trailing page number. The
+//! parser detects the chain (returning `inline_bytes` of length K and
+//! a non-zero `overflow_head`); chain walking lives in
+//! `btree_overflow.zig` so consumers that don't need the full payload
+//! (e.g. cell-list iterators that only count rows) avoid pager I/O.
+//! Cells with an inline-only payload land in the same struct with
+//! `overflow_head == 0`; a corrupt cell that claims a longer payload
+//! than fits inline but has no overflow head is rejected with
+//! `Error.IoError`.
 //!
 //! ## Reference
 //!
@@ -34,6 +39,7 @@
 const std = @import("std");
 const ops = @import("ops.zig");
 const record = @import("record.zig");
+const btree_overflow = @import("btree_overflow.zig");
 
 pub const Error = ops.Error;
 
@@ -103,22 +109,28 @@ pub fn parsePageHeader(page: []const u8, header_offset: usize) Error!PageHeader 
     return h;
 }
 
-/// One leaf-table-page cell: the rowid (signed 64-bit) plus a slice into
-/// the page bytes for the record. Lifetime of `record_bytes` matches the
-/// `page` slice — callers keeping it past page eviction must dupe.
+/// One leaf-table-page cell. `inline_bytes` slices the K (or full P)
+/// payload bytes that live inline on the page; `payload_len` is the
+/// full P; `overflow_head` is 0 when there's no chain, otherwise the
+/// first overflow page number (caller walks via `btree_overflow.assemblePayload`).
+/// Lifetime of `inline_bytes` matches the `page` slice — callers keeping
+/// it past page eviction must dupe.
 pub const LeafTableCell = struct {
     rowid: i64,
-    record_bytes: []const u8,
+    inline_bytes: []const u8,
+    payload_len: usize,
+    overflow_head: u32 = 0,
 };
 
 /// Parse a leaf-table page (type 0x0d) and return its cells in pointer-
 /// array order (which is sorted by rowid per sqlite3 invariant). The
 /// returned slice is owned by `alloc` (length = `header.cell_count`);
-/// individual `record_bytes` slices borrow from `page`.
+/// individual `inline_bytes` slices borrow from `page`.
 ///
 /// `header_offset` is 0 for every page except page 1 (which has 100).
-/// `usable_size` is page_size − reserved_space (4096 for the Iter25.A
-/// Pager). Used only to compute the overflow threshold X.
+/// `usable_size` is page_size − reserved_space (4096 default; sqlite3
+/// CLI emits 12 reserved → 4084). Drives the K/M overflow split per
+/// sqlite.org/fileformat.html §1.6 — see `btree_overflow.inlineSplitForPayload`.
 pub fn parseLeafTablePage(
     alloc: std.mem.Allocator,
     page: []const u8,
@@ -134,9 +146,6 @@ pub fn parseLeafTablePage(
     const cells = try alloc.alloc(LeafTableCell, h.cell_count);
     errdefer alloc.free(cells);
 
-    // X (overflow threshold) for table-leaf: payload ≤ X stays inline.
-    const x: usize = usable_size - 35;
-
     var i: usize = 0;
     while (i < h.cell_count) : (i += 1) {
         const cell_offset: usize = readU16(page, ptr_array_offset + i * 2);
@@ -144,22 +153,39 @@ pub fn parseLeafTablePage(
 
         const cell_slice = page[cell_offset..];
         const payload_len_v = try record.decodeVarint(cell_slice);
-        if (payload_len_v.value > x) {
-            // Overflow page chain — not yet supported. Fail loudly so
-            // future fixtures with large rows surface the limitation.
-            return Error.IoError;
-        }
         const payload_len: usize = @intCast(payload_len_v.value);
 
         const rowid_v = try record.decodeVarint(cell_slice[payload_len_v.bytes_consumed..]);
         const rowid: i64 = @bitCast(rowid_v.value);
 
         const record_start = cell_offset + payload_len_v.bytes_consumed + rowid_v.bytes_consumed;
-        if (record_start + payload_len > page.len) return Error.IoError;
+
+        // Spec K/M split decides how much of the payload lives inline
+        // and whether a 4-byte overflow head pointer follows.
+        const split = btree_overflow.inlineSplitForPayload(payload_len, usable_size);
+        const inline_len = split.inline_len;
+
+        const tail_size: usize = if (split.spill_len > 0) 4 else 0;
+        if (record_start + inline_len + tail_size > page.len) return Error.IoError;
+
+        var overflow_head: u32 = 0;
+        if (split.spill_len > 0) {
+            const ohead_off = record_start + inline_len;
+            overflow_head = (@as(u32, page[ohead_off]) << 24) |
+                (@as(u32, page[ohead_off + 1]) << 16) |
+                (@as(u32, page[ohead_off + 2]) << 8) |
+                @as(u32, page[ohead_off + 3]);
+            // A spill-bearing cell with a zero head is corrupt — sqlite3
+            // would never emit this and it would silently truncate the
+            // payload on assemble. Fail loudly.
+            if (overflow_head == 0) return Error.IoError;
+        }
 
         cells[i] = .{
             .rowid = rowid,
-            .record_bytes = page[record_start .. record_start + payload_len],
+            .inline_bytes = page[record_start .. record_start + inline_len],
+            .payload_len = payload_len,
+            .overflow_head = overflow_head,
         };
     }
     return cells;
@@ -306,8 +332,10 @@ test "parseLeafTablePage: three cells in rowid order" {
     try testing.expectEqual(@as(i64, 3), cells[2].rowid);
 
     // Decode the record bytes for cell 1 to verify the slice points at
-    // the right place.
-    const decoded = try record.decodeRecord(testing.allocator, cells[1].record_bytes);
+    // the right place. No overflow → inline_bytes IS the full payload.
+    try testing.expectEqual(@as(u32, 0), cells[1].overflow_head);
+    try testing.expectEqual(cells[1].inline_bytes.len, cells[1].payload_len);
+    const decoded = try record.decodeRecord(testing.allocator, cells[1].inline_bytes);
     defer testing.allocator.free(decoded);
     try testing.expectEqual(@as(i64, 14), decoded[0].integer);
 }
@@ -326,9 +354,11 @@ test "parseLeafTablePage: header at offset 100 (page 1)" {
     try testing.expectEqual(@as(i64, 99), cells[0].rowid);
 }
 
-test "parseLeafTablePage: oversize payload triggers overflow rejection" {
+test "parseLeafTablePage: oversize payload with zero overflow head → IoError" {
     // Hand-build a page where the cell claims a payload length larger
-    // than X = usable_size - 35. Should reject with IoError.
+    // than X but leaves the overflow head pointer (4 bytes after the
+    // inline_len portion) as zeros. Iter26.C requires a non-zero head
+    // for any spilled payload — silent zero would truncate on assemble.
     const usable: usize = 256;
     const page = try testing.allocator.alloc(u8, usable);
     defer testing.allocator.free(page);
@@ -342,14 +372,47 @@ test "parseLeafTablePage: oversize payload triggers overflow rejection" {
     // Cell pointer array: ptr 0 = 16
     page[8] = 0x00;
     page[9] = 0x10;
-    // Cell at offset 16: payload_len varint = 1000 (= 0x87 0x68), rowid = 1, then garbage.
+    // Cell at offset 16: payload_len varint = 1000 (overflow), rowid = 1.
     var tmp: [9]u8 = undefined;
     const pl_n = record.encodeVarint(1000, &tmp);
     @memcpy(page[16 .. 16 + pl_n], tmp[0..pl_n]);
-    const rid_n = record.encodeVarint(1, page[16 + pl_n ..]);
-    _ = rid_n;
+    _ = record.encodeVarint(1, page[16 + pl_n ..]);
 
     try testing.expectError(Error.IoError, parseLeafTablePage(testing.allocator, page, 0, usable));
+}
+
+test "parseLeafTablePage: oversize payload with non-zero overflow head parses" {
+    // Same hand-built page as above but with a non-zero overflow head
+    // pointer in the 4 bytes following the inline portion. We're not
+    // walking the chain here — just confirming parse accepts the cell.
+    const usable: usize = 256;
+    const page = try testing.allocator.alloc(u8, usable);
+    defer testing.allocator.free(page);
+    @memset(page, 0);
+
+    page[0] = 0x0d;
+    page[3] = 0x00;
+    page[4] = 0x01; // cell_count = 1
+    page[5] = 0x00;
+    page[6] = 0x10; // cell_content_area = 16
+    page[8] = 0x00;
+    page[9] = 0x10;
+    var tmp: [9]u8 = undefined;
+    const pl_n = record.encodeVarint(1000, &tmp);
+    @memcpy(page[16 .. 16 + pl_n], tmp[0..pl_n]);
+    const rid_n_v = record.encodeVarint(1, page[16 + pl_n ..]);
+    const record_start = 16 + pl_n + rid_n_v;
+    // inlineSplitForPayload(1000, 256) → inline_len = M = 7, spill = 993.
+    // Place a non-zero head pointer at record_start + 7.
+    const head_off = record_start + 7;
+    page[head_off + 3] = 42; // u32 BE = 42
+
+    const cells = try parseLeafTablePage(testing.allocator, page, 0, usable);
+    defer testing.allocator.free(cells);
+    try testing.expectEqual(@as(usize, 1), cells.len);
+    try testing.expectEqual(@as(usize, 1000), cells[0].payload_len);
+    try testing.expectEqual(@as(usize, 7), cells[0].inline_bytes.len);
+    try testing.expectEqual(@as(u32, 42), cells[0].overflow_head);
 }
 
 test "parseLeafTablePage: cell pointer beyond page → IoError" {

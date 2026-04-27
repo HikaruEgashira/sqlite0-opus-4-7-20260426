@@ -160,7 +160,12 @@ fn modifyOneLeaf(
     var rebuilt: std.ArrayList(btree_insert.RebuildCell) = .empty;
     var changed: u64 = 0;
     for (cells) |c| {
-        const row_values = try decodeRowPadded(a, c.record_bytes, t.columns.len);
+        // Cells with overflow chains land in C.3 — for now reject them
+        // loudly so a fixture with oversize rows doesn't silently lose
+        // data through DELETE/UPDATE. C.1 (this iteration) wires only
+        // the SELECT read path.
+        if (c.overflow_head != 0) return Error.UnsupportedFeature;
+        const row_values = try decodeRowPadded(a, c.inline_bytes, t.columns.len);
         const ctx = eval.EvalContext{
             .allocator = a,
             .current_row = row_values,
@@ -180,7 +185,7 @@ fn modifyOneLeaf(
                 }
                 // Survivor — dupe out of `work` since rebuildLeafTablePage
                 // will overwrite the source bytes.
-                const dup = try a.dupe(u8, c.record_bytes);
+                const dup = try a.dupe(u8, c.inline_bytes);
                 try rebuilt.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
             },
             .update => |u| {
@@ -204,7 +209,7 @@ fn modifyOneLeaf(
                     try rebuilt.append(a, .{ .rowid = c.rowid, .record_bytes = new_rec });
                     changed += 1;
                 } else {
-                    const dup = try a.dupe(u8, c.record_bytes);
+                    const dup = try a.dupe(u8, c.inline_bytes);
                     try rebuilt.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
                 }
             },
