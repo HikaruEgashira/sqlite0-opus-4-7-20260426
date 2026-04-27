@@ -53,7 +53,14 @@ advisor split (Iter26.A は scope が広すぎたため細分化):
     - `btree_split.splitRightmostLeaf(pager, root_page_no, old_right_child, parent_cells, all_combined)`: orchestration。allocatePage × 2 → classifyForInterior pre-check → child 2 枚を rebuildLeafTablePage で書き → 親 root を新 interior content で `writeInteriorTablePage` → freePage(OLD) の順。crash window は B.1 と同 grade (parent-last)。
     - `engine_dml_file.executeInsertFile` を `insertIntoLeafRoot` / `insertIntoInteriorRoot` に dispatch (root header の page_type で fork)。interior path は parent → rightmost leaf を walk、combined cells を classifyForLeaf し `.fits` なら leaf rebuild、`.needs_split` なら splitRightmostLeaf、`.oversize` は B.3。
     - 4 新規 file-differential cases (100+50 で count=150 / 3 leaf 跨ぐ rowid 検索 / 跨 split record 復元 / .fits 経路 symmetry: 100 行 sqlite3-prebalanced fixture + 1 行 INSERT)。File-differential 38/38 + differential 787/787 + unit 全緑。
-  - 既知の宿題 (B.3 スコープ): `splitRightmostLeaf` は L_new + R_new を `classifyForInterior` 検査の前に allocate するため、親 overflow が発生すると 2 page が orphan + dbsize bumped で残る。B.2 fixture では絶対に発火しないが、B.3 で recursive interior split に進化させる際に allocate 順を見直す。 / DELETE / UPDATE は依然 leaf-root only (multi-page table は `Error.UnsupportedFeature`) — 対称性のため B.2.b で leaf walk → rebuild に拡張する候補。
+  - 既知の宿題 (B.3 スコープ): `splitRightmostLeaf` は L_new + R_new を `classifyForInterior` 検査の前に allocate するため、親 overflow が発生すると 2 page が orphan + dbsize bumped で残る。B.2 fixture では絶対に発火しないが、B.3 で recursive interior split に進化させる際に allocate 順を見直す。
+  - [x] Iter26.B.2.b: file-mode DELETE / UPDATE for interior-root tables。INSERT/DELETE/UPDATE の対称性を回復 — B.2 完了直後は INSERT のみ multi-page 対応で DELETE/UPDATE は leaf-root only という非対称が残っていた。`engine_dml_file` を unified per-leaf walker に refactor:
+    - `collectLeafPages(a, pager, root_page) → []u32`: depth-0 (leaf root) → `[root]`、depth-1 (interior root) → `parent.cells.left_child[*] + parent.right_child`。深さ 2 以上は `Error.UnsupportedFeature` (B.3 scope)。
+    - `ModifyOp` tagged union (`.delete{where}` / `.update{where, assignments, indices}`): DELETE と UPDATE の per-leaf 決定ロジックを 1 つのループに統合。
+    - `modifyOneLeaf`: 既存の per-leaf rebuild を抽出、ModifyOp で behaviour を fork。survivor / re-encoded cell の dupe-before-rebuild は維持。
+    - `modifyAllLeaves`: collectLeafPages → modifyOneLeaf を per-page で呼ぶ。各 leaf 独立に rebuild → writePage、合計 changed 行数を返す。
+    - 公開 API (`executeDeleteFile` / `executeUpdateFile`) shape は無変化、内部だけ refactor。empty leaf は許容 (sqlite3 traversal + integrity_check が tolerate)。per-leaf size 増の split は Iter26.B.3 で対応。
+    - 4 新規 file-differential cases (DELETE 跨 leaf / DELETE 1 leaf 全消去で empty leaf survival / UPDATE 跨 leaf / UPDATE all rows for full coverage)。`engine_dml_file.zig` は 408 → 448 行 (500 行 discipline 内)。File-differential 42/42 + differential 787/787 + unit 全緑。
   - [ ] Iter26.B.3: recursive interior split。親 interior が full のときの再帰 (B.2 を一般化)。
 - [ ] Iter26.C: overflow page chain (record が usable_size−35 を超えるケース)。
 - [ ] Iter26.refactor: Cursor write-side API (`delete_current` / `update_column_at_current` / `insert`) — file-mode write が落ち着いてから in-memory DML 経路も Cursor 経由に統一 (元 Iter24.B 由来)。
