@@ -1686,3 +1686,43 @@ SELECT unhex(1.5)
 SELECT unhex()
 SELECT unhex('1','2','3')
 
+# Iter29.X: concat / concat_ws / string_agg.
+#  - concat(args...) joins all non-NULL arguments as text. Even an
+#    all-NULL call returns an empty TEXT (not NULL). REAL/INTEGER
+#    coerce via the %g-style renderer, BLOB passes raw bytes.
+#  - concat_ws(sep, args...) NULL-propagates only on a NULL separator.
+#    NULL values among args[1..] are skipped from the join, so
+#    concat_ws('-','a',NULL,'b') is 'a-b' not 'a--b'.
+#  - string_agg(x, sep) is a strict-2-arg aggregate alias for
+#    group_concat(x, sep). The 1-arg form (no default ',') errors,
+#    matching sqlite3's "wrong number of arguments". DISTINCT 2-arg
+#    inherits the existing "DISTINCT aggregates must have exactly one
+#    argument" rejection from the generic aggregate check.
+SELECT concat('a','b','c')
+SELECT concat('hello')
+SELECT concat('a',NULL,'c')
+SELECT concat(NULL,NULL)
+SELECT typeof(concat(NULL,NULL))
+SELECT concat(1,2,3)
+SELECT concat(1.5,2.5)
+SELECT concat('a',x'42')
+SELECT typeof(concat('a','b'))
+SELECT concat()
+SELECT concat_ws('-','a','b','c')
+SELECT concat_ws('-','a',NULL,'b')
+SELECT concat_ws(NULL,'a','b')
+SELECT typeof(concat_ws(NULL,'a','b'))
+SELECT concat_ws('-',NULL,NULL)
+SELECT typeof(concat_ws('-',NULL,NULL))
+SELECT concat_ws(',',1,2,3)
+SELECT concat_ws()
+SELECT concat_ws('-')
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT string_agg(x,',') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES('a'),('b'),('c'); SELECT string_agg(x,'-') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(NULL),(3); SELECT string_agg(x,',') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT string_agg(x,',') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT typeof(string_agg(x,',')) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT string_agg(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT string_agg(DISTINCT x,',') FROM t
+SELECT concat_ws(123,'a','b')
+

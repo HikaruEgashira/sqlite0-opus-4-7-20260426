@@ -229,6 +229,68 @@ pub fn fnUnicode(allocator: std.mem.Allocator, args: []const Value) Error!Value 
     return Value{ .integer = cp };
 }
 
+/// `concat(a, b, ...)` — sqlite3's NULL-skipping TEXT concatenator.
+/// Each non-NULL argument is rendered as text (INTEGER/REAL via the
+/// %g-style renderer, BLOB as raw bytes, TEXT verbatim) and joined
+/// with no separator. NULL arguments are silently dropped — even an
+/// all-NULL call returns a non-NULL empty TEXT (sqlite3 quirk).
+/// Requires `args.len >= 1`.
+pub fn fnConcat(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len < 1) return Error.WrongArgumentCount;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (args) |a| {
+        if (a == .null) continue;
+        try appendValueAsText(allocator, &out, a);
+    }
+    return Value{ .text = try out.toOwnedSlice(allocator) };
+}
+
+/// `concat_ws(sep, a, b, ...)` — sqlite3's NULL-aware separator-join.
+/// Requires `args.len >= 2`. A NULL separator collapses the whole
+/// expression to NULL (the only case where NULL propagates). NULL
+/// values among the joinees are silently skipped, and the separator
+/// is only inserted between successive non-NULL contributors — so
+/// `concat_ws('-', 'a', NULL, 'b')` is `'a-b'`, not `'a--b'`. An
+/// all-NULL value list still returns an empty TEXT.
+pub fn fnConcatWs(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len < 2) return Error.WrongArgumentCount;
+    if (args[0] == .null) return Value.null;
+
+    const sep = try util.ensureText(allocator, args[0]);
+    defer allocator.free(sep);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var first = true;
+    for (args[1..]) |a| {
+        if (a == .null) continue;
+        if (!first) try out.appendSlice(allocator, sep);
+        try appendValueAsText(allocator, &out, a);
+        first = false;
+    }
+    return Value{ .text = try out.toOwnedSlice(allocator) };
+}
+
+fn appendValueAsText(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    v: Value,
+) !void {
+    switch (v) {
+        .text, .blob => |bytes| try out.appendSlice(allocator, bytes),
+        .integer, .real => {
+            const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                error.NotConvertible => return Error.UnsupportedFeature,
+            };
+            defer allocator.free(t);
+            try out.appendSlice(allocator, t);
+        },
+        .null => unreachable,
+    }
+}
+
 /// `unhex(text [, ignore])` — decode a hex string into a BLOB. The optional
 /// 2nd arg is a *byte set*: any input byte that occurs in `ignore` is
 /// dropped before the hex check (case-sensitive — `unhex('41x42','x')`
@@ -382,4 +444,24 @@ test "fnUnhex: odd hex length yields NULL" {
     var args = [_]Value{.{ .text = "414" }};
     const r = try fnUnhex(allocator, &args);
     try std.testing.expectEqual(Value.null, r);
+}
+
+test "fnConcat: NULL skipped, all-NULL returns empty TEXT not NULL" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .null, .null };
+    const r = try fnConcat(allocator, &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("", r.text);
+}
+
+test "fnConcatWs: NULL sep collapses, NULL value skipped" {
+    const allocator = std.testing.allocator;
+    var null_sep = [_]Value{ .null, .{ .text = "a" }, .{ .text = "b" } };
+    const r1 = try fnConcatWs(allocator, &null_sep);
+    try std.testing.expectEqual(Value.null, r1);
+
+    var null_value = [_]Value{ .{ .text = "-" }, .{ .text = "a" }, .null, .{ .text = "b" } };
+    const r2 = try fnConcatWs(allocator, &null_value);
+    defer allocator.free(r2.text);
+    try std.testing.expectEqualStrings("a-b", r2.text);
 }

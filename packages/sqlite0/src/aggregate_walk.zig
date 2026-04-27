@@ -27,14 +27,17 @@ pub fn isAggregateName(name: []const u8) bool {
         func_util.eqlIgnoreCase(name, "total") or
         func_util.eqlIgnoreCase(name, "min") or
         func_util.eqlIgnoreCase(name, "max") or
-        func_util.eqlIgnoreCase(name, "group_concat");
+        func_util.eqlIgnoreCase(name, "group_concat") or
+        func_util.eqlIgnoreCase(name, "string_agg");
 }
 
 /// Aggregate vs. scalar disambiguation. `count` is always aggregate (0 or 1
 /// arg). `sum`/`avg`/`total` are always aggregate (1 arg). `min`/`max` are
 /// aggregate only at arity 1; arity ≥ 2 is the scalar `min(a, b, ...)` /
 /// `max(a, b, ...)` form handled in `funcs.zig`. `group_concat` accepts 1 or
-/// 2 args (the second being a per-row dynamic separator).
+/// 2 args (the second being a per-row dynamic separator). `string_agg` is
+/// the same accumulator as `group_concat` but strict 2-arg (sqlite3 errors
+/// on the 1-arg form, no implicit "," default).
 pub fn isAggregateCall(fc: ast.Expr.FuncCall) bool {
     if (func_util.eqlIgnoreCase(fc.name, "count")) return fc.args.len <= 1;
     if (func_util.eqlIgnoreCase(fc.name, "sum") or
@@ -43,6 +46,7 @@ pub fn isAggregateCall(fc: ast.Expr.FuncCall) bool {
     if (func_util.eqlIgnoreCase(fc.name, "min") or
         func_util.eqlIgnoreCase(fc.name, "max")) return fc.args.len == 1;
     if (func_util.eqlIgnoreCase(fc.name, "group_concat")) return fc.args.len == 1 or fc.args.len == 2;
+    if (func_util.eqlIgnoreCase(fc.name, "string_agg")) return fc.args.len == 2;
     return false;
 }
 

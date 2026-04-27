@@ -33,6 +33,8 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "round")) return fnRound(allocator, args);
     if (util.eqlIgnoreCase(name, "min")) return fnMinMax(allocator, args, .min);
     if (util.eqlIgnoreCase(name, "max")) return fnMinMax(allocator, args, .max);
+    if (util.eqlIgnoreCase(name, "concat")) return text.fnConcat(allocator, args);
+    if (util.eqlIgnoreCase(name, "concat_ws")) return text.fnConcatWs(allocator, args);
     if (util.eqlIgnoreCase(name, "replace")) return text.fnReplace(allocator, args);
     if (util.eqlIgnoreCase(name, "hex")) return text.fnHex(allocator, args);
     if (util.eqlIgnoreCase(name, "quote")) return text.fnQuote(allocator, args);

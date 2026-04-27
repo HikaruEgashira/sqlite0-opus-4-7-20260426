@@ -234,7 +234,8 @@ pub fn aggregatorFromCall(fc: ast.Expr.FuncCall) Aggregator {
     else if (func_util.eqlIgnoreCase(fc.name, "total")) .total
     else if (func_util.eqlIgnoreCase(fc.name, "min")) .min
     else if (func_util.eqlIgnoreCase(fc.name, "max")) .max
-    else if (func_util.eqlIgnoreCase(fc.name, "group_concat")) .group_concat
+    else if (func_util.eqlIgnoreCase(fc.name, "group_concat") or
+        func_util.eqlIgnoreCase(fc.name, "string_agg")) .group_concat
     else unreachable;
     return Aggregator.init(kind, fc.distinct);
 }
