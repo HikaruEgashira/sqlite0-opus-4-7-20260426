@@ -18,7 +18,12 @@ ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が 
 ### Phase 3b: Pager + read-only B-tree (SQLite3 .db 読み込み)
 
 - [x] Iter25.A: `pager.zig` 新設。`Pager.open(allocator, file_path)` / `getPage(n)` / `close()`。PAGE_SIZE=4096, LRU 16 page (test では `cache_capacity` 直接書き換え可)。`std.c.open/pread/flock` 直接使用 (std.Io threading は別 ADR で再評価)。Errors: `DatabaseLocked` / `IoError` を `ops.Error` に追加。7 unit tests 緑 (open/cache hit/LRU evict/promote/lock contention/page 0 reject/missing file).
-- [ ] Iter25.B: `btree.zig` 新設。Table B-tree の cell parser + traversal。`BtreeCursor` を `cursor.zig` に追加。CLI に `-file <path>` 追加。差分ハーネス `run_file.sh` 新設。**OuterFrame.current_row 所有関係を BtreeCursor lifetime contract に統合**。
+- Iter25.B (sub-iterations): SQLite3 .db read pipeline. Advisor split:
+  - [x] Iter25.B.1: `record.zig` — `decodeVarint` / `serialTypeBodyLen` / `decodeColumn` / `decodeRecord`。Pure logic, no Pager 依存。Hand-constructed test 23本 (varint 1/2/9-byte, integer 1/2/3/4/6/8 byte sign-extend, REAL IEEE 754 BE, TEXT/BLOB borrow source, multi-column record, malformed → IoError).
+  - [ ] Iter25.B.2: leaf-table-page cell iterator。`[]const u8 page → iter cells → (rowid, record_bytes)`。Pager 依存なし (caller が `getPage()` 結果を渡す)。
+  - [ ] Iter25.B.3: interior-page traversal (multi-page B-tree)。Pager end-to-end が初めて exercise される地点。
+  - [ ] Iter25.B.4: `BtreeCursor` を `cursor.zig` に追加 (vtable 経由)。**OuterFrame.current_row 所有関係を BtreeCursor lifetime contract に統合**。
+  - [ ] Iter25.B.5: CLI `-file <path>` 追加 + `tests/differential/run_file.sh` 新設。**`sqlite3 fixture.db` で fixture 生成 → sqlite0 で読む moment of truth**。fixture は harness が shell で生成し Zig 側は I/O のみ (Io threading は引き続き deferred)。
 - [ ] Iter25.C: `schema.zig` 新設。`sqlite_schema` 経由で `Database.tables` populate。
 
 ### Phase 3c: 書き込み path
