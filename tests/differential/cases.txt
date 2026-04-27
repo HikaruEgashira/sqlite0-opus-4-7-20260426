@@ -1848,4 +1848,15 @@ SELECT printf('|%Q|',NULL)
 SELECT printf('|%w|',NULL)
 SELECT length(printf('%q', cast(x'27270027' as text)))
 SELECT hex(printf('%Q', cast(x'27270027' as text)))
+# Iter29.AA: printf unknown-spec abort. sqlite3 PRINTF_SQLFUNC stops at the
+# first unimplemented spec; bytes already produced are returned as TEXT, an
+# empty accumulator becomes NULL. We treat %e/%E/%g/%G as unimplemented for
+# now (Ryu vs dtoa byte-divergence on tied f64 values).
+SELECT printf('%j', 1)
+SELECT typeof(printf('%j', 1))
+SELECT printf('a%j', 1)
+SELECT printf(' %j', 1)
+SELECT printf('%5d %j', 1, 2)
+SELECT printf('%j%5d', 1, 2)
+SELECT printf('hello %a world', 1)
 

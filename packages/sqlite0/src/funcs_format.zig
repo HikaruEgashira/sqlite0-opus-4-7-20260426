@@ -11,10 +11,15 @@
 //!   * NULL (any spec)  → empty string for `%s`, `0` / `0.0` for numeric
 //!   * missing arg      → same defaults as NULL
 //!
-//! Out-of-spec specifiers (`%e`, `%g`, ...) are left unimplemented and the
-//! formatter writes the literal `%X` for X (matches sqlite3's "unknown spec"
-//! passthrough behavior closely enough for the differential cases we care
-//! about).
+//! Unimplemented specs (`%e`, `%E`, `%g`, `%G`, and any other unknown letter)
+//! follow sqlite3's PRINTF_SQLFUNC abort-on-bad-spec rule: the format scan
+//! stops at the bad spec, bytes already produced by *preceding* specs are
+//! returned as TEXT (width / precision applied normally), and an empty
+//! accumulator becomes SQL NULL — sqlite3 calls `sqlite3_result_text` with a
+//! NULL pointer, which the API converts to a NULL value. We treat `%e`/`%g`
+//! as "unimplemented" rather than emulating them because Zig stdlib's `{e}`
+//! uses Ryu shortest-round-trip canonicalization while sqlite3 uses dtoa,
+//! and the two disagree byte-for-byte on tied values like `0.95`.
 //!
 //! SQL-quoting specs (added Iter29.Z):
 //!   * `%q` — escape single-quotes by doubling. NULL → literal `(NULL)`.
@@ -127,8 +132,17 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
                 try writeQuoted(allocator, &out, v, spec, '"', false);
             },
             else => {
-                // Unknown spec: write the original `%X` literally.
-                try out.appendSlice(allocator, fmt[spec.start - 1 .. spec.end]);
+                // sqlite3 PRINTF_SQLFUNC aborts the format scan at any
+                // unimplemented / unknown spec. Bytes already accumulated by
+                // preceding specs are returned as TEXT (width/precision were
+                // applied per-spec); an empty accumulator becomes SQL NULL
+                // because sqlite3 calls sqlite3_result_text with a NULL
+                // pointer, which the API converts to a NULL value.
+                if (out.items.len == 0) {
+                    out.deinit(allocator);
+                    return Value.null;
+                }
+                return Value{ .text = try out.toOwnedSlice(allocator) };
             },
         }
     }
@@ -415,61 +429,4 @@ fn appendN(allocator: std.mem.Allocator, out: *std.ArrayList(u8), c: u8, n: usiz
     while (i < n) : (i += 1) try out.append(allocator, c);
 }
 
-test "fnPrintf: %q doubles single quotes" {
-    const a = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "%q" }, .{ .text = "it's" } };
-    const r = try fnPrintf(a, &args);
-    defer a.free(r.text);
-    try std.testing.expectEqualStrings("it''s", r.text);
-}
-
-test "fnPrintf: %Q wraps and quotes; NULL → bare NULL" {
-    const a = std.testing.allocator;
-    var args1 = [_]Value{ .{ .text = "%Q" }, .{ .text = "x" } };
-    const r1 = try fnPrintf(a, &args1);
-    defer a.free(r1.text);
-    try std.testing.expectEqualStrings("'x'", r1.text);
-
-    var args2 = [_]Value{ .{ .text = "%Q" }, .null };
-    const r2 = try fnPrintf(a, &args2);
-    defer a.free(r2.text);
-    try std.testing.expectEqualStrings("NULL", r2.text);
-}
-
-test "fnPrintf: %w doubles double quotes" {
-    const a = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "%w" }, .{ .text = "a\"b" } };
-    const r = try fnPrintf(a, &args);
-    defer a.free(r.text);
-    try std.testing.expectEqualStrings("a\"\"b", r.text);
-}
-
-test "fnPrintf: %.3q truncates BEFORE doubling" {
-    // sqlite3: precision counts input chars before quote-doubling expands.
-    const a = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "%.3q" }, .{ .text = "ab'cdef" } };
-    const r = try fnPrintf(a, &args);
-    defer a.free(r.text);
-    try std.testing.expectEqualStrings("ab''", r.text);
-}
-
-test "fnPrintf: %q truncates at embedded NUL byte (C-string convention)" {
-    const a = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "%q" }, .{ .text = "ab\x00cd" } };
-    const r = try fnPrintf(a, &args);
-    defer a.free(r.text);
-    try std.testing.expectEqualStrings("ab", r.text);
-}
-
-test "fnPrintf: %q NULL → (NULL); %Q NULL → NULL; precision applies" {
-    const a = std.testing.allocator;
-    var p1 = [_]Value{ .{ .text = "%q" }, .null };
-    const r1 = try fnPrintf(a, &p1);
-    defer a.free(r1.text);
-    try std.testing.expectEqualStrings("(NULL)", r1.text);
-
-    var p2 = [_]Value{ .{ .text = "%.4q" }, .null };
-    const r2 = try fnPrintf(a, &p2);
-    defer a.free(r2.text);
-    try std.testing.expectEqualStrings("(NUL", r2.text);
-}
+// Tests live in funcs_format_test.zig (split out for the 500-line discipline).
