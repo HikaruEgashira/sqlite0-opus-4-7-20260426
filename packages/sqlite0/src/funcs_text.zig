@@ -120,10 +120,15 @@ pub fn fnQuote(allocator: std.mem.Allocator, args: []const Value) Error!Value {
             },
         },
         .text => |t| {
+            // sqlite3 `quoteFunc` (func.c) treats TEXT as a C string and
+            // stops scanning at the first NUL byte. `quote('a' || char(0)
+            // || 'b')` → `'a'` (the post-NUL `b` is dropped). BLOBs do not
+            // truncate (`quote(x'4100')` → `X'4100'`).
+            const scan = if (std.mem.indexOfScalar(u8, t, 0)) |n| t[0..n] else t;
             var out: std.ArrayList(u8) = .empty;
             errdefer out.deinit(allocator);
             try out.append(allocator, '\'');
-            for (t) |c| {
+            for (scan) |c| {
                 if (c == '\'') try out.append(allocator, '\'');
                 try out.append(allocator, c);
             }

@@ -3030,3 +3030,17 @@ SELECT printf('%2147483648d', 1)
 SELECT length(printf('%99d', 1))
 SELECT length(printf('%9999d', 1))
 SELECT printf('%5d', 1)
+
+# quote() truncates TEXT at NUL (Iter31.A):
+#  * sqlite3 quoteFunc treats TEXT as a C string — scanning stops at
+#    the first NUL byte. `quote(char(0))` → `''` (open+close, no body),
+#    `quote('a' || char(0) || 'b')` → `'a'`.
+#  * BLOB does NOT truncate at NUL (`quote(x'00')` → `X'00'`).
+SELECT quote(char(0))
+SELECT quote('a' || char(0) || 'b')
+SELECT length(quote(char(0)))
+SELECT length(quote('a' || char(0) || 'b'))
+SELECT quote(x'00')
+SELECT quote(x'010203')
+SELECT quote(printf('%c', 9))
+SELECT quote(char(13))
