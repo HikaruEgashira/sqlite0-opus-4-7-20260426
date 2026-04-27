@@ -2768,3 +2768,25 @@ SELECT iif(0, 'a', 0, 'b')
 SELECT iif(0, 'a', 0, 'b', 'def')
 SELECT iif(0, 'a', 1, 'b', 'unreached')
 SELECT iif(0, 'a', 'b', 'c')
+
+# printf length modifier `l` / `ll` (Iter30.N): sqlite3's printf accepts
+# 1 or 2 `l`'s before the conversion char and silently ignores them
+# (internal storage is uniformly i64/f64). 3+ `l`'s, `h`, `hh`, `j`, `t`,
+# `L` are NOT accepted and fall through to the unknown-spec NULL.
+SELECT printf('%lld', 1)
+SELECT printf('%5lld', 1)
+SELECT printf('%llu', 1)
+SELECT printf('%llx', 255)
+SELECT printf('%llX', 255)
+SELECT printf('%llo', 8)
+SELECT printf('%-5lld', 1)
+SELECT printf('%05lld', 1)
+SELECT printf('%+lld', 5)
+SELECT printf('%ld', 1)
+SELECT printf('%lf', 1.5)
+SELECT printf('%llf', 1.5)
+SELECT printf('%.3lf', 1.5)
+SELECT printf('%le', 1.5)
+SELECT printf('%lg', 1.5)
+SELECT printf('%lld %lld', 1, 2)
+SELECT printf('%5.3lld', 1)

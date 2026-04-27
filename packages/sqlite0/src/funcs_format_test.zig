@@ -456,3 +456,22 @@ test "printf %c precision = repeat count" {
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("AAA", r.text);
 }
+
+test "printf length modifier: %lld / %llu / %lf accepted as alias" {
+    const a = std.testing.allocator;
+
+    var p1 = [_]Value{ .{ .text = "%lld" }, .{ .integer = 5 } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("5", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "%5lld" }, .{ .integer = 1 } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("    1", r2.text);
+
+    var p3 = [_]Value{ .{ .text = "%lf" }, .{ .real = 1.5 } };
+    const r3 = try fnPrintf(a, &p3);
+    defer a.free(r3.text);
+    try std.testing.expectEqualStrings("1.500000", r3.text);
+}

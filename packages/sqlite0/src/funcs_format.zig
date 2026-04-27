@@ -299,6 +299,16 @@ fn parseSpec(fmt: []const u8, start: usize) Spec {
             s.precision = prec;
         }
     }
+    // Length modifier: sqlite3's printf accepts `l` or `ll` (silently
+    // ignored — internal storage is uniformly i64 / f64). 3+ `l`'s,
+    // single `h`, `hh`, `j`, `t`, `L` are NOT accepted (sqlite3 falls
+    // through to the unknown-spec abort and returns empty/NULL). `z` and
+    // `q` are sqlite3 conversion specs (alias for `s` / SQL-quote), not
+    // length modifiers, so we don't consume them here.
+    if (p < fmt.len and fmt[p] == 'l') {
+        p += 1;
+        if (p < fmt.len and fmt[p] == 'l') p += 1;
+    }
     if (p < fmt.len) {
         s.conv = fmt[p];
         s.end = p + 1;
