@@ -118,6 +118,44 @@ pub fn numericAsReal(v: Value) f64 {
 /// builtins like `abs(text)`. sqlite3's behaviour comes from `sqlite3AtoF`
 /// in util.c which only accepts digit-led mantissas.
 pub fn parseFloatLoose(bytes: []const u8) f64 {
+    return parseFloatLooseOpt(bytes) orelse 0;
+}
+
+/// `sqlite3AtoF`-strict numeric parser. Trims leading/trailing ASCII
+/// whitespace, then requires the *entire* remainder to be a valid
+/// number (digits + optional `.` + optional `e±NNN`). Trailing garbage
+/// → null; this is what sqlite3's math functions (`sqrt`, `log`, …)
+/// use to decide TEXT→REAL — `sqrt('1.5xyz')` is NULL, while the
+/// printf path uses the looser `parseFloatLooseOpt` (`%f` of `'1.5xyz'`
+/// is `1.500000`).
+pub fn parseFloatStrictOpt(bytes: []const u8) ?f64 {
+    const s = std.mem.trim(u8, bytes, " \t\n\r");
+    if (s.len == 0) return null;
+    var i: usize = 0;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+    var saw_digit = false;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) saw_digit = true;
+    }
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        i += 1;
+        if (i < s.len and (s[i] == '+' or s[i] == '-')) i += 1;
+        const exp_start = i;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {}
+        if (i == exp_start) return null; // e/E without digits → reject
+    }
+    if (!saw_digit or i != s.len) return null;
+    return std.fmt.parseFloat(f64, s) catch null;
+}
+
+/// Same as `parseFloatLoose` but returns `null` when the input has no
+/// leading numeric prefix (no digits at all). sqlite3's printf math
+/// fns (e.g. `printf('%f', '1.5xyz')`) accept the prefix; the SQL math
+/// extension fns (e.g. `sqrt('1.5xyz')`) use `parseFloatStrictOpt`
+/// instead and reject trailing garbage.
+pub fn parseFloatLooseOpt(bytes: []const u8) ?f64 {
     var i: usize = 0;
     while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '\n' or bytes[i] == '\r')) i += 1;
     const start = i;
@@ -128,7 +166,7 @@ pub fn parseFloatLoose(bytes: []const u8) f64 {
         i += 1;
         while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) saw_digit = true;
     }
-    if (!saw_digit) return 0;
+    if (!saw_digit) return null;
     var end = i;
     if (i < bytes.len and (bytes[i] == 'e' or bytes[i] == 'E')) {
         var j = i + 1;

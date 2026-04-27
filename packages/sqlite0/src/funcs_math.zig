@@ -23,14 +23,20 @@ const util = @import("func_util.zig");
 const Value = util.Value;
 const Error = util.Error;
 
-/// Coerce a function argument to f64. NULL inputs short-circuit the
-/// whole call (sqlite3: any NULL arg → NULL result). TEXT/BLOB are
-/// parsed via the lenient prefix parser (`'10' → 10.0`, `'foo' →
-/// 0.0`), matching sqlite3's `CAST(... AS REAL)` shape.
+/// Coerce a function argument to f64 with sqlite3 math-extension semantics:
+///   * NULL → null (whole call short-circuits to NULL)
+///   * INTEGER / REAL → direct cast / forward
+///   * TEXT / BLOB → `parseFloatStrictOpt` (sqlite3AtoF strict): the
+///     entire string post whitespace-strip must be a valid number, no
+///     trailing garbage. `sqrt('foo')` → NULL, `sqrt('1.5xyz')` → NULL
+///     (distinct from printf's `parseFloatLooseOpt` prefix parse).
 fn argReal(v: Value) ?f64 {
     return switch (v) {
         .null => null,
-        else => util.numericAsReal(v),
+        .integer => |i| @floatFromInt(i),
+        .real => |r| r,
+        .text => |t| util.parseFloatStrictOpt(t),
+        .blob => |b| util.parseFloatStrictOpt(b),
     };
 }
 
@@ -176,30 +182,85 @@ pub fn fnAtanh(args: []const Value) Error!Value {
     return Value{ .real = std.math.atanh(x) };
 }
 
+/// `ceil` / `floor` / `trunc` preserve the input affinity:
+///   * INTEGER arg → INTEGER (no-op on integers)
+///   * REAL arg → REAL with the operation applied
+///   * TEXT arg → sqlite3 first applies numeric affinity (sqlite3_value_
+///     numeric_type): if the whole post-whitespace-trimmed string parses
+///     as a pure integer (no `.`, no `e`/`E`), treat as INTEGER; if it
+///     parses as a real (has `.` or `e`), treat as REAL. Trailing
+///     garbage / non-numeric TEXT → NULL.
 pub fn fnCeil(args: []const Value) Error!Value {
-    if (args.len != 1) return Error.WrongArgumentCount;
-    const x = argReal(args[0]) orelse return Value.null;
-    return Value{ .real = @ceil(x) };
+    return floorCeilTruncDispatch(args, .ceil);
 }
 
 pub fn fnFloor(args: []const Value) Error!Value {
-    if (args.len != 1) return Error.WrongArgumentCount;
-    const x = argReal(args[0]) orelse return Value.null;
-    return Value{ .real = @floor(x) };
+    return floorCeilTruncDispatch(args, .floor);
 }
 
 pub fn fnTrunc(args: []const Value) Error!Value {
+    return floorCeilTruncDispatch(args, .trunc);
+}
+
+const FloorCeilTrunc = enum { floor, ceil, trunc };
+
+fn floorCeilTruncDispatch(args: []const Value, op: FloorCeilTrunc) Error!Value {
     if (args.len != 1) return Error.WrongArgumentCount;
-    const x = argReal(args[0]) orelse return Value.null;
-    return Value{ .real = @trunc(x) };
+    switch (args[0]) {
+        .null => return Value.null,
+        .integer => return args[0],
+        .real => |r| return Value{ .real = applyFloorCeilTrunc(r, op) },
+        .text, .blob => |bytes| {
+            const inferred = inferTextNumericType(bytes) orelse return Value.null;
+            return switch (inferred) {
+                .integer => |i| Value{ .integer = i },
+                .real => |r| Value{ .real = applyFloorCeilTrunc(r, op) },
+                else => unreachable,
+            };
+        },
+    }
+}
+
+fn applyFloorCeilTrunc(x: f64, op: FloorCeilTrunc) f64 {
+    return switch (op) {
+        .floor => @floor(x),
+        .ceil => @ceil(x),
+        .trunc => @trunc(x),
+    };
+}
+
+/// sqlite3 numeric-affinity rule for TEXT: if the trimmed string looks
+/// like a pure integer (sign + digits, no `.`/`e`/`E`) AND fits in i64,
+/// it's an INTEGER value. Otherwise, if the string is a valid full
+/// number (with `.` or `e`), it's a REAL. Anything else is null.
+fn inferTextNumericType(bytes: []const u8) ?Value {
+    const s = std.mem.trim(u8, bytes, " \t\n\r");
+    if (s.len == 0) return null;
+    var has_real_marker = false;
+    for (s) |c| {
+        if (c == '.' or c == 'e' or c == 'E') {
+            has_real_marker = true;
+            break;
+        }
+    }
+    if (!has_real_marker) {
+        // Pure-integer shape: sign? + digits.
+        if (std.fmt.parseInt(i64, s, 10)) |i| return Value{ .integer = i } else |_| {
+            // i64 overflow — sqlite3 falls back to REAL.
+            const f = util.parseFloatStrictOpt(s) orelse return null;
+            return Value{ .real = f };
+        }
+    }
+    const f = util.parseFloatStrictOpt(s) orelse return null;
+    return Value{ .real = f };
 }
 
 /// `sign(x) ∈ {-1, 0, 1, NULL}`. Always INTEGER (not REAL) per
-/// sqlite3 docs — distinct from the rest of this module.
+/// sqlite3 docs — distinct from the rest of this module. Non-numeric
+/// TEXT (`'abc'`) and NaN both collapse to NULL.
 pub fn fnSign(args: []const Value) Error!Value {
     if (args.len != 1) return Error.WrongArgumentCount;
-    if (args[0] == .null) return Value.null;
-    const x = util.numericAsReal(args[0]);
+    const x = argReal(args[0]) orelse return Value.null;
     if (std.math.isNan(x)) return Value.null;
     if (x > 0.0) return Value{ .integer = 1 };
     if (x < 0.0) return Value{ .integer = -1 };
