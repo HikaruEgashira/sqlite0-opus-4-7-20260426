@@ -151,6 +151,25 @@ test "fnRound: -2.55 rounds toward zero side to -2.5" {
     try std.testing.expectEqual(@as(f64, -2.5), r.real);
 }
 
+test "fnRound: 2.355 rounds DOWN to 2.35 via f128 intermediate" {
+    // f64 intermediate `(2.355 + 0.005) * 100` rounds back to 2.36 because
+    // f64's 52-bit mantissa loses the sub-ulp tail (2.355 is actually
+    // stored as 2.3549999...). f128's 113-bit mantissa preserves it, so
+    // @trunc sees the actual digit — matching sqlite3's bigint-decimal
+    // round path in func.c roundFunc.
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .real = 2.355 }, .{ .integer = 2 } };
+    const r = try call(allocator, null, "round", &args);
+    try std.testing.expectEqual(@as(f64, 2.35), r.real);
+}
+
+test "fnRound: 0.145 rounds DOWN to 0.14 (IEEE bits below 0.145)" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .real = 0.145 }, .{ .integer = 2 } };
+    const r = try call(allocator, null, "round", &args);
+    try std.testing.expectEqual(@as(f64, 0.14), r.real);
+}
+
 test "fnRound: 2.45 rounds UP to 2.5 (IEEE 2.45 is slightly above)" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .{ .real = 2.45 }, .{ .integer = 1 } };

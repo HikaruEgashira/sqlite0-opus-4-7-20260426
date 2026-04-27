@@ -2472,3 +2472,27 @@ SELECT printf('%05r', 0)
 SELECT printf('hi%nworld', 5)
 SELECT printf('[%n %s]', 5, 'hi')
 SELECT printf('%nworld', 5)
+
+# --- Iter30.D: round() IEEE-bit-aware via f128 intermediate
+# Inputs whose IEEE-754 storage is just below the nominal half-step.
+# 2.355 = 2.354999...786 stored, so rounds DOWN to 2.35 (sqlite3 sees
+# the actual bits via its own decimal-conversion).
+SELECT round(2.355, 2)
+SELECT round(2.345, 2)
+SELECT round(0.145, 2)
+SELECT round(0.155, 2)
+SELECT round(0.175, 2)
+SELECT round(0.185, 2)
+SELECT round(0.245, 2)
+SELECT round(0.295, 2)
+SELECT round(0.15, 1)
+# Negative half-step values; sqlite3 applies rounder to the magnitude.
+SELECT round(-2.355, 2)
+SELECT round(-0.145, 2)
+SELECT round(-0.295, 2)
+# Large precision range and integer truncation paths still work.
+SELECT round(0.00001, 5)
+SELECT round(123456789.987654321, 4)
+SELECT round(2.5, 30)
+SELECT round(0.1 + 0.2, 1)
+SELECT round(0.1 + 0.2, 17)

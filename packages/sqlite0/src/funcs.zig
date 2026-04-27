@@ -421,17 +421,22 @@ fn fnRound(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (d <= 0) return Value{ .real = @round(x) };
     // sqlite3's printf-based round (etFLOAT path in printf.c): add a
     // half-step `rounder = 0.5 * 10^-d` to the magnitude, then truncate.
-    // This differs from `@round(x * 10^d) / 10^d`: for tied IEEE 754
-    // values like 2.55 (= 2.5499999...), our old code multiplied 10×
-    // (which FP-rounds up to 25.5) and @round'd half-away-from-zero to
-    // 26, giving 2.6 — but sqlite3 adds 0.05 (= 0.0499999...) to
-    // 2.5499999... = 2.5999999... and truncates to 2.5. The rounder is
-    // applied to the magnitude (not the signed value) so negatives
-    // round the same way: round(-2.55, 1) → -2.5.
-    const factor = std.math.pow(f64, 10, @floatFromInt(d));
-    const half = 0.5 / factor;
-    const adjusted = if (x >= 0) x + half else x - half;
-    return Value{ .real = @trunc(adjusted * factor) / factor };
+    // f64 intermediate is not enough — for inputs like `2.355` whose
+    // IEEE 754 storage is `2.354999...`, `(x + 0.005)` rounds back UP to
+    // 2.36 in f64 (52-bit mantissa) before the truncate step, producing
+    // 2.36 instead of sqlite3's 2.35. f128 (113-bit mantissa) widens the
+    // intermediate so the sub-ulp tail of the original f64 survives the
+    // half-step add, and `@trunc` sees the actual digit. The rounder is
+    // applied to the magnitude (not the signed value) so negatives round
+    // the same way: `round(-2.355, 2)` → `-2.35`.
+    var factor: f128 = 1;
+    var i: i32 = 0;
+    while (i < d) : (i += 1) factor *= 10;
+    const x128: f128 = x;
+    const half: f128 = 0.5 / factor;
+    const adjusted = if (x128 >= 0) x128 + half else x128 - half;
+    const result128 = @trunc(adjusted * factor) / factor;
+    return Value{ .real = @floatCast(result128) };
 }
 
 const MinMax = enum { min, max };
