@@ -100,11 +100,36 @@ test "fnPrintf: unknown letter %a (not implemented) aborts at spec" {
     try std.testing.expectEqualStrings("hello ", r.text);
 }
 
-test "fnPrintf: %e (deferred — Ryu vs dtoa) treated as unknown → NULL" {
+test "fnPrintf: %e renders scientific notation with C-printf exponent form" {
     const a = std.testing.allocator;
     var p = [_]Value{ .{ .text = "%e" }, .{ .real = 1.5 } };
     const r = try fnPrintf(a, &p);
-    try std.testing.expect(r == .null);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("1.500000e+00", r.text);
+}
+
+test "fnPrintf: %g strips trailing zeros and picks %f form for mid-magnitudes" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%g" }, .{ .real = 100.5 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("100.5", r.text);
+}
+
+test "fnPrintf: %g switches to %e form when |exp| crosses precision threshold" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%g" }, .{ .real = 1000000.0 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("1e+06", r.text);
+}
+
+test "fnPrintf: %G uppercases the E in exponent" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%G" }, .{ .real = 1.5e100 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("1.5E+100", r.text);
 }
 
 test "fnPrintf: %s NUL-truncates TEXT before precision" {

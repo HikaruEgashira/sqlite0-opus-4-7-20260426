@@ -2,24 +2,27 @@
 //! function.
 //!
 //! Supports the common conversion specifiers: `%d`, `%i`, `%u`, `%x`, `%X`,
-//! `%o`, `%s`, `%c`, `%f`, `%%`. Each spec accepts the standard flags
-//! (`-`, `+`, ` `, `0`, `#`), optional width, and optional precision (for
-//! integers: minimum digits; for `%f`: decimal places; for `%s`: max chars).
+//! `%o`, `%s`, `%c`, `%f`, `%e`, `%E`, `%g`, `%G`, `%%`. Each spec accepts
+//! the standard flags (`-`, `+`, ` `, `0`, `#`), optional width, and
+//! optional precision (for integers: minimum digits; for `%f`/`%e`: decimal
+//! places; for `%g`: significant digits; for `%s`: max chars).
 //!
 //! Argument coercion follows sqlite3:
 //!   * non-numeric TEXT → `0` for integer specs, `0.0` for float specs
 //!   * NULL (any spec)  → empty string for `%s`, `0` / `0.0` for numeric
 //!   * missing arg      → same defaults as NULL
 //!
-//! Unimplemented specs (`%e`, `%E`, `%g`, `%G`, and any other unknown letter)
-//! follow sqlite3's PRINTF_SQLFUNC abort-on-bad-spec rule: the format scan
-//! stops at the bad spec, bytes already produced by *preceding* specs are
-//! returned as TEXT (width / precision applied normally), and an empty
-//! accumulator becomes SQL NULL — sqlite3 calls `sqlite3_result_text` with a
-//! NULL pointer, which the API converts to a NULL value. We treat `%e`/`%g`
-//! as "unimplemented" rather than emulating them because Zig stdlib's `{e}`
-//! uses Ryu shortest-round-trip canonicalization while sqlite3 uses dtoa,
-//! and the two disagree byte-for-byte on tied values like `0.95`.
+//! Unknown spec letters follow sqlite3's PRINTF_SQLFUNC abort-on-bad-spec
+//! rule: the format scan stops at the bad spec, bytes already produced by
+//! *preceding* specs are returned as TEXT (width / precision applied
+//! normally), and an empty accumulator becomes SQL NULL — sqlite3 calls
+//! `sqlite3_result_text` with a NULL pointer, which the API converts to a
+//! NULL value.
+//!
+//! Float caveat: Zig stdlib's `{e:.N}` and `{d:.N}` use round-half-to-even
+//! while C printf uses round-half-away-from-zero. Tied values like `0.5` /
+//! `2.5` at zero-precision will diverge byte-for-byte; non-tied values
+//! (the overwhelming majority) match exactly.
 //!
 //! SQL-quoting specs (added Iter29.Z):
 //!   * `%q` — escape single-quotes by doubling. NULL → literal `(NULL)`.
@@ -34,6 +37,7 @@
 const std = @import("std");
 const util = @import("func_util.zig");
 const ops = @import("ops.zig");
+const float_fmt = @import("funcs_format_float.zig");
 
 const Value = util.Value;
 const Error = util.Error;
@@ -114,7 +118,27 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
             'f' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
-                try writeFloat(allocator, &out, v, spec);
+                try float_fmt.writeFloat(allocator, &out, v, spec);
+            },
+            'e' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try float_fmt.writeExp(allocator, &out, v, spec, false);
+            },
+            'E' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try float_fmt.writeExp(allocator, &out, v, spec, true);
+            },
+            'g' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try float_fmt.writeGeneral(allocator, &out, v, spec, false);
+            },
+            'G' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try float_fmt.writeGeneral(allocator, &out, v, spec, true);
             },
             'q' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
@@ -158,7 +182,7 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
     return Value{ .text = try out.toOwnedSlice(allocator) };
 }
 
-const Spec = struct {
+pub const Spec = struct {
     start: usize, // index of first byte after `%`
     end: usize, // one-past the conversion char
     conv: u8,
@@ -214,16 +238,6 @@ fn coerceToInt(v: Value) i64 {
         .real => |r| @intFromFloat(r),
         .text => |t| std.fmt.parseInt(i64, t, 10) catch 0,
         .blob => |b| std.fmt.parseInt(i64, b, 10) catch 0,
-    };
-}
-
-fn coerceToFloat(v: Value) f64 {
-    return switch (v) {
-        .null => 0,
-        .integer => |i| @floatFromInt(i),
-        .real => |r| r,
-        .text => |t| std.fmt.parseFloat(f64, t) catch 0,
-        .blob => |b| std.fmt.parseFloat(f64, b) catch 0,
     };
 }
 
@@ -447,40 +461,11 @@ fn writeQuoted(
     if (spec.left_align) try appendN(allocator, out, ' ', pad);
 }
 
-fn writeFloat(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    v: Value,
-    spec: Spec,
-) !void {
-    const f = coerceToFloat(v);
-    const precision: usize = spec.precision orelse 6;
-    var buf: [64]u8 = undefined;
-    const printed = std.fmt.bufPrint(&buf, "{d:.[1]}", .{ f, precision }) catch return Error.OutOfMemory;
-    var sign: ?u8 = null;
-    var body: []const u8 = printed;
-    if (printed.len > 0 and printed[0] == '-') {
-        sign = '-';
-        body = printed[1..];
-    } else if (spec.plus) {
-        sign = '+';
-    } else if (spec.space) {
-        sign = ' ';
-    }
-    const sign_len: usize = if (sign != null) 1 else 0;
-    const content_len = body.len + sign_len;
-    const pad: usize = if (content_len < spec.width) spec.width - content_len else 0;
-    const use_zero_pad = spec.zero_pad and !spec.left_align;
-    if (!spec.left_align and !use_zero_pad) try appendN(allocator, out, ' ', pad);
-    if (sign) |s| try out.append(allocator, s);
-    if (use_zero_pad) try appendN(allocator, out, '0', pad);
-    try out.appendSlice(allocator, body);
-    if (spec.left_align) try appendN(allocator, out, ' ', pad);
-}
-
-fn appendN(allocator: std.mem.Allocator, out: *std.ArrayList(u8), c: u8, n: usize) !void {
+pub fn appendN(allocator: std.mem.Allocator, out: *std.ArrayList(u8), c: u8, n: usize) !void {
     var i: usize = 0;
     while (i < n) : (i += 1) try out.append(allocator, c);
 }
 
-// Tests live in funcs_format_test.zig (split out for the 500-line discipline).
+// Float-spec impls (`%f`, `%e`, `%E`, `%g`, `%G`) live in
+// funcs_format_float.zig (500-line discipline). Tests live in
+// funcs_format_test.zig.
