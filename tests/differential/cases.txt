@@ -2044,6 +2044,19 @@ SELECT typeof(0+'NaN')
 SELECT abs('NaN')
 SELECT abs('Inf')
 SELECT abs('1.5xyz')
+# Iter29.AK: `==` operator (sqlite3 quirk: equivalent to `=`).
+# sqlite3 lexer treats `==` and `=` as the same TK_EQ token. sqlite0 was
+# rejecting `==` with SyntaxError because the lexer only consumed one `=`.
+SELECT 1==1
+SELECT 1==2
+SELECT 1=='1'
+SELECT '1'==1
+SELECT 1==1.0
+SELECT NULL==NULL
+SELECT NULL==1
+SELECT typeof(1==1)
+SELECT typeof(NULL==1)
+SELECT 1=='abc'
 
 
 

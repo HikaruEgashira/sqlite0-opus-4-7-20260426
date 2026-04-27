@@ -133,7 +133,14 @@ pub const Lexer = struct {
                 return self.single(.dot);
             },
             ';' => return self.single(.semicolon),
-            '=' => return self.single(.eq),
+            '=' => {
+                // sqlite3 accepts both `=` and `==` as the equality operator.
+                self.pos += 1;
+                if (self.peek()) |next_c| {
+                    if (next_c == '=') self.pos += 1;
+                }
+                return .{ .kind = .eq, .start = start, .end = self.pos };
+            },
             '<' => {
                 self.pos += 1;
                 if (self.peek()) |next_c| {
