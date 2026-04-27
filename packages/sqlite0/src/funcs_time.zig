@@ -135,6 +135,9 @@ fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const V
             'j' => try writeZeroPadded(allocator, &out, calendar.dayOfYear(dt), 3),
             'w' => try writeZeroPadded(allocator, &out, calendar.dayOfWeek(dt), 1),
             'u' => try writeZeroPadded(allocator, &out, isoWeekday(calendar.dayOfWeek(dt)), 1),
+            'W' => try writeZeroPadded(allocator, &out, calendar.weekOfYearMonday(dt), 2),
+            'V' => try writeZeroPadded(allocator, &out, calendar.isoWeekAndYear(dt).week, 2),
+            'G' => try writeZeroPadded(allocator, &out, calendar.isoWeekAndYear(dt).year, 4),
             'p' => try out.appendSlice(allocator, if (dt.hour < 12) "AM" else "PM"),
             'P' => try out.appendSlice(allocator, if (dt.hour < 12) "am" else "pm"),
             'R' => {

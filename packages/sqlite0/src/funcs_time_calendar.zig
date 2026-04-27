@@ -151,6 +151,61 @@ pub fn dayOfYear(dt: DateTime) u16 {
     return doy;
 }
 
+/// ISO 8601 weekday: 1=Monday, 2=Tuesday, ..., 7=Sunday. Wraps `dayOfWeek`
+/// (which is `%w` semantics: Sun=0..Sat=6) so callers needing the
+/// Mon-based form don't have to remap it themselves.
+pub fn isoWeekday(dt: DateTime) u8 {
+    const w = dayOfWeek(dt);
+    return if (w == 0) 7 else w;
+}
+
+/// ISO 8601 week-of-year (1..=53) paired with the ISO week-numbering year.
+/// Standard formula `(10 + doy - iso_wd) / 7` selects the week that
+/// contains this date's Thursday; if that Thursday falls outside the
+/// civil year, the week's iso-year shifts. Year 0/9999 boundary clamps
+/// rather than overflows — those edge years matter only for %G near
+/// Jan 1 / Dec 31, and clamping keeps the rendered output deterministic.
+pub const IsoWeekYear = struct { week: u8, year: u16 };
+
+pub fn isoWeekAndYear(dt: DateTime) IsoWeekYear {
+    const doy: i32 = @intCast(dayOfYear(dt));
+    const wd: i32 = @intCast(isoWeekday(dt));
+    const week_raw = @divFloor(10 + doy - wd, 7);
+
+    if (week_raw < 1) {
+        if (dt.year == 0) return .{ .week = 1, .year = 0 };
+        return .{ .week = weeksInYear(dt.year - 1), .year = dt.year - 1 };
+    }
+    const wpy = weeksInYear(dt.year);
+    if (week_raw > wpy) {
+        if (dt.year == 9999) return .{ .week = wpy, .year = 9999 };
+        return .{ .week = 1, .year = dt.year + 1 };
+    }
+    return .{ .week = @intCast(week_raw), .year = dt.year };
+}
+
+/// Total ISO 8601 weeks in `y`. A year has 53 weeks iff Jan 1 is Thursday,
+/// or Jan 1 is Wednesday in a leap year (the extra leap day pushes the
+/// year's week 53 into existence). All other years have 52 weeks.
+pub fn weeksInYear(y: u16) u8 {
+    const jan1 = DateTime{ .year = y, .month = 1, .day = 1 };
+    const wd = isoWeekday(jan1);
+    if (wd == 4) return 53;
+    if (wd == 3 and isLeapYear(y)) return 53;
+    return 52;
+}
+
+/// Monday-based week-of-year (00..=53) — strftime `%W` semantics.
+/// All days before the first Monday of the calendar year are week 00,
+/// the first Monday starts week 01, and weeks roll over every Mon.
+/// Formula `(doy - iso_wd + 7) / 7` lands week 01 on the first Mon
+/// regardless of which weekday Jan 1 falls on.
+pub fn weekOfYearMonday(dt: DateTime) u8 {
+    const doy: i32 = @intCast(dayOfYear(dt));
+    const wd: i32 = @intCast(isoWeekday(dt));
+    return @intCast(@divFloor(doy - wd + 7, 7));
+}
+
 /// Sakamoto's algorithm. Returns 0=Sunday, 1=Monday, ..., 6=Saturday
 /// (matches sqlite3's `%w`).
 pub fn dayOfWeek(dt: DateTime) u8 {
