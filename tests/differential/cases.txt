@@ -2213,6 +2213,16 @@ SELECT strftime('%G %V %Y', '2024-12-31')
 SELECT strftime('%G %V %Y', '2023-01-01')
 SELECT strftime('%V %W', '2020-01-01')
 SELECT strftime('%V %W', '2020-12-31')
+SELECT strftime('%U', '2024-01-01')
+SELECT strftime('%U', '2024-01-07')
+SELECT strftime('%U', '2025-01-05')
+SELECT strftime('%U', '2024-12-31')
+SELECT strftime('%U', '2023-01-01')
+SELECT strftime('%g', '2024-12-30')
+SELECT strftime('%g', '2023-01-01')
+SELECT strftime('%g', '2024-01-01')
+SELECT strftime('%U %W', '2024-01-01')
+SELECT strftime('%g %G', '2024-12-31')
 
 
 

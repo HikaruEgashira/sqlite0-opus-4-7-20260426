@@ -206,6 +206,15 @@ pub fn weekOfYearMonday(dt: DateTime) u8 {
     return @intCast(@divFloor(doy - wd + 7, 7));
 }
 
+/// Sunday-based week-of-year (00..=53) — strftime `%U` semantics.
+/// Mirror of `weekOfYearMonday` using `dayOfWeek` (Sun=0..Sat=6) directly,
+/// so days before the first Sunday are week 00 and weeks roll over Sun.
+pub fn weekOfYearSunday(dt: DateTime) u8 {
+    const doy: i32 = @intCast(dayOfYear(dt));
+    const dow: i32 = @intCast(dayOfWeek(dt));
+    return @intCast(@divFloor(doy + 6 - dow, 7));
+}
+
 /// Sakamoto's algorithm. Returns 0=Sunday, 1=Monday, ..., 6=Saturday
 /// (matches sqlite3's `%w`).
 pub fn dayOfWeek(dt: DateTime) u8 {
