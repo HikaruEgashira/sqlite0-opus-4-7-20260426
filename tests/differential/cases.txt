@@ -1891,6 +1891,24 @@ SELECT octet_length(cast(x'410042' as text))
 SELECT octet_length(cast(x'00' as text))
 SELECT octet_length(printf('%c', cast(x'00' as text)))
 SELECT length(cast(x'410042' as blob))
+# Iter29.AD: round(x, n) sqlite3-compatible rounding via add-half-then-truncate
+# instead of @round(x*factor)/factor. Tied IEEE 754 values like 2.55 (which is
+# 2.5499...) round DOWN under sqlite3's algorithm but UP under the naive form.
+SELECT round(2.55, 1)
+SELECT round(2.65, 1)
+SELECT round(-2.55, 1)
+SELECT round(2.45, 1)
+SELECT round(2.75, 1)
+SELECT round(1.005, 2)
+SELECT round(0.99, 1)
+SELECT round(2.5, 0)
+SELECT round(-2.5, 0)
+SELECT round(125, -1)
+SELECT round(155, -2)
+SELECT round(0.5)
+SELECT round(0.05, 1)
+SELECT round(1234.5)
+
 
 
 

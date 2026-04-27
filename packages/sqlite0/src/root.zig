@@ -8,6 +8,7 @@ pub const ops = @import("ops.zig");
 pub const match = @import("match.zig");
 pub const func_util = @import("func_util.zig");
 pub const funcs = @import("funcs.zig");
+pub const funcs_test = @import("funcs_test.zig");
 pub const funcs_text = @import("funcs_text.zig");
 pub const funcs_format = @import("funcs_format.zig");
 pub const funcs_format_test = @import("funcs_format_test.zig");

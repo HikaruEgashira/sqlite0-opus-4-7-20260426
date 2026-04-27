@@ -340,8 +340,19 @@ fn fnRound(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     const d: i32 = @intCast(@max(@as(i64, -50), @min(@as(i64, 50), d_raw)));
 
     if (d <= 0) return Value{ .real = @round(x) };
+    // sqlite3's printf-based round (etFLOAT path in printf.c): add a
+    // half-step `rounder = 0.5 * 10^-d` to the magnitude, then truncate.
+    // This differs from `@round(x * 10^d) / 10^d`: for tied IEEE 754
+    // values like 2.55 (= 2.5499999...), our old code multiplied 10×
+    // (which FP-rounds up to 25.5) and @round'd half-away-from-zero to
+    // 26, giving 2.6 — but sqlite3 adds 0.05 (= 0.0499999...) to
+    // 2.5499999... = 2.5999999... and truncates to 2.5. The rounder is
+    // applied to the magnitude (not the signed value) so negatives
+    // round the same way: round(-2.55, 1) → -2.5.
     const factor = std.math.pow(f64, 10, @floatFromInt(d));
-    return Value{ .real = @round(x * factor) / factor };
+    const half = 0.5 / factor;
+    const adjusted = if (x >= 0) x + half else x - half;
+    return Value{ .real = @trunc(adjusted * factor) / factor };
 }
 
 const MinMax = enum { min, max };
@@ -364,105 +375,4 @@ fn fnMinMax(allocator: std.mem.Allocator, args: []const Value, dir: MinMax) Erro
     return try util.dupeValue(allocator, best);
 }
 
-test "funcs: length(text) byte count" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "hello" }};
-    const r = try call(allocator, null, "length", &args);
-    try std.testing.expectEqual(@as(i64, 5), r.integer);
-}
-
-test "funcs: length(NULL) is NULL" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.null};
-    const r = try call(allocator, null, "length", &args);
-    try std.testing.expectEqual(Value.null, r);
-}
-
-test "funcs: lower" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "Hello World" }};
-    const r = try call(allocator, null, "LOWER", &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("hello world", r.text);
-}
-
-test "funcs: substr basic" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "hello" }, .{ .integer = 2 }, .{ .integer = 3 } };
-    const r = try call(allocator, null, "substr", &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("ell", r.text);
-}
-
-test "funcs: substr negative start" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "hello" }, .{ .integer = -3 } };
-    const r = try call(allocator, null, "substr", &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("llo", r.text);
-}
-
-test "funcs: substr negative length" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "hello" }, .{ .integer = 2 }, .{ .integer = -1 } };
-    const r = try call(allocator, null, "substr", &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("h", r.text);
-}
-
-test "funcs: abs integer" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .integer = -7 }};
-    const r = try call(allocator, null, "abs", &args);
-    try std.testing.expectEqual(@as(i64, 7), r.integer);
-}
-
-test "funcs: abs(text 'foo') is real 0.0" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "foo" }};
-    const r = try call(allocator, null, "abs", &args);
-    try std.testing.expectEqual(@as(f64, 0.0), r.real);
-}
-
-test "funcs: coalesce picks first non-null" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .null, .null, .{ .integer = 42 }, .{ .integer = 99 } };
-    const r = try call(allocator, null, "coalesce", &args);
-    try std.testing.expectEqual(@as(i64, 42), r.integer);
-}
-
-test "funcs: typeof returns lowercase tag" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .real = 1.5 }};
-    const r = try call(allocator, null, "typeof", &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("real", r.text);
-}
-
-test "funcs: round to integer always returns real" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .real = 3.5 }};
-    const r = try call(allocator, null, "round", &args);
-    try std.testing.expectEqual(@as(f64, 4.0), r.real);
-}
-
-test "funcs: round half-away-from-zero for negative" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .real = -2.5 }};
-    const r = try call(allocator, null, "round", &args);
-    try std.testing.expectEqual(@as(f64, -3.0), r.real);
-}
-
-test "funcs: min(NULL, ...) is NULL" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .null, .{ .integer = 1 }, .{ .integer = 2 } };
-    const r = try call(allocator, null, "min", &args);
-    try std.testing.expectEqual(Value.null, r);
-}
-
-test "funcs: max picks largest" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .integer = 1 }, .{ .integer = 3 }, .{ .integer = 2 } };
-    const r = try call(allocator, null, "max", &args);
-    try std.testing.expectEqual(@as(i64, 3), r.integer);
-}
+// Tests live in funcs_test.zig (split out for the 500-line discipline).
