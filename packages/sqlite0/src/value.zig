@@ -7,27 +7,44 @@ pub const Value = union(enum) {
     text: []const u8,
     blob: []const u8,
 
-    /// CLI-equivalent rendering: matches sqlite3's default `list` mode,
-    /// which feeds each column through `utf8_printf("%s", ...)` and so
-    /// stops at the first NUL byte. Truncating here keeps `zeroblob(5)`,
-    /// embedded-NUL TEXT, and `x'00AA'` byte-equal between sqlite0 and
-    /// sqlite3 CLI output. The full bytes are still preserved in the
-    /// stored Value — `length()` / `hex()` queries see the untruncated
-    /// payload, matching sqlite3 exactly.
+    /// CLI-equivalent rendering: matches sqlite3's default `list` mode.
+    /// sqlite3 shell's `utf8_printf` stops at the first NUL byte AND
+    /// escapes ASCII control characters (0x01-0x1F except TAB / LF) to
+    /// the `^X` form (caret + (byte + 0x40)). Both TEXT and BLOB take
+    /// the same escape path — verified against 3.51.0 CLI in `-list`
+    /// (the default `-c` output mode):
+    ///   `SELECT x'01'`  → `^A`
+    ///   `SELECT x'0D'`  → `^M`  (CR is escaped, only TAB and LF stay raw)
+    ///   `SELECT x'09'`  → raw `\t`
+    ///   `SELECT x'0A'`  → raw `\n`
+    ///   `SELECT x'AA'`  → raw `0xAA` (high bytes pass through)
+    ///   `SELECT x'00'`  → empty (NUL still terminates)
+    /// The full bytes are still preserved in the stored Value — `hex()`,
+    /// `length()`, `quote()` queries see the untruncated, unescaped
+    /// payload and match sqlite3 exactly there.
     pub fn format(self: Value, w: *std.Io.Writer) !void {
         switch (self) {
             .null => try w.writeAll(""),
             .integer => |i| try w.print("{d}", .{i}),
             .real => |f| try formatReal(w, f),
-            .text => |t| try writeUntilNul(w, t),
-            .blob => |b| try writeUntilNul(w, b),
+            .text => |t| try writeListMode(w, t),
+            .blob => |b| try writeListMode(w, b),
         }
     }
 };
 
-fn writeUntilNul(w: *std.Io.Writer, bytes: []const u8) !void {
-    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
-    try w.writeAll(bytes[0..end]);
+fn writeListMode(w: *std.Io.Writer, bytes: []const u8) !void {
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const b = bytes[i];
+        if (b == 0) return;
+        if (b < 0x20 and b != 0x09 and b != 0x0A) {
+            try w.writeByte('^');
+            try w.writeByte(b + 0x40);
+        } else {
+            try w.writeByte(b);
+        }
+    }
 }
 
 /// SQLite-compatible %g formatting for f64.

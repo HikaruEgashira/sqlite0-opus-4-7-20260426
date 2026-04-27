@@ -2990,3 +2990,31 @@ SELECT printf('%i', 'inf')
 SELECT printf('%u', 'inf')
 SELECT printf('%x', 'inf')
 SELECT printf('%o', 'inf')
+
+# CLI list-mode control-char escape (Iter30.Y):
+#  * sqlite3 shell `utf8_printf` escapes 0x01-0x1F (except TAB/LF) to
+#    `^X` (caret + (byte+0x40)) for both TEXT and BLOB columns. CR
+#    (0x0D) is also escaped to `^M`. NUL still terminates.
+#  * Stored values are unaffected — `hex()` / `length()` see the
+#    unescaped bytes.
+SELECT x'01'
+SELECT x'02'
+SELECT x'09'
+SELECT x'0A'
+SELECT x'0D'
+SELECT x'1F'
+SELECT x'20'
+SELECT x'AABB'
+SELECT cast(x'01' as text)
+SELECT cast(x'0D' as text)
+SELECT char(1)
+SELECT char(13)
+SELECT char(10)
+SELECT char(9)
+SELECT min(x'01', x'02')
+SELECT max(x'01', x'02')
+SELECT max(x'01', 'a')
+SELECT max('a', x'01')
+SELECT length(x'01')
+SELECT hex(x'01')
+SELECT length(char(13))
