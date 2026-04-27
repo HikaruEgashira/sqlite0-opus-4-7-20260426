@@ -1538,3 +1538,54 @@ CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=3; SEL
 CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t; SELECT last_insert_rowid();
 CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(NULL,'a'),(NULL,'b'),(NULL,'c'); DELETE FROM t WHERE x=3; INSERT INTO t VALUES(NULL,'d'); SELECT last_insert_rowid();
 CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(NULL,'a'),(NULL,'b'),(NULL,'c'); DELETE FROM t; INSERT INTO t VALUES(NULL,'d'); SELECT last_insert_rowid();
+
+# Iter29.U: JSON1 constructor subset (json_array / json_object /
+# json_quote). Serializer-only — full JSON parser ('json' canonicalizer,
+# 'json_extract' path queries) is a follow-up iteration. Fixtures cover:
+#  - empty / typeof / int / real / text / null / nesting (text repr).
+#  - REAL formatter passthrough (matches sqlite3's shortest round-trip).
+#  - JSON string escaping: " \ control chars (0x00-0x1F).
+#  - 0x7F passes through unescaped (sqlite3 quirk, not strict JSON).
+#  - object: even-arg invariant + non-text-key rejection.
+#  - BLOB → error on either engine.
+SELECT json_array()
+SELECT json_array(1)
+SELECT json_array(1, 2, 3)
+SELECT json_array(1, 2.5, 'three', NULL)
+SELECT json_array('hello')
+SELECT typeof(json_array(1, 2))
+SELECT length(json_array(1, 2, 3))
+SELECT json_array('a"b')
+SELECT json_array('a\b')
+SELECT json_array(char(10))
+SELECT json_array(char(9))
+SELECT json_array(char(8))
+SELECT json_array(char(1))
+SELECT json_array(char(127))
+SELECT json_array(1.0)
+SELECT json_array(2.5)
+SELECT json_array(1e10)
+SELECT json_array(1e-5)
+SELECT json_array(0.1+0.2)
+SELECT json_object()
+SELECT json_object('a', 1)
+SELECT json_object('a', 1, 'b', 'two', 'c', NULL)
+SELECT typeof(json_object('a', 1))
+SELECT json_object('a')
+SELECT json_object(1, 'a')
+SELECT json_object(NULL, 'a')
+SELECT json_quote(42)
+SELECT json_quote(3.14)
+SELECT json_quote('hello')
+SELECT json_quote(NULL)
+SELECT json_quote('a"b')
+SELECT typeof(json_quote(42))
+SELECT json_quote()
+SELECT json_quote(1, 2)
+SELECT json_array(x'AA')
+SELECT json_object('a', x'AA')
+SELECT json_array(1e308 * 10)
+SELECT json_array(-1e308 * 10)
+SELECT json_array(0.0/0.0)
+SELECT json_array(1.0/0.0)
+

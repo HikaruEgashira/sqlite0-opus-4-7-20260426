@@ -14,6 +14,7 @@ pub const funcs_time = @import("funcs_time.zig");
 pub const funcs_time_calendar = @import("funcs_time_calendar.zig");
 pub const funcs_time_modifier = @import("funcs_time_modifier.zig");
 pub const funcs_math = @import("funcs_math.zig");
+pub const funcs_json = @import("funcs_json.zig");
 pub const ast = @import("ast.zig");
 pub const eval = @import("eval.zig");
 pub const eval_match = @import("eval_match.zig");

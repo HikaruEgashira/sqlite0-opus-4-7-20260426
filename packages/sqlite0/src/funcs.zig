@@ -5,6 +5,7 @@ const text = @import("funcs_text.zig");
 const fmt_mod = @import("funcs_format.zig");
 const time_mod = @import("funcs_time.zig");
 const math_mod = @import("funcs_math.zig");
+const json_mod = @import("funcs_json.zig");
 const database = @import("database.zig");
 
 const Value = util.Value;
@@ -78,6 +79,10 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "degrees")) return math_mod.fnDegrees(args);
     if (util.eqlIgnoreCase(name, "radians")) return math_mod.fnRadians(args);
     if (util.eqlIgnoreCase(name, "mod")) return math_mod.fnMod(args);
+    // Iter29.U — JSON1 constructors (serializer-only subset).
+    if (util.eqlIgnoreCase(name, "json_array")) return json_mod.fnJsonArray(allocator, args);
+    if (util.eqlIgnoreCase(name, "json_object")) return json_mod.fnJsonObject(allocator, args);
+    if (util.eqlIgnoreCase(name, "json_quote")) return json_mod.fnJsonQuote(allocator, args);
     // Iter29.S — state-aware functions reading connection-wide DML
     // bookkeeping. `db == null` (parser-time VALUES tuple eval) gets
     // back 0 — sqlite3's matching behaviour on a fresh connection.
