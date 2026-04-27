@@ -70,7 +70,11 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
     if (s.len >= 5 and s[2] == ':') {
         const hour = parseUintFixed(u8, s[0..2]) orelse return null;
         const minute = parseUintFixed(u8, s[3..5]) orelse return null;
-        if (hour > 23 or minute > 59) return null;
+        // sqlite3 quirk: `24:MM:SS[.fff]` is accepted as a literal
+        // representing midnight of the next day (`datetime('… 24:00:00')`
+        // round-trips unchanged; `julianday` returns JDN+0.5). hour=25
+        // is still rejected. minute/second remain strict ≤59.
+        if (hour > 24 or minute > 59) return null;
         var second: u8 = 0;
         var ms_tail_start: usize = 5;
         var seconds_present = false;
@@ -113,7 +117,11 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
         if (s[13 + off] != ':') return null;
         const hour = parseUintFixed(u8, s[11 + off .. 13 + off]) orelse return null;
         const minute = parseUintFixed(u8, s[14 + off .. 16 + off]) orelse return null;
-        if (hour > 23 or minute > 59) return null;
+        // sqlite3 quirk: `24:MM:SS[.fff]` is accepted as a literal
+        // representing midnight of the next day (`datetime('… 24:00:00')`
+        // round-trips unchanged; `julianday` returns JDN+0.5). hour=25
+        // is still rejected. minute/second remain strict ≤59.
+        if (hour > 24 or minute > 59) return null;
         var second: u8 = 0;
         var tail_start: usize = 16 + off;
         var seconds_present = false;

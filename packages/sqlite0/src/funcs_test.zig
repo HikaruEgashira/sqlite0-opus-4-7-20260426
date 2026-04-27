@@ -283,3 +283,54 @@ test "BC: %g emits signed mod-100 (year -1 → -2; iso week boundary)" {
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("-2", r.text);
 }
+
+test "min/max tie: min picks last, max picks first" {
+    const allocator = std.testing.allocator;
+    var args1 = [_]Value{ .{ .integer = 1 }, .{ .real = 1.0 } };
+    const r1 = try call(allocator, null, "min", &args1);
+    try std.testing.expectEqual(@as(f64, 1.0), r1.real);
+
+    var args2 = [_]Value{ .{ .integer = 1 }, .{ .real = 1.0 } };
+    const r2 = try call(allocator, null, "max", &args2);
+    try std.testing.expectEqual(@as(i64, 1), r2.integer);
+}
+
+test "iif: variadic CASE/WHEN chain" {
+    const allocator = std.testing.allocator;
+
+    // 2-arg: if 1 then 'a' else NULL
+    var args1 = [_]Value{ .{ .integer = 1 }, .{ .text = "a" } };
+    const r1 = try call(allocator, null, "iif", &args1);
+    defer allocator.free(r1.text);
+    try std.testing.expectEqualStrings("a", r1.text);
+
+    // 4-arg even count: false-then-truthy chain
+    var args2 = [_]Value{ .{ .integer = 0 }, .{ .text = "a" }, .{ .integer = 1 }, .{ .text = "b" } };
+    const r2 = try call(allocator, null, "iif", &args2);
+    defer allocator.free(r2.text);
+    try std.testing.expectEqualStrings("b", r2.text);
+
+    // 5-arg odd count with default fired
+    var args3 = [_]Value{ .{ .integer = 0 }, .{ .text = "a" }, .{ .integer = 0 }, .{ .text = "b" }, .{ .text = "def" } };
+    const r3 = try call(allocator, null, "iif", &args3);
+    defer allocator.free(r3.text);
+    try std.testing.expectEqualStrings("def", r3.text);
+
+    // Even count, no truthy → NULL.
+    var args4 = [_]Value{ .{ .integer = 0 }, .{ .text = "a" }, .{ .integer = 0 }, .{ .text = "b" } };
+    const r4 = try call(allocator, null, "iif", &args4);
+    try std.testing.expectEqual(Value.null, r4);
+}
+
+test "datetime: hour=24 accepted, hour=25 rejected" {
+    const allocator = std.testing.allocator;
+
+    var args1 = [_]Value{.{ .text = "2024-01-01 24:00:00" }};
+    const r1 = try call(allocator, null, "datetime", &args1);
+    defer allocator.free(r1.text);
+    try std.testing.expectEqualStrings("2024-01-01 24:00:00", r1.text);
+
+    var args2 = [_]Value{.{ .text = "2024-01-01 25:00:00" }};
+    const r2 = try call(allocator, null, "datetime", &args2);
+    try std.testing.expectEqual(Value.null, r2);
+}

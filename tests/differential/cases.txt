@@ -2731,3 +2731,40 @@ SELECT printf('%#.5g', 1.0)
 SELECT printf('%#g', 1.5)
 SELECT printf('%#g', 1.0)
 SELECT printf('%#G', 1e10)
+
+# Date / time / iif / min-max ties (Iter30.M).
+#  * `24:MM:SS[.fff]` accepted as midnight of next day; renders unchanged
+#    via `datetime()`/`time()` (sqlite3 datefunc.c quirk). hour=25 still
+#    rejected. minute/second remain strict ≤59.
+#  * `min(a,b,...)` ties go RIGHT (last-tied wins); `max` ties go LEFT
+#    (first-tied wins). Verified: `min(1,1.0)`→`1.0`, `max(1,1.0)`→`1`.
+#  * `iif()` variadic (sqlite3 3.46+): scan args in pairs, return `vN`
+#    on first truthy `cN`. Odd `args.len` → last is default; even → NULL.
+SELECT datetime('2024-01-01 24:00:00')
+SELECT datetime('2024-01-01 24:30:00')
+SELECT datetime('2024-01-01 24:59:59')
+SELECT datetime('2024-01-01 24:00:00.500')
+SELECT datetime('2024-01-01 25:00:00')
+SELECT datetime('2024-01-01 24:60:00')
+SELECT datetime('2024-01-01 24:59:60')
+SELECT julianday('2024-01-01 24:00:00')
+SELECT time('24:00:00')
+SELECT date('2024-01-01 24:00:00')
+SELECT datetime('2024-01-01 24:00:00','+1 hour')
+SELECT min(1, 1.0)
+SELECT max(1, 1.0)
+SELECT min(1.0, 1)
+SELECT max(1.0, 1)
+SELECT min(1, 1.0, '1')
+SELECT max(1, 1.0, 1.5)
+SELECT max(1.5, 1, 1.0)
+SELECT min(1.0, 1.5, 1.0)
+SELECT iif(1, 'a')
+SELECT iif(0, 'a')
+SELECT iif(1, 'a', 'b')
+SELECT iif(0, 'a', 'b')
+SELECT iif(0, 'a', 1, 'b')
+SELECT iif(0, 'a', 0, 'b')
+SELECT iif(0, 'a', 0, 'b', 'def')
+SELECT iif(0, 'a', 1, 'b', 'unreached')
+SELECT iif(0, 'a', 'b', 'c')
