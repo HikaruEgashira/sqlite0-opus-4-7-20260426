@@ -64,6 +64,13 @@ pub const StatementResult = union(enum) {
 /// ADR-0005 §2). ADR-0003 §2: no type affinity tracking in Phase 2.
 pub const Table = struct {
     columns: [][]const u8,
+    /// Iter29.B — parallel to `columns`. `true` at index `i` means the
+    /// column was declared `NOT NULL`; INSERT/UPDATE must reject NULL
+    /// at that column (post-IPK auto-assign — IPK columns whose NULL
+    /// is replaced by chooseRowid pass the check). Always the same
+    /// length as `columns`; allocated by registerTable / synthetic
+    /// registration; freed in `deinit`.
+    not_null: []bool,
     rows: std.ArrayListUnmanaged([]Value) = .empty,
     /// Non-zero when this table lives in a Pager-backed sqlite3 .db
     /// file. 0 means in-memory (CREATE TABLE on a memory Database).
@@ -90,6 +97,7 @@ pub const Table = struct {
         self.rows.deinit(allocator);
         for (self.columns) |c| allocator.free(c);
         allocator.free(self.columns);
+        allocator.free(self.not_null);
     }
 };
 
@@ -224,6 +232,8 @@ pub const Database = struct {
             for (cols[0..produced]) |c| self.allocator.free(c);
             self.allocator.free(cols);
         }
+        const not_null = try self.allocator.alloc(bool, parsed.columns.len);
+        errdefer self.allocator.free(not_null);
         var ipk: ?usize = null;
         while (produced < parsed.columns.len) : (produced += 1) {
             const src = parsed.columns[produced];
@@ -246,9 +256,14 @@ pub const Database = struct {
                 ipk = produced;
             }
             cols[produced] = lowered;
+            not_null[produced] = src.is_not_null;
         }
 
-        try self.tables.put(self.allocator, key, .{ .columns = cols, .ipk_column = ipk });
+        try self.tables.put(self.allocator, key, .{
+            .columns = cols,
+            .not_null = not_null,
+            .ipk_column = ipk,
+        });
     }
 
     /// Run `registerTable`'s pre-mutation invariants (table-name conflict,

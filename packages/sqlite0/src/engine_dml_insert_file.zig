@@ -176,6 +176,17 @@ fn prepareNewCells(
             v.* = if (target_indices[k]) |src_idx| row[src_idx] else Value.null;
         }
         const rowid = try chooseRowid(t, max_rowid, new_values);
+        // Iter29.B — NOT NULL check after chooseRowid. The IPK column
+        // is always NULL in `new_values` post-chooseRowid (sqlite3
+        // invariant: record body stores NULL for the rowid alias) but
+        // the column's effective value is the assigned rowid, so we
+        // skip the IPK index — sqlite3 likewise allows
+        // `INTEGER PRIMARY KEY NOT NULL` with omitted column.
+        for (t.not_null, new_values, 0..) |required, v, k| {
+            if (required and v == .null and (t.ipk_column == null or k != t.ipk_column.?)) {
+                return Error.ConstraintNotNull;
+            }
+        }
         slot.* = .{ .rowid = rowid, .values = new_values };
     }
     return out;

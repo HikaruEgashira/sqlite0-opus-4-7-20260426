@@ -156,6 +156,16 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         while (produced < parsed.assignments.len) : (produced += 1) {
             new_values[produced] = try eval.evalExpr(ctx, parsed.assignments[produced].value);
         }
+        // Iter29.B — NOT NULL check on the projected post-assignment
+        // value of every NOT NULL column. Assignments can only land
+        // NULL into the indices listed in `indices`; columns not in
+        // `indices` keep their pre-UPDATE value (already valid). The
+        // errdefer above frees the partially-populated `new_values`.
+        for (indices, new_values) |col_idx, new_v| {
+            if (t.not_null[col_idx] and new_v == .null) {
+                return Error.ConstraintNotNull;
+            }
+        }
         for (indices, new_values) |col_idx, new_v| {
             const duped = try func_util.dupeValue(db.allocator, new_v);
             ops.freeValue(db.allocator, row_ptr.*[col_idx]);
@@ -248,6 +258,7 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             },
             else => {},
         };
+        try enforceNotNull(t, new_row);
         t.rows.appendAssumeCapacity(new_row);
         inserted += 1;
     }
@@ -299,5 +310,16 @@ fn findTableColumn(t: *const Table, name: []const u8) ?usize {
         if (func_util.eqlIgnoreCase(name, col)) return i;
     }
     return null;
+}
+
+/// Iter29.B — reject if any column declared `NOT NULL` carries a NULL
+/// value at this point. Called AFTER IPK auto-assignment so an IPK
+/// column whose source NULL was rewritten to the next rowid passes.
+/// Mirrors the file-mode equivalent in `engine_dml_insert_file` so
+/// both backends produce the same rejection signal.
+pub fn enforceNotNull(t: *const Table, row: []const Value) Error!void {
+    for (t.not_null, row) |required, v| {
+        if (required and v == .null) return Error.ConstraintNotNull;
+    }
 }
 

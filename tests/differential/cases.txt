@@ -1007,3 +1007,17 @@ CREATE TABLE ipk1(id INTEGER PRIMARY KEY, x); INSERT INTO ipk1(x) VALUES('a'),('
 CREATE TABLE ipk2(id INTEGER PRIMARY KEY, x); INSERT INTO ipk2 VALUES(5,'a'); INSERT INTO ipk2(x) VALUES('b'); SELECT * FROM ipk2 ORDER BY id
 CREATE TABLE ipk3(id INTEGER PRIMARY KEY, x); INSERT INTO ipk3 VALUES(99,'a'); INSERT INTO ipk3(x) VALUES('b'),('c'); SELECT * FROM ipk3 ORDER BY id
 CREATE TABLE ipk4(id INTEGER PRIMARY KEY, x); INSERT INTO ipk4(x) VALUES('a'); INSERT INTO ipk4(x) VALUES('b'); INSERT INTO ipk4 VALUES(50,'c'); INSERT INTO ipk4(x) VALUES('d'); SELECT * FROM ipk4 ORDER BY id
+
+# Iter29.B — in-memory NOT NULL constraint enforcement. Same shapes
+# as the file-mode fixtures in file_cases.txt but exercising the
+# in-memory `engine_dml.executeInsert/Update` path. Reject cases
+# rely on the run.sh harness collapsing non-zero exit to "<error>"
+# on both sides.
+CREATE TABLE nn1(a NOT NULL, b); INSERT INTO nn1(b) VALUES(1)
+CREATE TABLE nn2(a NOT NULL, b); INSERT INTO nn2 VALUES(NULL, 1)
+CREATE TABLE nn3(a NOT NULL, b); INSERT INTO nn3 VALUES(1, 2); UPDATE nn3 SET a = NULL WHERE b = 2
+CREATE TABLE nn4(a NOT NULL, b); INSERT INTO nn4 VALUES(1, 'first'), (NULL, 'second'); SELECT count(*) FROM nn4
+# Success path: NOT NULL with non-NULL value → byte-equal SELECT.
+CREATE TABLE nn5(a NOT NULL, b); INSERT INTO nn5 VALUES(1, 'x'), (2, NULL); SELECT * FROM nn5 ORDER BY a
+# IPK + NOT NULL: omitted IPK auto-fills with rowid → constraint OK.
+CREATE TABLE nn6(a INTEGER PRIMARY KEY NOT NULL, b NOT NULL); INSERT INTO nn6(b) VALUES('hello'); SELECT * FROM nn6

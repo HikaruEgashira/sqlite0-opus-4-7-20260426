@@ -281,6 +281,18 @@ fn modifyOneLeaf(
                     for (u.indices, new_values) |col_idx, new_v| {
                         row_values[col_idx] = new_v;
                     }
+                    // Iter29.B — NOT NULL check on the post-assignment
+                    // row. Skip the IPK column: even after assignment,
+                    // its effective value is the cell's rowid (which
+                    // sqlite3 prevents from going NULL via the IPK
+                    // attempt-to-update-rowid path elsewhere); the
+                    // record-body NULL we restore below is just the
+                    // sqlite3 storage encoding.
+                    for (t.not_null, row_values, 0..) |required, v, k| {
+                        if (required and v == .null and (t.ipk_column == null or k != t.ipk_column.?)) {
+                            return Error.ConstraintNotNull;
+                        }
+                    }
                     // Restore IPK column to NULL before encoding —
                     // sqlite3 invariant: aliased rowid is stored only
                     // in the cell header, never in the record body.

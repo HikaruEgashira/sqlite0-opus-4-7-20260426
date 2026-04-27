@@ -118,7 +118,15 @@ fn registerSyntheticSchemaTable(db: *database.Database, name: []const u8) Error!
     while (produced < col_names.len) : (produced += 1) {
         cols[produced] = try db.allocator.dupe(u8, col_names[produced]);
     }
-    try db.tables.put(db.allocator, lower, .{ .columns = cols, .root_page = 1, .is_system = true });
+    const not_null = try db.allocator.alloc(bool, col_names.len);
+    errdefer db.allocator.free(not_null);
+    @memset(not_null, false);
+    try db.tables.put(db.allocator, lower, .{
+        .columns = cols,
+        .not_null = not_null,
+        .root_page = 1,
+        .is_system = true,
+    });
 }
 
 fn registerCell(

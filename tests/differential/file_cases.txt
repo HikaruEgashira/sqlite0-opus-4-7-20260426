@@ -744,3 +744,55 @@ QUERY: SELECT count(*) FROM sqlite_schema
 SETUP: CREATE TABLE alpha(a, b);
 WAL_SETUP: CREATE TABLE delta(d INTEGER PRIMARY KEY, e);
 QUERY: SELECT type, name FROM sqlite_schema ORDER BY name
+
+# Iter29.B — NOT NULL constraint enforcement. Schema metadata is
+# re-parsed from the sqlite_schema sql column on open; the file-mode
+# INSERT path checks `not_null[col]` after IPK auto-assignment and
+# rejects NULL with `Error.ConstraintNotNull`. Each fixture pairs the
+# same INSERT shape against both engines; on rejection, run_query_case
+# collapses non-zero exit to "<error>" on both sides and the case
+# passes.
+#
+# Omitted column → NOT NULL violated (column 'a' is NOT NULL, INSERT
+# provides only 'b'). sqlite3 returns SQLITE_CONSTRAINT (19), sqlite0
+# returns ConstraintNotNull (exit 1) — both non-zero, both surface as
+# "<error>" in the harness.
+SETUP: CREATE TABLE t(a NOT NULL, b);
+QUERY: INSERT INTO t(b) VALUES(1)
+
+# Explicit NULL into NOT NULL column.
+SETUP: CREATE TABLE t(a NOT NULL, b);
+QUERY: INSERT INTO t VALUES(NULL, 1)
+
+# UPDATE setting NOT NULL column to NULL (explicit literal).
+SETUP: CREATE TABLE t(a NOT NULL, b); INSERT INTO t VALUES(1, 2);
+QUERY: UPDATE t SET a = NULL WHERE b = 2
+
+# INTEGER PRIMARY KEY NOT NULL + omitted IPK → succeeds (auto-rowid
+# satisfies the constraint per sqlite3's "IPK NULL → rowid" rule).
+# Discriminating: with a naive "after-rebuild check" the IPK column
+# would appear NULL in the encoded record body and mistakenly trip
+# the constraint.
+SETUP: CREATE TABLE t(a INTEGER PRIMARY KEY NOT NULL, b NOT NULL);
+MUTATE: INSERT INTO t(b) VALUES('hello');
+VERIFY: SELECT a, b FROM t
+
+# Multi-row INSERT where the second row violates NOT NULL — sqlite3
+# rolls the entire statement back per stmt-level atomicity, so neither
+# row should land. With our pre-pass `prepareNewCells` validating
+# every row before any pwrite, the first row's overflow chain (if
+# any) never gets allocated. Discriminating: if NOT NULL were checked
+# row-by-row in a single-pass loop, row 0 would be appended before
+# row 1's failure aborted the statement. Tacked SELECT count(*)
+# guards against silent corruption: a partial-insert regression
+# would diverge from sqlite3's "<error>" output here.
+SETUP: CREATE TABLE t(a NOT NULL, b);
+QUERY: INSERT INTO t VALUES(1, 'first'), (NULL, 'second'); SELECT count(*) FROM t
+
+# Cold-reopen carries the NOT NULL bit through sqlite_schema re-parse:
+# the schema scanner re-runs `parseColumnDef` against the stored sql
+# column at open time. SETUP creates+populates via sqlite3; sqlite0
+# opens the file (running loadFromPager → parseColumnDef → not_null
+# bits restored) and the rejecting INSERT must still trip.
+SETUP: CREATE TABLE t(a TEXT NOT NULL, b INTEGER); INSERT INTO t VALUES('hi', 1);
+QUERY: INSERT INTO t(b) VALUES(99)

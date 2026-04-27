@@ -19,6 +19,14 @@ pub const Error = error{
     ColumnCountMismatch,
     DuplicateColumnName,
     InvalidEscape,
+    /// Iter29.B — INSERT or UPDATE produced a NULL value in a column
+    /// declared `NOT NULL`. sqlite3 returns SQLITE_CONSTRAINT (19)
+    /// with subcode SQLITE_CONSTRAINT_NOTNULL (1299) and the message
+    /// "NOT NULL constraint failed: <table>.<col>"; we collapse to a
+    /// single Zig error variant — the differential harness compares
+    /// process exit (non-zero on both sides) and bypasses message
+    /// equality for error paths.
+    ConstraintNotNull,
     /// Pager (ADR-0005): could not acquire the exclusive flock on the
     /// database file because another process already holds it.
     DatabaseLocked,

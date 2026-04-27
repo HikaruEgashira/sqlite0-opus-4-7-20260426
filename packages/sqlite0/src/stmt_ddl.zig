@@ -15,12 +15,15 @@ const Parser = parser_mod.Parser;
 /// `INTEGER PRIMARY KEY` (case-insensitive, depth-0). sqlite3 reserves
 /// IPK aliasing for that exact spelling — `INT PRIMARY KEY`,
 /// `BIGINT PRIMARY KEY`, `INTEGER PRIMARY KEY DESC` are NOT aliases
-/// (the last creates a regular index instead). Other constraints
-/// (`NOT NULL`, `DEFAULT (...)`, etc.) on an IPK column are tolerated
-/// — only the IPK signal itself is captured here.
+/// (the last creates a regular index instead). `is_not_null` (Iter29.B)
+/// is set when the column-constraint stream contains `NOT NULL` at
+/// depth 0; sqlite3 enforces this at INSERT/UPDATE time. PRIMARY KEY
+/// does NOT imply NOT NULL in sqlite3 (legacy quirk: even non-IPK PK
+/// columns accept NULL), so the two flags are independent.
 pub const ParsedColumn = struct {
     name: []const u8,
     is_ipk: bool = false,
+    is_not_null: bool = false,
 };
 
 /// All slices borrow from `Parser.src`, which the caller (`Database.execute`)
@@ -82,27 +85,75 @@ pub fn parseCreateTableStatement(p: *Parser) !ParsedCreateTable {
     };
 }
 
+test "parseColumnDef: NOT NULL detected on simple column" {
+    const allocator = std.testing.allocator;
+    const sql = "CREATE TABLE t(a NOT NULL, b)";
+    var p = parser_mod.Parser.init(allocator, sql);
+    const parsed = try parseCreateTableStatement(&p);
+    defer allocator.free(parsed.columns);
+    try std.testing.expectEqual(@as(usize, 2), parsed.columns.len);
+    try std.testing.expect(parsed.columns[0].is_not_null);
+    try std.testing.expect(!parsed.columns[1].is_not_null);
+}
+
+test "parseColumnDef: NOT NULL with type prefix" {
+    const allocator = std.testing.allocator;
+    const sql = "CREATE TABLE t(a INTEGER NOT NULL, b TEXT NOT NULL)";
+    var p = parser_mod.Parser.init(allocator, sql);
+    const parsed = try parseCreateTableStatement(&p);
+    defer allocator.free(parsed.columns);
+    try std.testing.expect(parsed.columns[0].is_not_null);
+    try std.testing.expect(parsed.columns[1].is_not_null);
+}
+
+test "parseColumnDef: NOT NULL coexists with INTEGER PRIMARY KEY" {
+    const allocator = std.testing.allocator;
+    const sql = "CREATE TABLE t(a INTEGER PRIMARY KEY NOT NULL, b)";
+    var p = parser_mod.Parser.init(allocator, sql);
+    const parsed = try parseCreateTableStatement(&p);
+    defer allocator.free(parsed.columns);
+    try std.testing.expect(parsed.columns[0].is_ipk);
+    try std.testing.expect(parsed.columns[0].is_not_null);
+}
+
+test "parseColumnDef: missing NOT NULL leaves flag false" {
+    const allocator = std.testing.allocator;
+    const sql = "CREATE TABLE t(a, b INTEGER)";
+    var p = parser_mod.Parser.init(allocator, sql);
+    const parsed = try parseCreateTableStatement(&p);
+    defer allocator.free(parsed.columns);
+    try std.testing.expect(!parsed.columns[0].is_not_null);
+    try std.testing.expect(!parsed.columns[1].is_not_null);
+}
+
 /// Column-def: `<name> [<type-name> ...] [<column-constraint> ...]`.
-/// Captures the column name and scans the trailing token stream for the
-/// IPK signal (literal `INTEGER PRIMARY KEY` at depth 0). Everything
-/// else is consumed and discarded — `x INTEGER NOT NULL`,
-/// `x INT DEFAULT (1+1)`, `x VARCHAR(255)`, etc. all parse, but only
-/// the literal three-token sequence triggers IPK aliasing.
+/// Captures the column name and scans the trailing token stream for two
+/// signals at depth 0: the literal `INTEGER PRIMARY KEY` triple (IPK
+/// aliasing — Iter28) and the `NOT NULL` pair (constraint enforcement
+/// — Iter29.B). Everything else is consumed and discarded —
+/// `x INT DEFAULT (1+1)`, `x VARCHAR(255)`, `x TEXT COLLATE NOCASE`,
+/// etc. all parse without their semantics being captured.
 fn parseColumnDef(p: *Parser) !ParsedColumn {
     if (p.cur.kind != .identifier) return Error.SyntaxError;
     const name = p.cur.slice(p.src);
     p.advance();
     var depth: u32 = 0;
-    // Sliding 3-token window over depth-0 identifiers. `is_ipk` flips
-    // true once we observe `INTEGER`, then `PRIMARY`, then `KEY` in
-    // direct succession at depth 0. Any non-identifier or depth change
-    // resets the window.
+    // Sliding 3-token window over depth-0 identifiers for IPK detection.
+    // `INTEGER` → `PRIMARY` → `KEY` in direct succession at depth 0.
     var saw_integer: bool = false;
     var saw_primary: bool = false;
     var is_ipk: bool = false;
+    // 2-token window for NOT NULL — both are keyword tokens, not
+    // identifiers, so a separate flag tracks the depth-0 `keyword_not`.
+    var saw_not: bool = false;
+    var is_not_null: bool = false;
     while (true) {
         switch (p.cur.kind) {
-            .comma, .rparen => if (depth == 0) return .{ .name = name, .is_ipk = is_ipk },
+            .comma, .rparen => if (depth == 0) return .{
+                .name = name,
+                .is_ipk = is_ipk,
+                .is_not_null = is_not_null,
+            },
             else => {},
         }
         if (depth == 0 and p.cur.kind == .identifier) {
@@ -120,9 +171,20 @@ fn parseColumnDef(p: *Parser) !ParsedColumn {
                 saw_integer = false;
                 saw_primary = false;
             }
+            saw_not = false;
+        } else if (depth == 0 and p.cur.kind == .keyword_not) {
+            saw_not = true;
+            saw_integer = false;
+            saw_primary = false;
+        } else if (depth == 0 and p.cur.kind == .keyword_null and saw_not) {
+            is_not_null = true;
+            saw_not = false;
+            saw_integer = false;
+            saw_primary = false;
         } else {
             saw_integer = false;
             saw_primary = false;
+            saw_not = false;
         }
         switch (p.cur.kind) {
             .lparen => depth += 1,
