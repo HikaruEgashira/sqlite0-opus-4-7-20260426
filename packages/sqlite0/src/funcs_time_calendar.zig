@@ -196,8 +196,15 @@ fn parseTzSubsecTail(tail: []const u8, seconds_present: bool) ?TzSubsecTail {
             while (idx < tail.len and tail[idx] >= '0' and tail[idx] <= '9') : (idx += 1) {}
         }
     }
+    // sqlite3 `parseTimezone` (date.c) skips leading whitespace before the
+    // TZ token — `'12:00:00 +09:00'` / `'12:00:00.5 +09:00'` / tab-separated
+    // forms all accepted. The whitespace must be followed by a TZ token; a
+    // bare trailing run of whitespace (no TZ) is handled at the outer
+    // `parseDateTime` level via the trailing-space tolerance there.
+    while (idx < tail.len and (tail[idx] == ' ' or tail[idx] == '\t' or tail[idx] == '\n' or tail[idx] == '\r')) idx += 1;
     var offset_min: i16 = 0;
-    if (idx < tail.len and tail[idx] == 'Z') {
+    // sqlite3 accepts both `Z` and `z` for Zulu time.
+    if (idx < tail.len and (tail[idx] == 'Z' or tail[idx] == 'z')) {
         idx += 1;
     } else if (idx < tail.len and (tail[idx] == '+' or tail[idx] == '-')) {
         const sign: i16 = if (tail[idx] == '+') 1 else -1;

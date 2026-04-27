@@ -2900,3 +2900,24 @@ SELECT '0x10' & 0x10
 SELECT '1ex' & 1
 SELECT '1.5xyz' & 1
 SELECT 'abc' & 1
+
+# Date/time TZ-token whitespace + lowercase z (Iter30.T):
+#  * sqlite3 `parseTimezone` skips ASCII whitespace before the TZ token.
+#    `'2024-01-01 12:00:00 +09:00'` (space before +HH:MM) and tab forms
+#    accepted. Multi-whitespace also OK.
+#  * Both `Z` and `z` accepted as Zulu marker.
+#  * Whitespace skip happens AFTER `.fff`, not between SS and `.`.
+SELECT date('2024-01-01 12:00:00 +09:00')
+SELECT date('2024-01-01T12:00:00 +09:00')
+SELECT date('2024-01-01 12:00:00 Z')
+SELECT date('2024-01-01 12:00:00 z')
+SELECT date('2024-01-01 12:00:00.5 +09:00')
+SELECT date('2024-01-01 12:00:00  +09:00')
+SELECT date('2024-01-01 12:00 +09:00')
+SELECT date('2024-01-01 12:00:00 -09:00')
+SELECT datetime('2024-01-01 12:00:00 +09:00')
+SELECT datetime('2024-01-01T12:00:00 +09:00')
+SELECT time('2024-01-01 12:00:00 +09:00')
+SELECT time('12:00:00 +09:00')
+SELECT julianday('2024-01-01 12:00:00 +09:00')
+SELECT strftime('%H:%M:%S', '2024-01-01 12:00:00 +09:00')
