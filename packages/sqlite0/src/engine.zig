@@ -23,6 +23,7 @@ const engine_from = @import("engine_from.zig");
 const engine_setop = @import("engine_setop.zig");
 const engine_dml = @import("engine_dml.zig");
 const engine_ddl_file = @import("engine_ddl_file.zig");
+const engine_meta = @import("engine_meta.zig");
 const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
@@ -100,44 +101,14 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_pragma => {
             const parsed = try stmt_mod.parsePragmaStatement(p);
-            return executePragma(db, parsed);
+            return engine_meta.executePragma(db, parsed);
+        },
+        .keyword_begin, .keyword_commit, .keyword_rollback => {
+            const kind = try stmt_mod.parseTransactionStatement(p);
+            return engine_meta.executeTransaction(db, kind);
         },
         else => return Error.SyntaxError,
     }
-}
-
-/// Iter27.C — `PRAGMA wal_checkpoint [(MODE)]` is the only pragma
-/// wired. Returns a single-row `.select` of three integers
-/// `(busy, log, ckpt)` matching sqlite3's three-column shape so
-/// differential parity holds. Unknown pragmas return SyntaxError —
-/// silently swallowing them would mask compatibility regressions.
-fn executePragma(db: *Database, parsed: stmt_mod.ParsedPragma) !StatementResult {
-    const pager_wal = @import("pager_wal.zig");
-    if (func_util.eqlIgnoreCase(parsed.name, "wal_checkpoint")) {
-        const mode: pager_wal.CheckpointMode = if (parsed.arg) |a|
-            (if (func_util.eqlIgnoreCase(a, "truncate") or func_util.eqlIgnoreCase(a, "restart") or func_util.eqlIgnoreCase(a, "full"))
-                .truncate
-            else if (func_util.eqlIgnoreCase(a, "passive"))
-                .passive
-            else
-                return Error.SyntaxError)
-        else
-            .passive;
-        // No pager → in-memory database. sqlite3 reports `0|-1|-1` for
-        // any pragma wal_checkpoint on a non-WAL connection; mirror it.
-        const result: pager_wal.CheckpointResult = if (db.pager) |*pg|
-            try pager_wal.checkpoint(pg, mode)
-        else
-            .{ .busy = 0, .log = -1, .ckpt = -1 };
-        const row = try db.allocator.alloc(Value, 3);
-        row[0] = .{ .integer = result.busy };
-        row[1] = .{ .integer = result.log };
-        row[2] = .{ .integer = result.ckpt };
-        const rows = try db.allocator.alloc([]Value, 1);
-        rows[0] = row;
-        return .{ .select = rows };
-    }
-    return Error.SyntaxError;
 }
 
 /// Result of a SELECT used as a row source. Iter21 added this so subqueries

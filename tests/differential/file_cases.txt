@@ -588,3 +588,65 @@ VERIFY: SELECT id,val FROM t ORDER BY id
 SETUP: CREATE TABLE t(id INTEGER PRIMARY KEY, val);
 MUTATE: INSERT INTO t VALUES(3,'c'),(7,'g'),(10,'j');
 VERIFY: SELECT count(*),min(id),max(id) FROM t
+
+# Iter27.E — BEGIN + COMMIT batches multiple INSERTs into a single
+# WAL commit frame. The discriminating bit is that the per-statement
+# auto-commit hook in Database.execute is suppressed while
+# in_transaction is set; without that gating, each INSERT would emit
+# its own commit frame and the eventual frame count diverges from
+# sqlite3 (which also batches under one BEGIN). VERIFY just confirms
+# the batched rows are visible after COMMIT.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: SELECT 1;
+MUTATE: BEGIN; INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); INSERT INTO t VALUES (3); COMMIT;
+VERIFY: SELECT n FROM t ORDER BY n
+
+# BEGIN + ROLLBACK — staged frames discarded, file byte-identical
+# (modulo WAL bytes) to the pre-BEGIN state. SELECT in VERIFY only
+# sees the WAL_SETUP-seeded row. The cache-invalidation path
+# (pager_wal.rollback evicting cached pages the staged INSERT
+# write-through populated) is the load-bearing piece — without it
+# the next read would surface the rolled-back bytes from cache.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES(99);
+MUTATE: BEGIN; INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); ROLLBACK;
+VERIFY: SELECT n FROM t
+
+# COMMIT after a no-op tx (BEGIN; SELECT; COMMIT) is a no-op for the
+# pager but should still toggle in_transaction cleanly. The SELECT
+# inside the tx sees pre-tx state because nothing was staged.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES(7);
+MUTATE: BEGIN; SELECT n FROM t; COMMIT;
+VERIFY: SELECT n FROM t
+
+# Mixed DML inside a BEGIN block — INSERT + DELETE in one tx.
+# COMMIT flushes both as one batch.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES(1),(2),(3);
+MUTATE: BEGIN; INSERT INTO t VALUES (10); DELETE FROM t WHERE n = 2; COMMIT;
+VERIFY: SELECT n FROM t ORDER BY n
+
+# PRAGMA journal_mode (read-only, Iter27.E) — reports the mode the
+# file opened in. WAL_SETUP forces the file into WAL mode, so the
+# PRAGMA returns "wal" (matches sqlite3 byte-for-byte).
+SETUP: CREATE TABLE t(n);
+WAL_SETUP: SELECT 1;
+QUERY: PRAGMA journal_mode
+
+# Non-WAL file: PRAGMA reports "delete".
+SETUP: CREATE TABLE t(n);
+QUERY: PRAGMA journal_mode
+
+# ROLLBACK cache-invalidation discriminating fixture (Iter27.E).
+# `BYTE-EQ + ok` for the BEGIN+ROLLBACK case above only proves the
+# WAL stage was discarded — it cannot catch the in-process cache
+# bug where pager_wal.writeFrame's write-through left post-mutation
+# bytes in `pager.cache`. The MUTATE here reads in the SAME
+# sqlite0/sqlite3 invocation, so the SELECT after ROLLBACK forces
+# the cache path: if `evictCachedPage` were missing we'd surface 3
+# (the rolled-back rows leaked from cache); sqlite3 returns 1.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES(99);
+MUTATE: BEGIN; INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); ROLLBACK; SELECT count(*) FROM t;
+VERIFY: SELECT n FROM t

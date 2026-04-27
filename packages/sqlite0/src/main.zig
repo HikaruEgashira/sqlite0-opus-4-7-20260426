@@ -127,7 +127,7 @@ fn runSql(db: *sqlite0.Database, sql: []const u8, stdout: *std.Io.Writer, stderr
     for (result.statements) |s| {
         const rows = switch (s) {
             .select, .values => |r| r,
-            .create_table, .insert, .delete, .update => continue,
+            .create_table, .insert, .delete, .update, .transaction => continue,
         };
         for (rows) |row| {
             for (row, 0..) |v, i| {

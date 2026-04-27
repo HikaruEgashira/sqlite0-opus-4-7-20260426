@@ -30,9 +30,12 @@ const Value = value_mod.Value;
 pub const Error = ops.Error;
 
 /// One executed statement's outcome. Row-producing statements carry their
-/// rows; `create_table` and `insert` carry no rows (their effect is on
-/// `Database` state). `insert` reports the rowcount for symmetry with sqlite3
-/// but the CLI doesn't print it (sqlite3 stays silent too).
+/// rows; the rest carry no rows (their effect is on `Database` state).
+/// `insert` reports the rowcount for symmetry with sqlite3 but the CLI
+/// doesn't print it (sqlite3 stays silent too). `.transaction` covers
+/// BEGIN / COMMIT / ROLLBACK uniformly — sqlite3 prints nothing for
+/// those, and the kind is recoverable from the SQL text if a future
+/// caller needs it.
 pub const StatementResult = union(enum) {
     select: [][]Value,
     values: [][]Value,
@@ -40,11 +43,12 @@ pub const StatementResult = union(enum) {
     insert: struct { rowcount: u64 },
     delete: struct { rowcount: u64 },
     update: struct { rowcount: u64 },
+    transaction,
 
     pub fn deinit(self: StatementResult, allocator: std.mem.Allocator) void {
         switch (self) {
             .select, .values => |rows| freeRows(allocator, rows),
-            .create_table, .insert, .delete, .update => {},
+            .create_table, .insert, .delete, .update, .transaction => {},
         }
     }
 };
@@ -109,6 +113,12 @@ pub const Database = struct {
     /// matches sqlite3's legacy behaviour). Iter27.B will use this to gate
     /// write paths; Iter27.0.a only records it.
     journal_mode: JournalMode = .delete_legacy,
+    /// Iter27.E — set by BEGIN, cleared by COMMIT/ROLLBACK. While true,
+    /// the per-statement commit hook in `execute` is suppressed so
+    /// every staged frame from intervening DML accumulates into one
+    /// commit batch (or is dropped as a unit on ROLLBACK). Implicit
+    /// rollback on `deinit` discards staged frames via `pager.close`.
+    in_transaction: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) Database {
         return .{ .allocator = allocator };
@@ -216,11 +226,16 @@ pub const Database = struct {
             }
             const sr = try engine.dispatchOne(self, &p);
             try statements.append(self.allocator, sr);
-            // Iter27.B.3 — implicit per-statement commit boundary.
-            // SELECTs queue no frames so this is a no-op for them.
-            // Future BEGIN/COMMIT (Iter27.E) will introduce explicit
-            // multi-statement transactions and gate this hook.
-            if (self.pager) |*pg| try pg.commit();
+            // Iter27.B.3 + Iter27.E — implicit per-statement commit
+            // boundary, gated by `in_transaction`. Inside a BEGIN block
+            // the hook is suppressed; the explicit COMMIT statement
+            // clears `in_transaction` BEFORE returning, so the same hook
+            // call that runs on the COMMIT statement itself flushes the
+            // entire accumulated batch. SELECTs queue no frames so this
+            // is a no-op for them.
+            if (!self.in_transaction) {
+                if (self.pager) |*pg| try pg.commit();
+            }
             if (p.cur.kind == .semicolon) p.advance();
         }
         return .{

@@ -484,3 +484,8 @@ fn parseInsertColumnList(p: *Parser) ![][]const u8 {
 const stmt_pragma = @import("stmt_pragma.zig");
 pub const ParsedPragma = stmt_pragma.ParsedPragma;
 pub const parsePragmaStatement = stmt_pragma.parsePragmaStatement;
+
+// ── BEGIN / COMMIT / ROLLBACK ──────────────────────────────────────────────
+const stmt_tx = @import("stmt_tx.zig");
+pub const TransactionKind = stmt_tx.TransactionKind;
+pub const parseTransactionStatement = stmt_tx.parseTransactionStatement;

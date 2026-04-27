@@ -302,6 +302,36 @@ pub fn checkpoint(self: *pager_mod.Pager, mode: CheckpointMode) Error!Checkpoint
     return .{ .busy = 0, .log = 0, .ckpt = 0 };
 }
 
+/// Iter27.E — explicit ROLLBACK. Discards staged frames AND evicts
+/// every cached page that the rolled-back tx mutated, so subsequent
+/// `getPage` reads pull from main file / WAL index again rather than
+/// returning the post-mutation in-memory bytes (which write-through
+/// left in the cache).
+///
+/// Implicit rollback on close goes through `discardStaged` via
+/// `detach`; the cache disappears with the Pager either way, so the
+/// eviction step matters only for the explicit-ROLLBACK path where
+/// the same Pager keeps serving subsequent statements.
+///
+/// Idempotent: with no staged frames it's a cheap no-op (matches the
+/// commit-after-rollback "loop hook fires anyway" case).
+pub fn rollback(self: *pager_mod.Pager) void {
+    for (self.staged_frames.items) |sf| evictCachedPage(self, sf.page_no);
+    discardStaged(self);
+}
+
+fn evictCachedPage(self: *pager_mod.Pager, page_no: u32) void {
+    var i: usize = 0;
+    while (i < self.cache.items.len) {
+        if (self.cache.items[i].page_no == page_no) {
+            const evicted = self.cache.orderedRemove(i);
+            self.allocator.free(evicted.data);
+            return;
+        }
+        i += 1;
+    }
+}
+
 /// Drop any uncommitted staged frames and free their snapshots.
 /// Called by `detach` (= `Pager.close`) and by future ROLLBACK paths.
 pub fn discardStaged(self: *pager_mod.Pager) void {
