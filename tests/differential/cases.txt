@@ -1401,3 +1401,61 @@ SELECT 1e20 % 3
 SELECT typeof(1e20 % 3)
 SELECT 7 % 0
 
+# Iter29.Q: CAST(TEXT/BLOB AS NUMERIC) collapses to INTEGER when the
+# parsed REAL is exactly i64-representable. sqlite3 quirks:
+#  - TEXT 'foo' / '' / non-numeric → INTEGER 0 (not REAL 0.0).
+#  - TEXT '5.0' / '1.5e2' (integer-valued REAL) → INTEGER.
+#  - TEXT '5.5' / '-1.5' / '1.5e-2' (true REAL) → REAL.
+#  - TEXT '1e20' (integer-valued but out of i64 range) → REAL.
+#  - TEXT '5abc' / ' 5 ' (leading-int + trailing junk) → INTEGER via
+#    the leading-i64 fast path (no fractional syntax).
+#  - REAL source 5.0 (NOT via TEXT) → REAL — sqlite3 doesn't collapse
+#    direct REALs in this version.
+#  - BLOB x'AB' → 0 INTEGER (lenient parseFloat returns 0.0, collapses).
+SELECT cast('foo' AS NUMERIC)
+SELECT typeof(cast('foo' AS NUMERIC))
+SELECT cast('' AS NUMERIC)
+SELECT typeof(cast('' AS NUMERIC))
+SELECT cast('5' AS NUMERIC)
+SELECT typeof(cast('5' AS NUMERIC))
+SELECT cast(' 5 ' AS NUMERIC)
+SELECT typeof(cast(' 5 ' AS NUMERIC))
+SELECT cast('5abc' AS NUMERIC)
+SELECT typeof(cast('5abc' AS NUMERIC))
+SELECT cast('5.0' AS NUMERIC)
+SELECT typeof(cast('5.0' AS NUMERIC))
+SELECT cast('5.5' AS NUMERIC)
+SELECT typeof(cast('5.5' AS NUMERIC))
+SELECT cast('-1.5' AS NUMERIC)
+SELECT typeof(cast('-1.5' AS NUMERIC))
+SELECT cast('1.5e2' AS NUMERIC)
+SELECT typeof(cast('1.5e2' AS NUMERIC))
+SELECT cast('1.5e-2' AS NUMERIC)
+SELECT typeof(cast('1.5e-2' AS NUMERIC))
+SELECT cast('1e10' AS NUMERIC)
+SELECT typeof(cast('1e10' AS NUMERIC))
+SELECT cast('1e20' AS NUMERIC)
+SELECT typeof(cast('1e20' AS NUMERIC))
+SELECT cast('1e308' AS NUMERIC)
+SELECT typeof(cast('1e308' AS NUMERIC))
+SELECT cast(5 AS NUMERIC)
+SELECT typeof(cast(5 AS NUMERIC))
+SELECT cast(5.0 AS NUMERIC)
+SELECT typeof(cast(5.0 AS NUMERIC))
+SELECT cast(5.5 AS NUMERIC)
+SELECT typeof(cast(5.5 AS NUMERIC))
+SELECT cast(NULL AS NUMERIC)
+SELECT typeof(cast(NULL AS NUMERIC))
+SELECT cast(x'AB' AS NUMERIC)
+SELECT typeof(cast(x'AB' AS NUMERIC))
+SELECT cast('99999999999999999999' AS NUMERIC)
+SELECT typeof(cast('99999999999999999999' AS NUMERIC))
+SELECT cast('-99999999999999999999' AS NUMERIC)
+SELECT typeof(cast('-99999999999999999999' AS NUMERIC))
+SELECT cast('99999999999999999999' AS INTEGER)
+SELECT typeof(cast('99999999999999999999' AS INTEGER))
+SELECT cast('-5.0' AS NUMERIC)
+SELECT typeof(cast('-5.0' AS NUMERIC))
+SELECT cast('-100' AS NUMERIC)
+SELECT typeof(cast('-100' AS NUMERIC))
+

@@ -55,21 +55,52 @@ pub fn castValue(allocator: std.mem.Allocator, v: Value, target: ast.Expr.Affini
 fn castNumeric(v: Value) Error!Value {
     return switch (v) {
         .integer => Value{ .integer = v.integer },
-        // sqlite3 NUMERIC keeps the source's REAL when it was already real
-        // — `CAST(1.0 AS NUMERIC)` returns 1.0. We follow that.
+        // sqlite3 NUMERIC keeps a direct REAL source as REAL —
+        // `CAST(5.0 AS NUMERIC)` returns 5.0 (typeof real), even though
+        // 5.0 is integer-representable. The integer-collapse only fires
+        // for TEXT/BLOB inputs.
         .real => Value{ .real = v.real },
         .text, .blob => blk: {
             const bytes = if (v == .text) v.text else v.blob;
-            // Try integer first; fall back to real if the source had a
-            // decimal point / exponent.
-            if (parseLeadingI64(bytes)) |i| {
+            // Fast path: leading-integer with no fractional syntax stays
+            // INTEGER. Crucially this uses the *strict* (non-saturating)
+            // parser — sqlite3 quirk: `cast('99999999999999999999' AS
+            // NUMERIC)` returns REAL `1e20`, not saturated LLONG_MAX,
+            // because NUMERIC's integer-collapse only fires when the
+            // value fits cleanly. The INTEGER cast path keeps saturating
+            // semantics through `coerceToIntegerSat`.
+            if (parseLeadingI64Strict(bytes)) |i| {
                 if (!hasFractionalSyntax(bytes)) break :blk Value{ .integer = i };
             }
+            // Otherwise: lenient parseFloat (`'foo'` / `''` / unparseable
+            // → 0.0). If the resulting REAL is integer-representable in
+            // i64, collapse to INTEGER — this matches sqlite3's
+            // sqlite3VdbeMemNumerify path for TEXT-source CAST AS
+            // NUMERIC. `'5.0'` → 5, `'1.5e2'` → 150, `'foo'` → 0,
+            // `'1e20'` (out of i64 range) → REAL.
             const r = std.fmt.parseFloat(f64, std.mem.trim(u8, bytes, " \t\n\r")) catch 0.0;
+            if (realIsExactI64(r)) |i| break :blk Value{ .integer = i };
             break :blk Value{ .real = r };
         },
         .null => unreachable, // handled by caller
     };
+}
+
+/// Returns the i64 form of `r` if `r` is finite, in i64 range, and
+/// round-trips byte-equal through f64. Used by the TEXT/BLOB → NUMERIC
+/// integer-collapse path. The strict round-trip test rejects values
+/// that lost fractional precision (`1e20`, `5.5`) — those stay REAL.
+fn realIsExactI64(r: f64) ?i64 {
+    if (std.math.isNan(r) or std.math.isInf(r)) return null;
+    // f64-representable bounds for i64. Comparing against std.math.maxInt(i64)
+    // promoted to f64 silently rounds up to 2^63 (out of range), so use
+    // the literal nearest-representable bound.
+    const i64_max_f: f64 = 9.2233720368547758e18;
+    const i64_min_f: f64 = -9.2233720368547758e18;
+    if (r >= i64_max_f or r <= i64_min_f) return null;
+    const i: i64 = @intFromFloat(@trunc(r));
+    if (@as(f64, @floatFromInt(i)) != r) return null;
+    return i;
 }
 
 fn coerceToIntegerSat(v: Value) i64 {
@@ -104,8 +135,23 @@ fn coerceToReal(v: Value) f64 {
 
 /// sqlite3-style integer extraction: skip ASCII whitespace, read optional
 /// `+`/`-`, accumulate digits, stop at first non-digit. Returns null when
-/// no digits were seen (caller substitutes 0). Saturates on i64 overflow.
+/// no digits were seen (caller substitutes 0). Saturates on i64 overflow
+/// — used by `CAST AS INTEGER` which mirrors sqlite3 atoi64 semantics.
 fn parseLeadingI64(bytes: []const u8) ?i64 {
+    return parseLeadingI64Inner(bytes, .saturate);
+}
+
+/// Same as `parseLeadingI64` but returns null on i64 overflow instead of
+/// saturating. Used by the NUMERIC cast fast path: sqlite3 reserves
+/// integer collapse for values that fit cleanly; `'99...'` runs that
+/// overflow fall back to REAL via parseFloat.
+fn parseLeadingI64Strict(bytes: []const u8) ?i64 {
+    return parseLeadingI64Inner(bytes, .strict);
+}
+
+const OverflowMode = enum { saturate, strict };
+
+fn parseLeadingI64Inner(bytes: []const u8, mode: OverflowMode) ?i64 {
     var i: usize = 0;
     while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '\n' or bytes[i] == '\r')) i += 1;
     var neg = false;
@@ -117,9 +163,11 @@ fn parseLeadingI64(bytes: []const u8) ?i64 {
     var n: i64 = 0;
     while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) {
         const d: i64 = bytes[i] - '0';
-        // Saturate before overflow rather than wrap. matches sqlite3 atoi64.
         if (n > @divTrunc(std.math.maxInt(i64) - d, 10)) {
-            return if (neg) std.math.minInt(i64) else std.math.maxInt(i64);
+            return switch (mode) {
+                .saturate => if (neg) std.math.minInt(i64) else std.math.maxInt(i64),
+                .strict => null,
+            };
         }
         n = n * 10 + d;
     }
