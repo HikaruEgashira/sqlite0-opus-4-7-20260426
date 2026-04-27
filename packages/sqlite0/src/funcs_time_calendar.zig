@@ -68,12 +68,14 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
         if (hour > 23 or minute > 59) return null;
         var second: u8 = 0;
         var ms_tail_start: usize = 5;
+        var seconds_present = false;
         if (s.len >= 8 and s[5] == ':') {
             second = parseUintFixed(u8, s[6..8]) orelse return null;
             if (second > 59) return null;
             ms_tail_start = 8;
+            seconds_present = true;
         }
-        const tail = parseTzSubsecTail(s[ms_tail_start..], ms_tail_start == 8) orelse return null;
+        const tail = parseTzSubsecTail(s[ms_tail_start..], seconds_present) orelse return null;
         var dt: DateTime = .{ .year = 2000, .month = 1, .day = 1, .hour = hour, .minute = minute, .second = second, .millisecond = tail.ms };
         if (tail.offset_min != 0) dt = applyTzOffset(dt, tail.offset_min) orelse return null;
         return dt;
@@ -98,12 +100,14 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
         if (hour > 23 or minute > 59) return null;
         var second: u8 = 0;
         var tail_start: usize = 16;
+        var seconds_present = false;
         if (s.len >= 19 and s[16] == ':') {
             second = parseUintFixed(u8, s[17..19]) orelse return null;
             if (second > 59) return null;
             tail_start = 19;
+            seconds_present = true;
         }
-        const tail = parseTzSubsecTail(s[tail_start..], tail_start == 19) orelse return null;
+        const tail = parseTzSubsecTail(s[tail_start..], seconds_present) orelse return null;
         dt.hour = hour;
         dt.minute = minute;
         dt.second = second;
