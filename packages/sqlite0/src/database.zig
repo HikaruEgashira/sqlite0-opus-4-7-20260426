@@ -24,6 +24,7 @@ const ops = @import("ops.zig");
 const stmt_mod = @import("stmt.zig");
 const parser_mod = @import("parser.zig");
 const engine = @import("engine.zig");
+const pager_mod = @import("pager.zig");
 
 const Value = value_mod.Value;
 pub const Error = ops.Error;
@@ -48,13 +49,22 @@ pub const StatementResult = union(enum) {
     }
 };
 
-/// In-memory table. All strings (name keys, column names) and `Value`
-/// payloads inside `rows` are owned by `Database.allocator`. ADR-0003 §2:
-/// no type affinity tracking in Phase 2; Iter14.B leaves `rows` empty and
-/// Iter14.C populates it via INSERT.
+/// Table backed by either the in-memory `rows` ArrayList (CREATE TABLE
+/// path, in-memory Database) or by a Pager-resident B-tree at
+/// `root_page`. Both worlds carry the same column-name slice; the cursor
+/// implementation forks on `root_page == 0`.
+///
+/// All strings (name keys, column names) and `Value` payloads inside
+/// `rows` are owned by `Database.allocator`. `root_page` is just a
+/// number — the actual page bytes belong to the Pager (Iter25.B/C,
+/// ADR-0005 §2). ADR-0003 §2: no type affinity tracking in Phase 2.
 pub const Table = struct {
     columns: [][]const u8,
     rows: std.ArrayListUnmanaged([]Value) = .empty,
+    /// Non-zero when this table lives in a Pager-backed sqlite3 .db
+    /// file. 0 means in-memory (CREATE TABLE on a memory Database).
+    /// `engine_from.resolveSource` forks on this value.
+    root_page: u32 = 0,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         for (self.rows.items) |row| {
@@ -80,9 +90,33 @@ pub const ExecResult = struct {
 pub const Database = struct {
     allocator: std.mem.Allocator,
     tables: std.StringHashMapUnmanaged(Table) = .{},
+    /// Open Pager when this Database was constructed via `openFile`. The
+    /// flock travels with Database lifetime: `deinit` releases it. Null
+    /// for the in-memory CREATE TABLE path. Tables with non-zero
+    /// `root_page` reference pages owned by this pager.
+    pager: ?pager_mod.Pager = null,
 
     pub fn init(allocator: std.mem.Allocator) Database {
         return .{ .allocator = allocator };
+    }
+
+    /// Open a sqlite3 .db file. Acquires the Pager's exclusive flock
+    /// for the lifetime of the Database, scans `sqlite_schema` (page 1)
+    /// to populate `tables` with `root_page` set, and returns the
+    /// constructed Database. `deinit` releases the flock.
+    pub fn openFile(allocator: std.mem.Allocator, path: []const u8) !Database {
+        const p = try pager_mod.Pager.open(allocator, path);
+        // The schema scanner takes a borrowed pager pointer; since `p`
+        // is a value, we move it into the Database first and then run
+        // the scan against the moved-in pager so the pointer stays
+        // stable when callers later hand `&db.pager.?` to BtreeCursor.
+        var db: Database = .{ .allocator = allocator, .pager = p };
+        errdefer db.deinit();
+        // schema.zig imports database — break the cycle with a
+        // function-pointer-style indirection via a local @import.
+        const schema = @import("schema.zig");
+        try schema.loadFromPager(&db, &db.pager.?);
+        return db;
     }
 
     pub fn deinit(self: *Database) void {
@@ -92,6 +126,7 @@ pub const Database = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.tables.deinit(self.allocator);
+        if (self.pager) |*p| p.close();
     }
 
     /// Register a new empty table. Returns `Error.TableAlreadyExists` if a

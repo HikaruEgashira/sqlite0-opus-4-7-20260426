@@ -1,0 +1,57 @@
+# File-mode differential cases.
+#
+# Format per case (one case per non-empty paragraph):
+#   SETUP: <SQL fed to `sqlite3 fix.db` to build the fixture>
+#   QUERY: <SQL fed to BOTH `sqlite3 fix.db` and `sqlite0 -file fix.db` for diff>
+#
+# Each blank-line-separated block is one case. Lines starting with `#` are
+# ignored. SETUP runs once via the system sqlite3 CLI to materialise the
+# .db file; QUERY then runs against both engines and the outputs must match
+# byte-for-byte.
+
+SETUP: CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z');
+QUERY: SELECT * FROM t
+
+SETUP: CREATE TABLE n(x INTEGER); INSERT INTO n VALUES (10), (20), (30), (40);
+QUERY: SELECT x FROM n WHERE x > 15
+
+SETUP: CREATE TABLE p(name TEXT, age INTEGER); INSERT INTO p VALUES ('alice', 30), ('bob', 25), ('carol', 35);
+QUERY: SELECT name FROM p WHERE age >= 30 ORDER BY name
+
+SETUP: CREATE TABLE k(c); INSERT INTO k VALUES ('apple'), ('banana'), ('cherry');
+QUERY: SELECT COUNT(*) FROM k
+
+SETUP: CREATE TABLE pair(a, b); INSERT INTO pair VALUES (1, 2), (3, 4), (5, 6);
+QUERY: SELECT a + b FROM pair
+
+# Multi-page B-tree: 500 rows of moderate width force the table B-tree to
+# split into multiple leaves (and likely an interior root). Exercises
+# btree_walk.TableLeafWalker end-to-end on a real sqlite3-emitted tree.
+SETUP: CREATE TABLE big(n INTEGER, label TEXT); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 500) INSERT INTO big SELECT i, 'row-' || i FROM c;
+QUERY: SELECT COUNT(*) FROM big
+
+SETUP: CREATE TABLE big(n INTEGER, label TEXT); WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 500) INSERT INTO big SELECT i, 'row-' || i FROM c;
+QUERY: SELECT n FROM big WHERE n = 1 OR n = 250 OR n = 500 ORDER BY n
+
+# Two tables → JOIN through both BtreeCursor instances.
+SETUP: CREATE TABLE a(id, v); CREATE TABLE b(id, w); INSERT INTO a VALUES (1, 'x'), (2, 'y'); INSERT INTO b VALUES (1, 100), (2, 200);
+QUERY: SELECT a.v, b.w FROM a JOIN b ON a.id = b.id ORDER BY a.id
+
+# Aggregate over a real-file table.
+SETUP: CREATE TABLE g(grp TEXT, val INTEGER); INSERT INTO g VALUES ('a', 1), ('a', 2), ('b', 3), ('b', 4), ('b', 5);
+QUERY: SELECT grp, SUM(val) FROM g GROUP BY grp ORDER BY grp
+
+# NULL handling in record decode. Both engines walk a table B-tree in
+# rowid (= insertion) order without an explicit ORDER BY, so the output
+# matches without referencing the rowid pseudo-column (which sqlite0
+# doesn't expose yet — Iter25.B.5 scope).
+SETUP: CREATE TABLE n2(a, b); INSERT INTO n2 VALUES (1, NULL), (NULL, 2), (3, 4);
+QUERY: SELECT a, b FROM n2
+
+# Real numbers (8-byte IEEE 754 BE).
+SETUP: CREATE TABLE r(x REAL); INSERT INTO r VALUES (1.5), (-2.25), (3.14159);
+QUERY: SELECT x FROM r ORDER BY x
+
+# BLOB column.
+SETUP: CREATE TABLE bl(payload BLOB); INSERT INTO bl VALUES (x'deadbeef'), (x'00ff');
+QUERY: SELECT length(payload) FROM bl

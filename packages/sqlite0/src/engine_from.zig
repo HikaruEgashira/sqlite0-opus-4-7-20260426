@@ -21,6 +21,7 @@ const database = @import("database.zig");
 const engine = @import("engine.zig");
 const eval = @import("eval.zig");
 const cursor_mod = @import("cursor.zig");
+const btree_cursor_mod = @import("btree_cursor.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -165,15 +166,24 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
         },
         .table_ref => |tr| blk: {
             // Phase 3a (Iter24.A): the row source goes through `Cursor`
-            // rather than reading `t.rows.items` directly. For in-memory
-            // backed tables this is purely a refactor — `materializeRows`
-            // walks the cursor and produces the same `[][]Value` shape the
-            // legacy code expected. Phase 3b (BtreeCursor, ADR-0005) will
-            // swap the cursor implementation without touching this site.
+            // rather than reading `t.rows.items` directly. Phase 3b
+            // (Iter25.B.4/5) added the BtreeCursor backend — `t.root_page
+            // != 0` indicates a Pager-resident table on a sqlite3 .db
+            // file, otherwise we use the in-memory TableCursor. The fork
+            // is the ONLY backend-specific code path; both cursors yield
+            // the same `[]Value` shape and the unified arena lifetime
+            // contract makes downstream code identical.
             const t = try engine.lookupTable(db, alloc, tr.name);
-            var tc = try alloc.create(cursor_mod.TableCursor);
-            tc.* = cursor_mod.TableCursor.open(t);
-            const c = tc.cursor();
+            const c: cursor_mod.Cursor = if (t.root_page != 0) c_blk: {
+                const pager_ptr = if (db.pager) |*pp| pp else return ops.Error.IoError;
+                const bc = try alloc.create(btree_cursor_mod.BtreeCursor);
+                bc.* = btree_cursor_mod.BtreeCursor.open(alloc, pager_ptr, t.root_page, t.columns);
+                break :c_blk bc.cursor();
+            } else c_blk: {
+                const tc = try alloc.create(cursor_mod.TableCursor);
+                tc.* = cursor_mod.TableCursor.open(t);
+                break :c_blk tc.cursor();
+            };
             const materialized = try cursor_mod.materializeRows(alloc, c);
             const out = try alloc.alloc([]const Value, materialized.len);
             for (materialized, out) |row, *slot| slot.* = row;

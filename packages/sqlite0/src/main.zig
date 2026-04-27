@@ -20,10 +20,16 @@ pub fn main(init: std.process.Init) !void {
     _ = args_iter.next();
 
     var sql_inline: ?[]const u8 = null;
+    var file_path: ?[]const u8 = null;
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--command")) {
             sql_inline = args_iter.next() orelse {
                 try stderr.writeAll("error: -c requires an argument\n");
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "-file") or std.mem.eql(u8, arg, "--file")) {
+            file_path = args_iter.next() orelse {
+                try stderr.writeAll("error: -file requires an argument\n");
                 return;
             };
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -35,7 +41,14 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var db = sqlite0.Database.init(gpa);
+    var db = if (file_path) |path|
+        sqlite0.Database.openFile(gpa, path) catch |err| {
+            try stderr.print("error: failed to open '{s}': {s}\n", .{ path, @errorName(err) });
+            stderr.flush() catch {};
+            std.process.exit(1);
+        }
+    else
+        sqlite0.Database.init(gpa);
     defer db.deinit();
 
     if (sql_inline) |sql| {
@@ -57,10 +70,12 @@ fn printHelp(w: *std.Io.Writer) !void {
         \\sqlite0 — SQLite3-compatible database (work in progress)
         \\
         \\Usage:
-        \\  sqlite0                    Start REPL
-        \\  sqlite0 -c "SQL"           Execute one statement and exit
-        \\  sqlite0 --version          Show version
-        \\  sqlite0 --help             Show this help
+        \\  sqlite0                          Start REPL (in-memory)
+        \\  sqlite0 -c "SQL"                 Execute one statement and exit
+        \\  sqlite0 -file <path>             Open a sqlite3 .db file (read-only)
+        \\  sqlite0 -file <path> -c "SQL"    Open file then run one statement
+        \\  sqlite0 --version                Show version
+        \\  sqlite0 --help                   Show this help
         \\
     );
 }
