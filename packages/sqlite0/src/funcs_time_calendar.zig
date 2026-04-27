@@ -1,15 +1,15 @@
 //! Calendar arithmetic for sqlite3-compatible date/time functions.
 //!
 //! All sqlite3 date/time results live in the proleptic Gregorian calendar
-//! over the year range 0..=9999 (matching sqlite3 3.51.0). This module is
-//! pure math — no Value, no allocator, no I/O. Format dispatch lives in
-//! `funcs_time.zig`; modifier interpretation lives in
-//! `funcs_time_modifier.zig`.
+//! over the year range -4713..=9999 (matching sqlite3 3.51.0; lower bound
+//! corresponds to JDN 0). This module is pure math — no Value, no
+//! allocator, no I/O. Format dispatch lives in `funcs_time.zig`; modifier
+//! interpretation lives in `funcs_time_modifier.zig`.
 
 const std = @import("std");
 
 pub const DateTime = struct {
-    year: u16,
+    year: i32, // -4713..=9999 (proleptic Gregorian, astronomical numbering)
     month: u8, // 1-12
     day: u8, // 1-31
     hour: u8 = 0,
@@ -18,7 +18,12 @@ pub const DateTime = struct {
     millisecond: u16 = 0, // 0-999
 };
 
-pub const Ymd = struct { year: u16, month: u8, day: u8 };
+pub const Ymd = struct { year: i32, month: u8, day: u8 };
+
+pub const min_year: i32 = -4713;
+pub const max_year: i32 = 9999;
+/// JDN of `9999-12-31` (max representable date). `julianDayNumber(9999, 12, 31)`.
+pub const max_jdn: i64 = 5373484;
 
 /// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS[.fff]][Z|±HH:MM]`,
 /// `YYYY-MM-DDTHH:MM[:SS[.fff]][Z|±HH:MM]`, or `HH:MM[:SS[.fff]][Z|±HH:MM]`
@@ -80,31 +85,42 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
         if (tail.offset_min != 0) dt = applyTzOffset(dt, tail.offset_min) orelse return null;
         return dt;
     }
-    if (s.len < 10) return null;
-    if (s[4] != '-' or s[7] != '-') return null;
-    const year = parseUintFixed(u16, s[0..4]) orelse return null;
-    const month = parseUintFixed(u8, s[5..7]) orelse return null;
-    const day = parseUintFixed(u8, s[8..10]) orelse return null;
+    // Optional `-` sign on the year (BC dates: `-0001-12-31` etc.).
+    // sqlite3 only allows a leading `-`, never `+` — `+0001-12-31` falls
+    // through to the numeric-prefix path and gets rejected as a date.
+    var off: usize = 0;
+    var year_sign: i32 = 1;
+    if (s.len >= 11 and s[0] == '-') {
+        year_sign = -1;
+        off = 1;
+    }
+    if (s.len < 10 + off) return null;
+    if (s[4 + off] != '-' or s[7 + off] != '-') return null;
+    const year_abs = parseUintFixed(u16, s[off .. 4 + off]) orelse return null;
+    const month = parseUintFixed(u8, s[5 + off .. 7 + off]) orelse return null;
+    const day = parseUintFixed(u8, s[8 + off .. 10 + off]) orelse return null;
     if (month < 1 or month > 12) return null;
     if (day < 1 or day > 31) return null;
+    const year_signed: i32 = year_sign * @as(i32, year_abs);
+    if (year_signed < min_year) return null;
 
-    var dt = DateTime{ .year = year, .month = month, .day = day };
+    var dt = DateTime{ .year = year_signed, .month = month, .day = day };
     var offset_min: i16 = 0;
-    if (s.len > 10) {
-        // Datetime with time component: needs at least HH:MM (16 chars total).
-        if (s.len < 16) return null;
-        if (s[10] != ' ' and s[10] != 'T') return null;
-        if (s[13] != ':') return null;
-        const hour = parseUintFixed(u8, s[11..13]) orelse return null;
-        const minute = parseUintFixed(u8, s[14..16]) orelse return null;
+    if (s.len > 10 + off) {
+        // Datetime with time component: needs at least HH:MM (16 chars total + sign).
+        if (s.len < 16 + off) return null;
+        if (s[10 + off] != ' ' and s[10 + off] != 'T') return null;
+        if (s[13 + off] != ':') return null;
+        const hour = parseUintFixed(u8, s[11 + off .. 13 + off]) orelse return null;
+        const minute = parseUintFixed(u8, s[14 + off .. 16 + off]) orelse return null;
         if (hour > 23 or minute > 59) return null;
         var second: u8 = 0;
-        var tail_start: usize = 16;
+        var tail_start: usize = 16 + off;
         var seconds_present = false;
-        if (s.len >= 19 and s[16] == ':') {
-            second = parseUintFixed(u8, s[17..19]) orelse return null;
+        if (s.len >= 19 + off and s[16 + off] == ':') {
+            second = parseUintFixed(u8, s[17 + off .. 19 + off]) orelse return null;
             if (second > 59) return null;
-            tail_start = 19;
+            tail_start = 19 + off;
             seconds_present = true;
         }
         const tail = parseTzSubsecTail(s[tail_start..], seconds_present) orelse return null;
@@ -198,11 +214,17 @@ fn parseUintFixed(comptime T: type, s: []const u8) ?T {
     return n;
 }
 
-pub fn isLeapYear(y: u16) bool {
-    return (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0);
+/// Proleptic Gregorian leap-year rule extended to negative (BC) years
+/// using astronomical year numbering. `@rem` keeps the `== 0` check
+/// signs-agnostic — `@rem(-100, 400) = -100 ≠ 0` correctly classifies
+/// 101 BC as non-leap; `@rem(-400, 400) = 0` keeps 401 BC leap. Verified
+/// against sqlite3 3.51.0 (`julianday('-0001-02-29')` renormalises to
+/// `-0001-03-01`; `julianday('-0008-02-29')` does not).
+pub fn isLeapYear(y: i32) bool {
+    return (@rem(y, 4) == 0 and @rem(y, 100) != 0) or @rem(y, 400) == 0;
 }
 
-pub fn daysInMonth(y: u16, m: u8) u8 {
+pub fn daysInMonth(y: i32, m: u8) u8 {
     return switch (m) {
         1, 3, 5, 7, 8, 10, 12 => 31,
         4, 6, 9, 11 => 30,
@@ -232,7 +254,7 @@ pub fn isoWeekday(dt: DateTime) u8 {
 /// civil year, the week's iso-year shifts. Year 0/9999 boundary clamps
 /// rather than overflows — those edge years matter only for %G near
 /// Jan 1 / Dec 31, and clamping keeps the rendered output deterministic.
-pub const IsoWeekYear = struct { week: u8, year: u16 };
+pub const IsoWeekYear = struct { week: u8, year: i32 };
 
 pub fn isoWeekAndYear(dt: DateTime) IsoWeekYear {
     const doy: i32 = @intCast(dayOfYear(dt));
@@ -240,12 +262,12 @@ pub fn isoWeekAndYear(dt: DateTime) IsoWeekYear {
     const week_raw = @divFloor(10 + doy - wd, 7);
 
     if (week_raw < 1) {
-        if (dt.year == 0) return .{ .week = 1, .year = 0 };
+        if (dt.year == min_year) return .{ .week = 1, .year = min_year };
         return .{ .week = weeksInYear(dt.year - 1), .year = dt.year - 1 };
     }
     const wpy = weeksInYear(dt.year);
     if (week_raw > wpy) {
-        if (dt.year == 9999) return .{ .week = wpy, .year = 9999 };
+        if (dt.year == max_year) return .{ .week = wpy, .year = max_year };
         return .{ .week = 1, .year = dt.year + 1 };
     }
     return .{ .week = @intCast(week_raw), .year = dt.year };
@@ -254,7 +276,7 @@ pub fn isoWeekAndYear(dt: DateTime) IsoWeekYear {
 /// Total ISO 8601 weeks in `y`. A year has 53 weeks iff Jan 1 is Thursday,
 /// or Jan 1 is Wednesday in a leap year (the extra leap day pushes the
 /// year's week 53 into existence). All other years have 52 weeks.
-pub fn weeksInYear(y: u16) u8 {
+pub fn weeksInYear(y: i32) u8 {
     const jan1 = DateTime{ .year = y, .month = 1, .day = 1 };
     const wd = isoWeekday(jan1);
     if (wd == 4) return 53;
@@ -289,15 +311,22 @@ pub fn dayOfWeek(dt: DateTime) u8 {
     var y: i32 = dt.year;
     if (dt.month < 3) y -= 1;
     const m_idx: usize = @intCast(dt.month - 1);
-    const dow_signed = @rem(y + @divTrunc(y, 4) - @divTrunc(y, 100) + @divTrunc(y, 400) + t[m_idx] + @as(i32, dt.day), 7);
+    // `@divFloor` (not `@divTrunc`) keeps Sakamoto's algorithm correct for
+    // negative years — e.g. `-1/4` must round toward -∞ to land on 0
+    // (not -0 from trunc) for the day-of-week parity to hold across the
+    // BC/AD boundary.
+    const dow_signed = @rem(y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + t[m_idx] + @as(i32, dt.day), 7);
     return @intCast(@mod(dow_signed, 7));
 }
 
 /// Standard Julian Day Number for the given proleptic Gregorian date at
 /// noon UTC. Wikipedia's "JDN" formula — exact for any year ≥ -4800
-/// and linear in `day` (so day-overflow input renormalises correctly
-/// when round-tripped through `jdnToYmd`).
-pub fn julianDayNumber(year: u16, month: u8, day: u8) i64 {
+/// (covering sqlite3's -4713..=9999 range) and linear in `day` (so
+/// day-overflow input renormalises correctly when round-tripped through
+/// `jdnToYmd`). Year is signed; the +4800 offset keeps the intermediate
+/// `y` positive for all in-range inputs, so `@divTrunc` and `@divFloor`
+/// agree.
+pub fn julianDayNumber(year: i32, month: u8, day: u8) i64 {
     const a: i64 = @divTrunc(14 - @as(i64, month), 12);
     const y: i64 = @as(i64, year) + 4800 - a;
     const m: i64 = @as(i64, month) + 12 * a - 3;
@@ -314,20 +343,28 @@ pub fn unixEpochSeconds(dt: DateTime) i64 {
 }
 
 /// Continuous Julian day (with fractional time-of-day) for `dt`. Mid-day UTC
-/// of JDN N is N exactly; midnight is N - 0.5. This is sqlite3's
-/// `julianday(...)` value, also used internally by every modifier path
-/// to renormalise day/month/year overflow. Sub-second precision rides
-/// through as `ms / 86_400_000` — f64 around year 2024 has ~9 fractional
-/// decimal digits, leaving ~10× headroom over the 1.16e-8 per-ms unit.
+/// of JDN N is N exactly; midnight is N - 0.5.
+///
+/// Sub-second precision detail: a naive `(jdn - 0.5) + tod_ms / 86_400_000`
+/// computation loses precision near JD 0 because `0.5 + tod_ms_frac` then
+/// `- 0.5` is a catastrophic cancellation (`julianday('-4713-11-24
+/// 12:00:00.001')` should be `1.157e-08`, not `1.157407e-08` truncated).
+/// We avoid this by re-anchoring time-of-day to noon (`tod_ms - 43_200_000`)
+/// so JD = `jdn + (tod_ms - 43_200_000)/86_400_000` — no cancellation,
+/// no `- 0.5` term.
 pub fn dateTimeToJulianFloat(dt: DateTime) f64 {
     const jdn = julianDayNumber(dt.year, dt.month, dt.day);
     const tod_ms: i64 = (@as(i64, dt.hour) * 3600 + @as(i64, dt.minute) * 60 + dt.second) * 1000 + dt.millisecond;
-    return @as(f64, @floatFromInt(jdn)) - 0.5 + @as(f64, @floatFromInt(tod_ms)) / 86_400_000.0;
+    const tod_ms_from_noon: i64 = tod_ms - 43_200_000;
+    return @as(f64, @floatFromInt(jdn)) + @as(f64, @floatFromInt(tod_ms_from_noon)) / 86_400_000.0;
 }
 
 /// Inverse of `dateTimeToJulianFloat`. Returns null if the resulting year
-/// falls outside the 0..=9999 representable range.
+/// falls outside sqlite3's `min_year..=max_year` range, or if the input
+/// JD is negative (sqlite3 rejects pre-JD-0 instants — anything earlier
+/// than `-4713-11-24 12:00:00 UTC`).
 pub fn julianFloatToDateTime(jd: f64) ?DateTime {
+    if (jd < 0) return null;
     // Convert JD (noon-aligned) → JDN-aligned days starting at midnight.
     const adj = jd + 0.5;
     var jdn_floor: i64 = @intFromFloat(@floor(adj));
@@ -364,8 +401,11 @@ pub fn julianFloatToDateTime(jd: f64) ?DateTime {
 
 /// Inverse of `julianDayNumber`. Wikipedia "Calendar date from Julian Day
 /// Number" — exact for any JDN ≥ 0 in the proleptic Gregorian calendar.
-/// Returns null when the recovered year doesn't fit our u16 0..=9999 window.
+/// Returns null when the recovered year falls outside sqlite3's nominal
+/// `min_year..=max_year` (-4713..=9999) range. JDN 0 is `-4713-11-24`,
+/// JDN 5373484 is `9999-12-31`; below 0 or above `max_jdn` → null.
 pub fn jdnToYmd(jdn: i64) ?Ymd {
+    if (jdn < 0 or jdn > max_jdn) return null;
     const a: i64 = jdn + 32044;
     const b: i64 = @divTrunc(4 * a + 3, 146097);
     const c: i64 = a - @divTrunc(146097 * b, 4);
@@ -377,7 +417,7 @@ pub fn jdnToYmd(jdn: i64) ?Ymd {
     const month: i64 = m + 3 - 12 * @divTrunc(m, 10);
     const year: i64 = 100 * b + d - 4800 + @divTrunc(m, 10);
 
-    if (year < 0 or year > 9999) return null;
+    if (year < min_year or year > max_year) return null;
     if (month < 1 or month > 12) return null;
     if (day < 1 or day > 31) return null;
     return Ymd{ .year = @intCast(year), .month = @intCast(month), .day = @intCast(day) };

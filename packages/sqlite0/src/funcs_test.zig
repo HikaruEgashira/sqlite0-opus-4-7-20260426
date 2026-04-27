@@ -205,3 +205,81 @@ test "fnRound: integer-precision tie rounds half-away-from-zero" {
     const r2 = try call(allocator, null, "round", &args2);
     try std.testing.expectEqual(@as(f64, -3.0), r2.real);
 }
+
+test "BC: date(0) → -4713-11-24" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .integer = 0 }};
+    const r = try call(allocator, null, "date", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("-4713-11-24", r.text);
+}
+
+test "BC: julianday('-4713-11-24 12:00:00') → 0.0" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "-4713-11-24 12:00:00" }};
+    const r = try call(allocator, null, "julianday", &args);
+    try std.testing.expectEqual(@as(f64, 0.0), r.real);
+}
+
+test "BC: date('-4713-11-24') (no time, JD<0) → NULL" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "-4713-11-24" }};
+    const r = try call(allocator, null, "date", &args);
+    try std.testing.expectEqual(Value.null, r);
+}
+
+test "BC: date(-1) (negative numeric) → NULL" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .integer = -1 }};
+    const r = try call(allocator, null, "date", &args);
+    try std.testing.expectEqual(Value.null, r);
+}
+
+test "BC: datetime('-0001-12-31 23:59:59') round-trips" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "-0001-12-31 23:59:59" }};
+    const r = try call(allocator, null, "datetime", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("-0001-12-31 23:59:59", r.text);
+}
+
+test "BC: %Y strftime emits 4-char-incl-sign for year -1 (printf %04d)" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%Y" }, .{ .text = "-0001-01-01" } };
+    const r = try call(allocator, null, "strftime", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("-001", r.text);
+}
+
+test "BC: date() emits 5-char sign+4-digit year for -1" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "-0001-01-01" }};
+    const r = try call(allocator, null, "date", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("-0001-01-01", r.text);
+}
+
+test "BC: julianday('-4713-11-24 12:00:00.001') ≈ 1/86_400_000 (no f64 cancellation)" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "-4713-11-24 12:00:00.001" }};
+    const r = try call(allocator, null, "julianday", &args);
+    // Expect 1.157407407407e-08 within 1 ulp.
+    const expected: f64 = 1.0 / 86_400_000.0;
+    try std.testing.expectApproxEqAbs(expected, r.real, 1e-15);
+}
+
+test "BC: date('-4713-11-24 12:00:01','-1 second') → -4713-11-24 (no f64 sub-ulp reject)" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "-4713-11-24 12:00:01" }, .{ .text = "-1 second" } };
+    const r = try call(allocator, null, "date", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("-4713-11-24", r.text);
+}
+
+test "BC: %g emits signed mod-100 (year -1 → -2; iso week boundary)" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%g" }, .{ .text = "-0001-01-01" } };
+    const r = try call(allocator, null, "strftime", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("-2", r.text);
+}

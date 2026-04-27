@@ -28,10 +28,13 @@ const std = @import("std");
 const util = @import("func_util.zig");
 const calendar = @import("funcs_time_calendar.zig");
 const modifier = @import("funcs_time_modifier.zig");
+const render = @import("funcs_time_render.zig");
 
 const Value = util.Value;
 const Error = util.Error;
 const DateTime = calendar.DateTime;
+const YearFormat = render.YearFormat;
+const renderFormat = render.renderFormat;
 
 pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len < 2) return Error.WrongArgumentCount;
@@ -42,7 +45,7 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
         else => return Value.null,
     };
     const r = parseAndApplyModifiers(args[1..]) orelse return Value.null;
-    return renderFormat(allocator, fmt, r.dt, r.subsec);
+    return renderFormat(allocator, fmt, r.dt, r.subsec, .strftime);
 }
 
 /// `date(timestring, [modifier]*)` — sqlite3 shorthand for
@@ -51,21 +54,21 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
 pub fn fnDate(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
     const r = parseAndApplyModifiers(args) orelse return Value.null;
-    return renderFormat(allocator, "%Y-%m-%d", r.dt, r.subsec);
+    return renderFormat(allocator, "%Y-%m-%d", r.dt, r.subsec, .date_func);
 }
 
 pub fn fnTime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
     const r = parseAndApplyModifiers(args) orelse return Value.null;
     const fmt = if (r.subsec) "%H:%M:%f" else "%H:%M:%S";
-    return renderFormat(allocator, fmt, r.dt, r.subsec);
+    return renderFormat(allocator, fmt, r.dt, r.subsec, .date_func);
 }
 
 pub fn fnDatetime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
     const r = parseAndApplyModifiers(args) orelse return Value.null;
     const fmt = if (r.subsec) "%Y-%m-%d %H:%M:%f" else "%Y-%m-%d %H:%M:%S";
-    return renderFormat(allocator, fmt, r.dt, r.subsec);
+    return renderFormat(allocator, fmt, r.dt, r.subsec, .date_func);
 }
 
 /// `julianday(timestring, [modifier]*)` — sqlite3 returns the
@@ -95,94 +98,6 @@ pub fn fnUnixepoch(allocator: std.mem.Allocator, args: []const Value) Error!Valu
         return Value{ .real = ms_total };
     }
     return Value{ .integer = calendar.unixEpochSeconds(r.dt) };
-}
-
-/// Core formatter — renders an already-parsed `DateTime` against the
-/// given strftime-style `fmt`. Unrecognised %-specifier → NULL (matches
-/// sqlite3's PRINTF_DATEFUNC abort-on-bad-spec rule). Caller owns the
-/// pre-parse step; this fn never re-reads `args`. `subsec` flips `%s`
-/// into the `seconds.fff` REAL-as-text rendering — a sqlite3 quirk
-/// where the modifier overrides only `%s` (other format specs are
-/// already user-controlled).
-fn renderFormat(allocator: std.mem.Allocator, fmt: []const u8, dt: DateTime, subsec: bool) Error!Value {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    var i: usize = 0;
-    while (i < fmt.len) {
-        if (fmt[i] != '%') {
-            try out.append(allocator, fmt[i]);
-            i += 1;
-            continue;
-        }
-        if (i + 1 >= fmt.len) {
-            try out.append(allocator, '%');
-            i += 1;
-            continue;
-        }
-        const conv = fmt[i + 1];
-        switch (conv) {
-            '%' => try out.append(allocator, '%'),
-            'Y' => try writeZeroPadded(allocator, &out, dt.year, 4),
-            'm' => try writeZeroPadded(allocator, &out, dt.month, 2),
-            'd' => try writeZeroPadded(allocator, &out, dt.day, 2),
-            'e' => try writeSpacePadded(allocator, &out, dt.day, 2),
-            'H' => try writeZeroPadded(allocator, &out, dt.hour, 2),
-            'I' => try writeZeroPadded(allocator, &out, twelveHour(dt.hour), 2),
-            'M' => try writeZeroPadded(allocator, &out, dt.minute, 2),
-            'S' => try writeZeroPadded(allocator, &out, dt.second, 2),
-            'f' => {
-                // sqlite3 `%f` is "SS.fff" (zero-padded second + 3-digit ms),
-                // not just the fractional part — `strftime('%S.%f', …)`
-                // surfaces this by emitting `56.56.789`. Using `dt.second`
-                // here (instead of @as(u16, dt.second)) keeps the inferred
-                // u16 promotion implicit.
-                try writeZeroPadded(allocator, &out, dt.second, 2);
-                try out.append(allocator, '.');
-                try writeZeroPadded(allocator, &out, dt.millisecond, 3);
-            },
-            'j' => try writeZeroPadded(allocator, &out, calendar.dayOfYear(dt), 3),
-            'w' => try writeZeroPadded(allocator, &out, calendar.dayOfWeek(dt), 1),
-            'u' => try writeZeroPadded(allocator, &out, isoWeekday(calendar.dayOfWeek(dt)), 1),
-            'W' => try writeZeroPadded(allocator, &out, calendar.weekOfYearMonday(dt), 2),
-            'U' => try writeZeroPadded(allocator, &out, calendar.weekOfYearSunday(dt), 2),
-            'V' => try writeZeroPadded(allocator, &out, calendar.isoWeekAndYear(dt).week, 2),
-            'G' => try writeZeroPadded(allocator, &out, calendar.isoWeekAndYear(dt).year, 4),
-            'g' => try writeZeroPadded(allocator, &out, calendar.isoWeekAndYear(dt).year % 100, 2),
-            'p' => try out.appendSlice(allocator, if (dt.hour < 12) "AM" else "PM"),
-            'P' => try out.appendSlice(allocator, if (dt.hour < 12) "am" else "pm"),
-            'R' => {
-                try writeZeroPadded(allocator, &out, dt.hour, 2);
-                try out.append(allocator, ':');
-                try writeZeroPadded(allocator, &out, dt.minute, 2);
-            },
-            'T' => {
-                try writeZeroPadded(allocator, &out, dt.hour, 2);
-                try out.append(allocator, ':');
-                try writeZeroPadded(allocator, &out, dt.minute, 2);
-                try out.append(allocator, ':');
-                try writeZeroPadded(allocator, &out, dt.second, 2);
-            },
-            's' => {
-                if (subsec) {
-                    try writeI64(allocator, &out, calendar.unixEpochSeconds(dt));
-                    try out.append(allocator, '.');
-                    try writeZeroPadded(allocator, &out, dt.millisecond, 3);
-                } else {
-                    try writeI64(allocator, &out, calendar.unixEpochSeconds(dt));
-                }
-            },
-            'J' => try writeJulianDay(allocator, &out, dt),
-            else => {
-                // Unsupported spec → NULL (sqlite3 behavior).
-                out.deinit(allocator);
-                return Value.null;
-            },
-        }
-        i += 2;
-    }
-
-    return Value{ .text = try out.toOwnedSlice(allocator) };
 }
 
 /// Parse `args[0]` as a date string and apply each `args[1..]` as a
@@ -225,22 +140,10 @@ fn parseAndApplyModifiers(args: []const Value) ?ParseResult {
             dt = autoInterpret(args[0]) orelse return null;
             mod_start = 2;
         } else {
-            const datestr = switch (args[0]) {
-                .null => return null,
-                .text => |t| t,
-                .blob => |b| b,
-                else => return null,
-            };
-            dt = calendar.parseDateTime(datestr) orelse return null;
+            dt = parsePrimaryArg(args[0]) orelse return null;
         }
     } else {
-        const datestr = switch (args[0]) {
-            .null => return null,
-            .text => |t| t,
-            .blob => |b| b,
-            else => return null,
-        };
-        dt = calendar.parseDateTime(datestr) orelse return null;
+        dt = parsePrimaryArg(args[0]) orelse return null;
     }
 
     for (args[mod_start..]) |mod_arg| {
@@ -256,7 +159,53 @@ fn parseAndApplyModifiers(args: []const Value) ?ParseResult {
         }
         dt = modifier.applyModifier(dt, mod_str) orelse return null;
     }
+    // Final-instant validation: sqlite3 rejects any JD < 0 (i.e. pre
+    // `-4713-11-24 12:00:00 UTC`). Modifier-applied DateTimes already
+    // round-trip through `julianFloatToDateTime` which guards this; the
+    // remaining hole is the no-modifier path where `parseDateTime`
+    // accepts `-4713-11-24` (00:00, JD = -0.5) but the render path
+    // would emit `-4713-11-24` instead of NULL.
+    if (calendar.dateTimeToJulianFloat(dt) < 0) return null;
     return .{ .dt = dt, .subsec = subsec };
+}
+
+/// Resolve `args[0]` for the no-modifier / non-input-mode-modifier paths.
+///
+/// sqlite3 3.42+ rule (verified against 3.51.0):
+///   * INTEGER / REAL → Julian day (must be ≥ 0).
+///   * TEXT / BLOB:
+///     - If the trimmed bytes parse end-to-end as a number AND value ≥ 0,
+///       treat as Julian day (`'1234'` → JD 1234, `'+5'` → JD 5,
+///       `'-0'` → JD 0). Negative numerics → NULL (sqlite3 quirk:
+///       `date('-1')` is rejected).
+///     - Otherwise fall through to the date-string parser
+///       (`'2024-01-01'`, `'-0001-12-31'`, etc.).
+///
+/// NULL → NULL.
+fn parsePrimaryArg(v: Value) ?DateTime {
+    switch (v) {
+        .null => return null,
+        .integer => |i| {
+            if (i < 0) return null;
+            return calendar.julianFloatToDateTime(@floatFromInt(i));
+        },
+        .real => |r| {
+            // -0.0 normalises to 0.0 — sqlite3 accepts `julianday(-0.0)`
+            // as JD 0. `r >= 0` already covers this in IEEE.
+            if (r < 0) return null;
+            return calendar.julianFloatToDateTime(r);
+        },
+        .text => |t| return parsePrimaryText(t),
+        .blob => |b| return parsePrimaryText(b),
+    }
+}
+
+fn parsePrimaryText(s: []const u8) ?DateTime {
+    if (util.parseFloatStrictOpt(s)) |jd| {
+        if (jd < 0) return null;
+        return calendar.julianFloatToDateTime(jd);
+    }
+    return calendar.parseDateTime(s);
 }
 
 fn isLiteralModifier(v: Value, name: []const u8) bool {
@@ -328,76 +277,3 @@ fn unixepochToDateTime(sec: f64) ?DateTime {
     return calendar.julianFloatToDateTime(jd);
 }
 
-/// Julian Day formatted as a shortest-unique decimal — matches sqlite3's
-/// `%J` (which uses `printf("%.16g", iJD/86400000.0)`). Returned as TEXT
-/// because `%J` is a strftime specifier; `julianday()` exists separately
-/// for the REAL-typed shape sqlite3 uses there.
-fn writeJulianDay(allocator: std.mem.Allocator, out: *std.ArrayList(u8), dt: DateTime) !void {
-    const julian = calendar.dateTimeToJulianFloat(dt);
-    // 64-byte buffer is far more than any f64's shortest decimal needs.
-    var buf: [64]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{d}", .{julian}) catch unreachable;
-    try out.appendSlice(allocator, s);
-}
-
-fn writeI64(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64) !void {
-    // 32-byte buffer fits the longest i64 decimal (20 chars + sign).
-    var buf: [32]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
-    try out.appendSlice(allocator, s);
-}
-
-/// 12-hour clock: 0 → 12, 1..11 → 1..11, 12 → 12, 13..23 → 1..11. Matches
-/// sqlite3 strftime `%I` (`hh` mod 12, with the noon/midnight 0 → 12 quirk).
-fn twelveHour(h: u16) u16 {
-    const m = h % 12;
-    return if (m == 0) 12 else m;
-}
-
-/// ISO 8601 weekday: Mon=1, Tue=2, ..., Sun=7. sqlite3 `%w` (0=Sun..6=Sat)
-/// remaps to `%u` by sending Sunday from 0 to 7.
-fn isoWeekday(w: u8) u16 {
-    return if (w == 0) 7 else w;
-}
-
-fn writeSpacePadded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16, width: u8) !void {
-    var buf: [8]u8 = undefined;
-    var i: usize = buf.len;
-    var v = value;
-    if (v == 0) {
-        i -= 1;
-        buf[i] = '0';
-    } else {
-        while (v > 0) : (v /= 10) {
-            i -= 1;
-            buf[i] = '0' + @as(u8, @intCast(v % 10));
-        }
-    }
-    const digits = buf[i..];
-    var pad: usize = 0;
-    while (digits.len + pad < width) : (pad += 1) {
-        try out.append(allocator, ' ');
-    }
-    try out.appendSlice(allocator, digits);
-}
-
-fn writeZeroPadded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16, width: u8) !void {
-    var buf: [8]u8 = undefined;
-    var i: usize = buf.len;
-    var v = value;
-    if (v == 0) {
-        i -= 1;
-        buf[i] = '0';
-    } else {
-        while (v > 0) : (v /= 10) {
-            i -= 1;
-            buf[i] = '0' + @as(u8, @intCast(v % 10));
-        }
-    }
-    const digits = buf[i..];
-    var pad: usize = 0;
-    while (digits.len + pad < width) : (pad += 1) {
-        try out.append(allocator, '0');
-    }
-    try out.appendSlice(allocator, digits);
-}

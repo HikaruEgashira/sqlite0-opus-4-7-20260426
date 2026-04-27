@@ -141,11 +141,11 @@ fn applyDelta(dt: DateTime, mod: []const u8) ?DateTime {
     // Normalise month into 1..=12 and carry into year.
     while (month > 12) : (month -= 12) year += 1;
     while (month < 1) : (month += 12) year -= 1;
-    if (year < 0 or year > 9999) return null;
+    if (year < calendar.min_year or year > calendar.max_year) return null;
     // Round-trip through JD so day-overflow (Feb 30 → Mar 1/2) renormalises,
     // then layer the fractional-month/year days carry on top.
     const adjusted = DateTime{
-        .year = @intCast(year),
+        .year = year,
         .month = @intCast(month),
         .day = dt.day,
         .hour = dt.hour,
