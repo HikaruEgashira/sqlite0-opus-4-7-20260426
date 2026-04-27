@@ -2825,3 +2825,23 @@ SELECT printf('%+ e', 1.5)
 SELECT printf('% +e', 1.5)
 SELECT printf('%+ g', 1.5)
 SELECT printf('% +g', 1.5)
+
+# unhex(text, ignore) sqlite3 quirks (Iter30.Q):
+#  * Hex chars in `ignore` are no-ops — `unhex('414243', '4')` → 'ABC'
+#    because '4' is hex first, ignore lookup never fires.
+#  * Non-hex `ignore` bytes are valid only BETWEEN pairs, never mid-pair —
+#    `unhex('4 1 4 2 4 3', ' ')` → NULL (space mid-pair after '4'),
+#    `unhex('41 42 43', ' ')` → 'ABC' (space between pairs OK).
+#  * `unhex('14243', '4')` → NULL (odd count after stripping mid-pair would
+#    fail; without strip 5 chars also odd).
+SELECT unhex('414243', '4')
+SELECT unhex('14243', '4')
+SELECT unhex('4', '4')
+SELECT unhex('41', '4')
+SELECT unhex('41 42 43', ' ')
+SELECT unhex('4 1 4 2 4 3', ' ')
+SELECT unhex('4_14_24_3', '_')
+SELECT unhex('  41 42 43  ', ' ')
+SELECT unhex('41XYZ', 'XYZ')
+SELECT unhex('44 44 44', '4 ')
+SELECT unhex('4142 43', ' ')

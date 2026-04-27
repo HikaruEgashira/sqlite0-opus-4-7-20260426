@@ -392,13 +392,23 @@ fn appendValueAsText(
     }
 }
 
-/// `unhex(text [, ignore])` — decode a hex string into a BLOB. The optional
-/// 2nd arg is a *byte set*: any input byte that occurs in `ignore` is
-/// dropped before the hex check (case-sensitive — `unhex('41x42','x')`
-/// works, `unhex('41X42','x')` does not). Whatever remains must be all
-/// `[0-9A-Fa-f]` and an even number of bytes; otherwise the result is
-/// NULL. NULL on either argument propagates to NULL. On success the
-/// result is always BLOB, even when empty (`unhex('','') = x''`).
+/// `unhex(text [, ignore])` — decode a hex string into a BLOB.
+///
+/// Algorithm (matches sqlite3 3.51.0):
+///   * Hex digits (`[0-9A-Fa-f]`) are always processed as digits — even
+///     if they also appear in the `ignore` byte-set. (`unhex('414243',
+///     '4')` → `'ABC'`, the `'4'` in ignore is moot because `'4'` is
+///     hex first.)
+///   * Non-hex bytes that occur in `ignore` are skipped, BUT only when
+///     we're between pairs (i.e. just emitted a complete byte). Skipping
+///     a non-hex ignore byte mid-pair (after the high nibble, before the
+///     low nibble) is a sqlite3 error → NULL. (`unhex('4 1 4 2 4 3',
+///     ' ')` → NULL because the space lands after `'4'`'s high nibble.)
+///   * Any other non-hex byte → NULL.
+///   * Final state must be between-pair (no dangling high nibble).
+///
+/// NULL on either argument propagates to NULL. On success the result is
+/// always BLOB, even when empty (`unhex('','') = x''`).
 pub fn fnUnhex(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len < 1 or args.len > 2) return Error.WrongArgumentCount;
     for (args) |a| if (a == .null) return Value.null;
@@ -414,26 +424,30 @@ pub fn fnUnhex(allocator: std.mem.Allocator, args: []const Value) Error!Value {
         break :blk i;
     } else "";
 
-    var hex_only: std.ArrayList(u8) = .empty;
-    defer hex_only.deinit(allocator);
-    try hex_only.ensureTotalCapacity(allocator, subject.len);
-
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, subject.len / 2 + 1);
+    var pending_hi: ?u8 = null;
     for (subject) |b| {
-        if (std.mem.indexOfScalar(u8, ignore, b) != null) continue;
-        if (!isHexDigitByte(b)) return Value.null;
-        hex_only.appendAssumeCapacity(b);
+        if (isHexDigitByte(b)) {
+            const v = hexDigitValue(b);
+            if (pending_hi) |hi| {
+                try out.append(allocator, (hi << 4) | v);
+                pending_hi = null;
+            } else {
+                pending_hi = v;
+            }
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, ignore, b) != null) {
+            // Mid-pair ignore byte → sqlite3 rejects.
+            if (pending_hi != null) return Value.null;
+            continue;
+        }
+        return Value.null;
     }
-
-    if (hex_only.items.len % 2 != 0) return Value.null;
-
-    const out = try allocator.alloc(u8, hex_only.items.len / 2);
-    var i: usize = 0;
-    while (i < out.len) : (i += 1) {
-        const hi: u8 = hexDigitValue(hex_only.items[i * 2]);
-        const lo: u8 = hexDigitValue(hex_only.items[i * 2 + 1]);
-        out[i] = (hi << 4) | lo;
-    }
-    return Value{ .blob = out };
+    if (pending_hi != null) return Value.null;
+    return Value{ .blob = try out.toOwnedSlice(allocator) };
 }
 
 fn isHexDigitByte(c: u8) bool {
