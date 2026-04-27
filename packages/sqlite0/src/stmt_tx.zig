@@ -1,22 +1,30 @@
-//! Transaction-control statement parsing (Iter27.E): BEGIN, COMMIT,
-//! ROLLBACK. Tiny dedicated module — same shape as `stmt_pragma.zig`,
-//! kept separate so `stmt.zig` doesn't grow another small parser.
+//! Transaction-control statement parsing (Iter27.E + Iter27.F):
+//! BEGIN, COMMIT, ROLLBACK [TO], SAVEPOINT, RELEASE.
 //!
-//! Iter27.E only supports flat single-level transactions. SAVEPOINT /
-//! RELEASE / nested ROLLBACK TO are deferred — they need a savepoint
-//! frame stack that the engine doesn't yet have.
+//! Returns a `TxControl` union so the engine dispatches a single
+//! function for all six forms — savepoint stack manipulation lives
+//! alongside flat tx control because the implicit-tx semantics
+//! (SAVEPOINT outside BEGIN opens a tx, RELEASE of the outermost
+//! implicit savepoint commits it) are inseparable from BEGIN/COMMIT.
 //!
-//! ## Optional suffixes (silently consumed)
+//! ## Optional suffixes silently consumed
 //!
-//! sqlite3 allows:
 //!   - `BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE] [TRANSACTION]`
 //!   - `COMMIT [TRANSACTION]`
-//!   - `ROLLBACK [TRANSACTION]`
+//!   - `ROLLBACK [TRANSACTION] [TO [SAVEPOINT] name]`
+//!   - `SAVEPOINT name`
+//!   - `RELEASE [SAVEPOINT] name`
 //!
 //! The DEFERRED/IMMEDIATE/EXCLUSIVE modifiers control when the
 //! database lock is acquired. We hold an exclusive flock for the
 //! Database lifetime regardless (Iter25.A), so all three reduce to
-//! the same behaviour. Consume them silently rather than rejecting.
+//! the same behaviour. Consume them silently.
+//!
+//! ## Name lifetime
+//!
+//! The `[]const u8` slice in `.savepoint` / `.release` / `.rollback_to`
+//! borrows from `Parser.src` — the raw SQL text. Caller must dupe into
+//! `db.allocator` before storing in the savepoint stack.
 
 const std = @import("std");
 const ops = @import("ops.zig");
@@ -26,31 +34,75 @@ const func_util = @import("func_util.zig");
 const Parser = parser_mod.Parser;
 const Error = ops.Error;
 
-pub const TransactionKind = enum { begin, commit, rollback };
+pub const TxControl = union(enum) {
+    begin,
+    commit,
+    rollback,
+    savepoint: []const u8,
+    release: []const u8,
+    rollback_to: []const u8,
+};
 
-pub fn parseTransactionStatement(p: *Parser) Error!TransactionKind {
-    const kind: TransactionKind = switch (p.cur.kind) {
-        .keyword_begin => .begin,
-        .keyword_commit => .commit,
-        .keyword_rollback => .rollback,
-        else => return Error.SyntaxError,
-    };
-    p.advance();
-
-    // BEGIN [DEFERRED|IMMEDIATE|EXCLUSIVE]
-    if (kind == .begin and p.cur.kind == .identifier) {
-        const id = p.cur.slice(p.src);
-        if (func_util.eqlIgnoreCase(id, "deferred") or
-            func_util.eqlIgnoreCase(id, "immediate") or
-            func_util.eqlIgnoreCase(id, "exclusive"))
-        {
+pub fn parseTxStatement(p: *Parser) Error!TxControl {
+    switch (p.cur.kind) {
+        .keyword_begin => {
             p.advance();
-        }
+            // Optional DEFERRED|IMMEDIATE|EXCLUSIVE — single connection
+            // model, so they're all the same to us.
+            if (p.cur.kind == .identifier) {
+                const id = p.cur.slice(p.src);
+                if (func_util.eqlIgnoreCase(id, "deferred") or
+                    func_util.eqlIgnoreCase(id, "immediate") or
+                    func_util.eqlIgnoreCase(id, "exclusive"))
+                {
+                    p.advance();
+                }
+            }
+            consumeOptionalTransaction(p);
+            return .begin;
+        },
+        .keyword_commit => {
+            p.advance();
+            consumeOptionalTransaction(p);
+            return .commit;
+        },
+        .keyword_rollback => {
+            p.advance();
+            consumeOptionalTransaction(p);
+            // ROLLBACK [TRANSACTION] [TO [SAVEPOINT] name] — the TO
+            // clause turns this into a savepoint operation that retains
+            // both the named frame and the surrounding transaction.
+            if (p.cur.kind == .keyword_to) {
+                p.advance();
+                if (p.cur.kind == .keyword_savepoint) p.advance();
+                if (p.cur.kind != .identifier) return Error.SyntaxError;
+                const name = p.cur.slice(p.src);
+                p.advance();
+                return .{ .rollback_to = name };
+            }
+            return .rollback;
+        },
+        .keyword_savepoint => {
+            p.advance();
+            if (p.cur.kind != .identifier) return Error.SyntaxError;
+            const name = p.cur.slice(p.src);
+            p.advance();
+            return .{ .savepoint = name };
+        },
+        .keyword_release => {
+            p.advance();
+            if (p.cur.kind == .keyword_savepoint) p.advance();
+            if (p.cur.kind != .identifier) return Error.SyntaxError;
+            const name = p.cur.slice(p.src);
+            p.advance();
+            return .{ .release = name };
+        },
+        else => return Error.SyntaxError,
     }
+}
 
-    // [TRANSACTION] suffix common to all three.
+fn consumeOptionalTransaction(p: *Parser) void {
     if (p.cur.kind == .identifier and func_util.eqlIgnoreCase(p.cur.slice(p.src), "transaction")) {
         p.advance();
     }
-    return kind;
 }

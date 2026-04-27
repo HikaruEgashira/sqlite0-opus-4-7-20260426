@@ -650,3 +650,59 @@ SETUP: CREATE TABLE t(n INTEGER);
 WAL_SETUP: INSERT INTO t VALUES(99);
 MUTATE: BEGIN; INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); ROLLBACK; SELECT count(*) FROM t;
 VERIFY: SELECT n FROM t
+
+# Iter27.F — SAVEPOINT/RELEASE/ROLLBACK TO. Partial-rollback inside
+# an explicit BEGIN: the rolled-back INSERTs (2,3) vanish, the
+# pre-savepoint INSERT (1) and post-rollback INSERT (99) survive.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: SELECT 1;
+MUTATE: BEGIN; INSERT INTO t VALUES (1); SAVEPOINT s1; INSERT INTO t VALUES (2); INSERT INTO t VALUES (3); ROLLBACK TO s1; INSERT INTO t VALUES (99); RELEASE s1; COMMIT;
+VERIFY: SELECT n FROM t ORDER BY n
+
+# Implicit-tx SAVEPOINT: no surrounding BEGIN. SAVEPOINT opens an
+# implicit tx that the matching RELEASE commits — the loop hook in
+# Database.execute flushes the staged batch when in_transaction
+# transitions back to false.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: SELECT 1;
+MUTATE: SAVEPOINT s1; INSERT INTO t VALUES (1); INSERT INTO t VALUES (2); RELEASE s1;
+VERIFY: SELECT n FROM t ORDER BY n
+
+# Same-page across savepoint boundary (discriminating snapshot test).
+# All 5 INSERTs land on the same leaf page. After ROLLBACK TO s1,
+# the staged page snapshot must reflect the "1 row" version, NOT
+# the "5 rows" version that writeFrame's in-place memcpy left in
+# staged_frames[0].data. Without per-savepoint snapshot the SELECT
+# would surface count=5 (silent corruption); sqlite3 returns 1.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: SELECT 1;
+MUTATE: BEGIN; INSERT INTO t VALUES (1); SAVEPOINT s1; INSERT INTO t VALUES (2); INSERT INTO t VALUES (3); INSERT INTO t VALUES (4); INSERT INTO t VALUES (5); ROLLBACK TO s1; COMMIT; SELECT count(*),sum(n) FROM t;
+VERIFY: SELECT n FROM t
+
+# Nested SAVEPOINTs inside BEGIN. ROLLBACK TO outer drops the
+# inner savepoint stack frame too. Then a new INSERT post-rollback
+# survives the COMMIT.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: SELECT 1;
+MUTATE: BEGIN; INSERT INTO t VALUES (1); SAVEPOINT a; INSERT INTO t VALUES (2); SAVEPOINT b; INSERT INTO t VALUES (3); ROLLBACK TO a; INSERT INTO t VALUES (99); RELEASE a; COMMIT;
+VERIFY: SELECT n FROM t ORDER BY n
+
+# Full ROLLBACK should drop the entire savepoint stack — RELEASE
+# afterwards would error if any frame leaked. Verifies popAllSavepoints
+# fires on .rollback regardless of whether the savepoint is still in
+# the named stack.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (10);
+MUTATE: BEGIN; SAVEPOINT s1; INSERT INTO t VALUES (1); ROLLBACK;
+VERIFY: SELECT n FROM t
+
+# RELEASE inside an explicit BEGIN must NOT drop in_transaction (the
+# savepoint isn't `is_implicit_tx`). Without the guard the loop hook
+# would flush staged frames mid-tx, then the COMMIT line below would
+# either commit a half-built batch or raise. With the guard, the
+# post-RELEASE INSERT(1) accumulates and the COMMIT flushes the whole
+# batch as one frame.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: SELECT 1;
+MUTATE: BEGIN; SAVEPOINT s1; RELEASE s1; INSERT INTO t VALUES (1); COMMIT;
+VERIFY: SELECT n FROM t

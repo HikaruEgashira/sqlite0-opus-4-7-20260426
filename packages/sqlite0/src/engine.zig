@@ -103,9 +103,9 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             const parsed = try stmt_mod.parsePragmaStatement(p);
             return engine_meta.executePragma(db, parsed);
         },
-        .keyword_begin, .keyword_commit, .keyword_rollback => {
-            const kind = try stmt_mod.parseTransactionStatement(p);
-            return engine_meta.executeTransaction(db, kind);
+        .keyword_begin, .keyword_commit, .keyword_rollback, .keyword_savepoint, .keyword_release => {
+            const ctrl = try stmt_mod.parseTxStatement(p);
+            return engine_meta.executeTxControl(db, ctrl);
         },
         else => return Error.SyntaxError,
     }

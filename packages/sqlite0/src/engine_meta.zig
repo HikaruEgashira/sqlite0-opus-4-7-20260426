@@ -17,35 +17,117 @@ const Database = database.Database;
 const StatementResult = database.StatementResult;
 const Error = ops.Error;
 
-/// Iter27.E — handle BEGIN / COMMIT / ROLLBACK on `db`.
+/// Iter27.E + Iter27.F — handle the full transaction-control surface:
+/// BEGIN / COMMIT / ROLLBACK + SAVEPOINT / RELEASE / ROLLBACK TO.
+///
 ///   - BEGIN  : require !in_transaction (sqlite3 forbids nested);
 ///              flip `in_transaction` so the execute() loop suppresses
 ///              its per-statement commit hook for subsequent statements.
 ///   - COMMIT : require in_transaction; clear the flag and let the
-///              loop's hook flush staged frames (one batch).
+///              loop's hook flush staged frames (one batch). Discards
+///              every savepoint frame — they're subsumed by the COMMIT.
 ///   - ROLLBACK: require in_transaction; tell the pager to discard
 ///              staged frames AND evict their cached pages (otherwise
 ///              subsequent reads would see post-mutation in-memory
-///              bytes left by writeFrame's write-through). Clear the
-///              flag last so the loop hook still fires; with
-///              staged_frames now empty, `pager.commit` is a no-op.
-pub fn executeTransaction(db: *Database, kind: stmt_mod.TransactionKind) !StatementResult {
-    switch (kind) {
+///              bytes left by writeFrame's write-through). Drop every
+///              savepoint frame, then clear the flag. With staged_frames
+///              now empty, `pager.commit` is a no-op.
+///   - SAVEPOINT name: snapshot `staged_frames` and push onto the stack.
+///              When issued outside a transaction, sqlite3 implicitly
+///              opens one; we mirror that by setting `in_transaction`
+///              and tagging the savepoint as `is_implicit_tx` so a
+///              matching RELEASE can close the implicit tx.
+///   - RELEASE name: pop the named savepoint and every more-recently-
+///              pushed savepoint above it. If the released savepoint
+///              was the implicit-tx one and the stack is now empty,
+///              clear `in_transaction` so the loop hook flushes the
+///              accumulated batch (matches sqlite3's "RELEASE outermost
+///              implicit savepoint commits" rule).
+///   - ROLLBACK TO name: pop savepoints above (but KEEP the named one),
+///              then restore `staged_frames` from the named frame's
+///              snapshot. Leaves `in_transaction` untouched — the
+///              transaction continues. Per sqlite3, the named savepoint
+///              survives so a subsequent ROLLBACK TO with the same name
+///              works.
+///
+/// In-memory Database (`pager == null`): SAVEPOINT/RELEASE/ROLLBACK TO
+/// return UnsupportedFeature. They have no rollback-able layer to
+/// snapshot. BEGIN/COMMIT/ROLLBACK on in-memory remain parse-only as
+/// documented in the Iter27.E in-memory tx caveat.
+pub fn executeTxControl(db: *Database, ctrl: stmt_mod.TxControl) !StatementResult {
+    const pager_wal = @import("pager_wal.zig");
+    switch (ctrl) {
         .begin => {
             if (db.in_transaction) return Error.SyntaxError;
             db.in_transaction = true;
         },
         .commit => {
             if (!db.in_transaction) return Error.SyntaxError;
+            popAllSavepoints(db);
             db.in_transaction = false;
         },
         .rollback => {
             if (!db.in_transaction) return Error.SyntaxError;
-            if (db.pager) |*pg| @import("pager_wal.zig").rollback(pg);
+            popAllSavepoints(db);
+            if (db.pager) |*pg| pager_wal.rollback(pg);
             db.in_transaction = false;
+        },
+        .savepoint => |name| {
+            if (db.pager == null) return Error.UnsupportedFeature;
+            const pg = &db.pager.?;
+            const is_implicit = !db.in_transaction;
+            var mark = try pager_wal.createSavepointMark(pg);
+            errdefer pager_wal.freeSavepointMark(pg, &mark);
+            const name_copy = try db.allocator.dupe(u8, name);
+            errdefer db.allocator.free(name_copy);
+            try db.savepoints.append(db.allocator, .{
+                .name = name_copy,
+                .mark = mark,
+                .is_implicit_tx = is_implicit,
+            });
+            if (is_implicit) db.in_transaction = true;
+        },
+        .release => |name| {
+            const idx = findSavepointIndex(db, name) orelse return Error.SyntaxError;
+            const closes_implicit_tx = db.savepoints.items[idx].is_implicit_tx;
+            popSavepointsFrom(db, idx);
+            if (closes_implicit_tx and db.savepoints.items.len == 0) {
+                db.in_transaction = false;
+            }
+        },
+        .rollback_to => |name| {
+            const idx = findSavepointIndex(db, name) orelse return Error.SyntaxError;
+            // Pop savepoints above the named one (keep the named one
+            // itself per sqlite3 semantics: a subsequent ROLLBACK TO
+            // with the same name must still find it).
+            popSavepointsFrom(db, idx + 1);
+            if (db.pager) |*pg| try pager_wal.rollbackToMark(pg, &db.savepoints.items[idx].mark);
         },
     }
     return .transaction;
+}
+
+fn findSavepointIndex(db: *Database, name: []const u8) ?usize {
+    var i: usize = db.savepoints.items.len;
+    while (i > 0) : (i -= 1) {
+        if (func_util.eqlIgnoreCase(db.savepoints.items[i - 1].name, name)) return i - 1;
+    }
+    return null;
+}
+
+fn popSavepointsFrom(db: *Database, start: usize) void {
+    const pager_wal = @import("pager_wal.zig");
+    var i: usize = db.savepoints.items.len;
+    while (i > start) : (i -= 1) {
+        var sp = &db.savepoints.items[i - 1];
+        if (db.pager) |*pg| pager_wal.freeSavepointMark(pg, &sp.mark);
+        db.allocator.free(sp.name);
+    }
+    db.savepoints.shrinkRetainingCapacity(start);
+}
+
+fn popAllSavepoints(db: *Database) void {
+    popSavepointsFrom(db, 0);
 }
 
 /// Iter27.C / Iter27.E — supported pragmas:

@@ -485,7 +485,7 @@ const stmt_pragma = @import("stmt_pragma.zig");
 pub const ParsedPragma = stmt_pragma.ParsedPragma;
 pub const parsePragmaStatement = stmt_pragma.parsePragmaStatement;
 
-// ── BEGIN / COMMIT / ROLLBACK ──────────────────────────────────────────────
+// ── BEGIN / COMMIT / ROLLBACK + SAVEPOINT / RELEASE / ROLLBACK TO ──────────
 const stmt_tx = @import("stmt_tx.zig");
-pub const TransactionKind = stmt_tx.TransactionKind;
-pub const parseTransactionStatement = stmt_tx.parseTransactionStatement;
+pub const TxControl = stmt_tx.TxControl;
+pub const parseTxStatement = stmt_tx.parseTxStatement;

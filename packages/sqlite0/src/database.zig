@@ -100,6 +100,24 @@ pub const ExecResult = struct {
 /// `database_journal_mode_test.zig` API) can spell it `database.JournalMode`.
 pub const JournalMode = @import("journal.zig").JournalMode;
 
+/// Iter27.F — one entry on the savepoint stack. `name` is owned by
+/// `db.allocator` (duped from the parser's source slice). `mark` owns
+/// per-page snapshots of `pager.staged_frames` at savepoint time, so
+/// ROLLBACK TO can restore the staging buffer byte-for-byte (without
+/// a snapshot we'd lose pre-savepoint writes that were overwritten by
+/// post-savepoint same-page writes — `pager_wal.writeFrame` mutates
+/// the existing snapshot in place when restaging the same page).
+/// `is_implicit_tx` is true when this savepoint was the one that
+/// flipped `in_transaction` from false to true; RELEASE of an implicit
+/// outermost savepoint clears `in_transaction` so the loop hook flushes
+/// the batch (matches sqlite3's "RELEASE outermost savepoint commits
+/// the implicit tx" behaviour).
+pub const Savepoint = struct {
+    name: []u8,
+    mark: @import("pager_wal.zig").SavepointMark,
+    is_implicit_tx: bool,
+};
+
 pub const Database = struct {
     allocator: std.mem.Allocator,
     tables: std.StringHashMapUnmanaged(Table) = .{},
@@ -119,6 +137,13 @@ pub const Database = struct {
     /// commit batch (or is dropped as a unit on ROLLBACK). Implicit
     /// rollback on `deinit` discards staged frames via `pager.close`.
     in_transaction: bool = false,
+    /// Iter27.F — savepoint stack (LIFO). Entries are pushed by
+    /// SAVEPOINT, popped by RELEASE / COMMIT / ROLLBACK / by ROLLBACK
+    /// TO (which keeps the named entry but pops everything above it).
+    /// Implicit `deinit` cleanup mirrors `pager.close`'s implicit
+    /// rollback: free name + mark for every entry. Empty in the common
+    /// path (no SAVEPOINT issued).
+    savepoints: std.ArrayListUnmanaged(Savepoint) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Database {
         return .{ .allocator = allocator };
@@ -152,6 +177,16 @@ pub const Database = struct {
     }
 
     pub fn deinit(self: *Database) void {
+        // Savepoint marks must drop their snapshot pages BEFORE
+        // `pager.close()` tears down the allocator-backed staging arena.
+        // The stack is empty after a successful COMMIT/ROLLBACK; this
+        // path matters only for implicit-rollback-on-close.
+        const pager_wal = @import("pager_wal.zig");
+        for (self.savepoints.items) |*sp| {
+            if (self.pager) |*pg| pager_wal.freeSavepointMark(pg, &sp.mark);
+            self.allocator.free(sp.name);
+        }
+        self.savepoints.deinit(self.allocator);
         var it = self.tables.iterator();
         while (it.next()) |entry| {
             entry.value_ptr.deinit(self.allocator);

@@ -320,6 +320,78 @@ pub fn rollback(self: *pager_mod.Pager) void {
     discardStaged(self);
 }
 
+/// Iter27.F — per-savepoint snapshot of `staged_frames`. Each entry
+/// is a deep copy of one staged page so ROLLBACK TO can restore the
+/// exact bytes that were staged at savepoint time, even when later
+/// writes overwrote the same `staged_frames[*].data` snapshot in
+/// place (`writeFrame` does `@memcpy` over the existing slot for a
+/// re-staged page rather than appending — that's the optimisation
+/// SAVEPOINT now needs to defeat).
+pub const SavepointMark = struct {
+    saved: []SavedFrame,
+};
+
+pub const SavedFrame = struct {
+    page_no: u32,
+    /// Owned PAGE_SIZE buffer. Freed by `freeSavepointMark`.
+    data: []u8,
+};
+
+/// Snapshot the current `staged_frames` for SAVEPOINT. Empty `staged`
+/// is allowed — produces a mark with `saved.len == 0` that ROLLBACK
+/// TO will restore as "no staged frames at savepoint time" (i.e.
+/// equivalent to plain ROLLBACK for the WAL stage).
+pub fn createSavepointMark(self: *pager_mod.Pager) Error!SavepointMark {
+    const saved = self.allocator.alloc(SavedFrame, self.staged_frames.items.len) catch return Error.IoError;
+    var produced: usize = 0;
+    errdefer {
+        for (saved[0..produced]) |sf| self.allocator.free(sf.data);
+        self.allocator.free(saved);
+    }
+    while (produced < self.staged_frames.items.len) : (produced += 1) {
+        const src = self.staged_frames.items[produced];
+        const buf = self.allocator.alloc(u8, pager_mod.PAGE_SIZE) catch return Error.IoError;
+        errdefer self.allocator.free(buf);
+        @memcpy(buf, src.data);
+        saved[produced] = .{ .page_no = src.page_no, .data = buf };
+    }
+    return .{ .saved = saved };
+}
+
+/// Drop a savepoint snapshot (RELEASE, COMMIT, or close-time cleanup).
+pub fn freeSavepointMark(self: *pager_mod.Pager, mark: *SavepointMark) void {
+    for (mark.saved) |sf| self.allocator.free(sf.data);
+    self.allocator.free(mark.saved);
+    mark.saved = &.{};
+}
+
+/// Restore `staged_frames` to the state captured by `mark`.
+///   - Evict every currently-staged page from the LRU cache (their
+///     bytes may be the post-savepoint version that write-through
+///     left there).
+///   - Free the current staged_frames data and replace with deep
+///     copies of the saved snapshot.
+///   - On the next `getPage`, the cache miss + staged_frames lookup
+///     returns the saved bytes — no proactive write-through needed.
+///
+/// Edge: pages staged at savepoint time but no longer in the current
+/// `staged_frames` (only possible if we ever drop entries from
+/// staged_frames mid-tx — currently we don't, but the eviction below
+/// still covers them defensively via the saved-frames page numbers).
+pub fn rollbackToMark(self: *pager_mod.Pager, mark: *const SavepointMark) Error!void {
+    for (self.staged_frames.items) |sf| evictCachedPage(self, sf.page_no);
+    for (mark.saved) |sv| evictCachedPage(self, sv.page_no);
+    for (self.staged_frames.items) |sf| self.allocator.free(sf.data);
+    self.staged_frames.clearRetainingCapacity();
+    self.staged_frames.ensureTotalCapacity(self.allocator, mark.saved.len) catch return Error.IoError;
+    for (mark.saved) |sv| {
+        const buf = self.allocator.alloc(u8, pager_mod.PAGE_SIZE) catch return Error.IoError;
+        errdefer self.allocator.free(buf);
+        @memcpy(buf, sv.data);
+        self.staged_frames.appendAssumeCapacity(.{ .page_no = sv.page_no, .data = buf });
+    }
+}
+
 fn evictCachedPage(self: *pager_mod.Pager, page_no: u32) void {
     var i: usize = 0;
     while (i < self.cache.items.len) {

@@ -62,6 +62,9 @@ pub const TokenKind = enum {
     keyword_begin,
     keyword_commit,
     keyword_rollback,
+    keyword_savepoint,
+    keyword_release,
+    keyword_to,
     plus,
     minus,
     star,
@@ -325,6 +328,9 @@ fn keywordKind(text: []const u8) ?TokenKind {
     if (eqlIgnoreCase(text, "begin")) return .keyword_begin;
     if (eqlIgnoreCase(text, "commit")) return .keyword_commit;
     if (eqlIgnoreCase(text, "rollback")) return .keyword_rollback;
+    if (eqlIgnoreCase(text, "savepoint")) return .keyword_savepoint;
+    if (eqlIgnoreCase(text, "release")) return .keyword_release;
+    if (eqlIgnoreCase(text, "to")) return .keyword_to;
     return null;
 }
 
