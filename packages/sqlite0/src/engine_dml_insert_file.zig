@@ -13,6 +13,7 @@ const ops = @import("ops.zig");
 const database = @import("database.zig");
 const btree = @import("btree.zig");
 const btree_insert = @import("btree_insert.zig");
+const btree_overflow = @import("btree_overflow.zig");
 const btree_split = @import("btree_split.zig");
 const record_encode = @import("record_encode.zig");
 const pager_mod = @import("pager.zig");
@@ -127,7 +128,7 @@ fn insertIntoLeafRoot(
         }
         const rec = try record_encode.encodeRecord(a, new_values);
         max_rowid += 1;
-        try combined.append(a, .{ .rowid = max_rowid, .record_bytes = rec });
+        try combined.append(a, try buildRebuildCellWithOverflow(pager, max_rowid, rec, usable_size));
         inserted += 1;
     }
 
@@ -144,9 +145,33 @@ fn insertIntoLeafRoot(
             if (header_offset != 0) return Error.UnsupportedFeature;
             try btree_split.balanceDeeperRoot(pager, t.root_page, combined.items);
         },
-        .oversize_record => return Error.UnsupportedFeature, // Iter26.C
+        .oversize_record => return Error.IoError, // invariant: handled above
     }
     return inserted;
+}
+
+/// Build a `RebuildCell` for a freshly-encoded record. When the record
+/// exceeds the inline threshold X, allocates the overflow chain BEFORE
+/// returning so the caller's leaf rebuild commits the head pointer last
+/// (parent-last invariant — chain pages exist on disk, but no leaf
+/// references them until the rebuild lands).
+fn buildRebuildCellWithOverflow(
+    pager: *pager_mod.Pager,
+    rowid: i64,
+    rec: []const u8,
+    usable_size: usize,
+) !btree_insert.RebuildCell {
+    const split = btree_overflow.inlineSplitForPayload(rec.len, usable_size);
+    if (split.spill_len == 0) {
+        return .{ .rowid = rowid, .record_bytes = rec };
+    }
+    const head = try btree_overflow.allocateOverflowChain(pager, rec, split.inline_len);
+    return .{
+        .rowid = rowid,
+        .record_bytes = rec[0..split.inline_len],
+        .overflow_head = head,
+        .payload_len = rec.len,
+    };
 }
 
 /// Iter26.B.2: depth-1 (interior root → leaves) INSERT path. We always
@@ -209,7 +234,7 @@ fn insertIntoInteriorRoot(
         }
         const rec = try record_encode.encodeRecord(a, new_values);
         max_rowid += 1;
-        try combined.append(a, .{ .rowid = max_rowid, .record_bytes = rec });
+        try combined.append(a, try buildRebuildCellWithOverflow(pager, max_rowid, rec, usable_size));
         inserted += 1;
     }
 
@@ -232,7 +257,7 @@ fn insertIntoInteriorRoot(
                 combined.items,
             );
         },
-        .oversize_record => return Error.UnsupportedFeature, // Iter26.C
+        .oversize_record => return Error.IoError, // invariant: handled above
     }
     return inserted;
 }

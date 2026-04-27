@@ -38,12 +38,26 @@ pub const Error = ops.Error;
 
 pub const InsertOutcome = enum { ok, page_full };
 
-/// One (rowid, record_bytes) pair to install into a fresh leaf page.
-/// Borrowed slice — `rebuildLeafTablePage` copies into the destination
-/// buffer.
+/// One (rowid, inline_bytes, [overflow_head]) entry to install into a
+/// fresh leaf page. `record_bytes` is the INLINE portion of the
+/// payload — equal to the full payload when there's no chain. When
+/// `overflow_head != 0`, the cell carries a 4-byte big-endian
+/// trailing pointer to the head of the overflow chain, and
+/// `payload_len` MUST be set to the full payload length (necessarily
+/// > `record_bytes.len`).
 pub const RebuildCell = struct {
     rowid: i64,
     record_bytes: []const u8,
+    overflow_head: u32 = 0,
+    /// 0 means "no overflow; payload length equals record_bytes.len".
+    /// Required (non-zero, > record_bytes.len) when overflow_head != 0.
+    payload_len: usize = 0,
+
+    /// Effective full payload length (P) — what goes into the leaf
+    /// cell's payload-length varint.
+    pub fn fullPayloadLen(self: RebuildCell) usize {
+        return if (self.overflow_head == 0) self.record_bytes.len else self.payload_len;
+    }
 };
 
 /// Insert one new cell (rowid + record bytes) into the leaf-table page
@@ -146,9 +160,17 @@ pub fn insertLeafTableCell(
 /// `header_offset` (the 100-byte file header on page 1) are left
 /// untouched.
 ///
+/// Iter26.C: cells with `overflow_head != 0` emit `payload_len` in the
+/// leading varint, write only `record_bytes` (= K inline bytes) plus a
+/// 4-byte big-endian head pointer trailer. Caller must have already
+/// allocated the chain via `btree_overflow.allocateOverflowChain`
+/// before this call (parent-last invariant — leaf write commits the
+/// chain reference).
+///
 /// Errors:
-///   - `Error.IoError` if any cell's record exceeds the overflow
-///     threshold (`usable_size - 35`) — overflow chains are Iter26.C.
+///   - `Error.IoError` if a non-overflow cell's record exceeds the
+///     overflow threshold (`usable_size - 35`) — caller forgot to
+///     pre-allocate a chain. Overflow cells skip this check.
 ///   - `Error.IoError` if the cell pointer array would not fit before
 ///     the cell content area (page over-full).
 pub fn rebuildLeafTablePage(
@@ -160,7 +182,8 @@ pub fn rebuildLeafTablePage(
     if (page.len < usable_size) return Error.IoError;
     const x: usize = usable_size - 35;
     for (cells) |c| {
-        if (c.record_bytes.len > x) return Error.IoError;
+        if (c.overflow_head == 0 and c.record_bytes.len > x) return Error.IoError;
+        if (c.overflow_head != 0 and c.payload_len <= c.record_bytes.len) return Error.IoError;
     }
 
     // Lay out cell content back-to-front from `usable_size`. Walking
@@ -180,18 +203,27 @@ pub fn rebuildLeafTablePage(
     while (k > 0) {
         k -= 1;
         const c = cells[k];
-        const payload_len_n = record_encode.varintLen(c.record_bytes.len);
+        const payload_len = c.fullPayloadLen();
+        const tail_size: usize = if (c.overflow_head != 0) 4 else 0;
+        const payload_len_n = record_encode.varintLen(payload_len);
         const rowid_n = record_encode.varintLen(@as(u64, @bitCast(c.rowid)));
-        const cell_size: usize = payload_len_n + rowid_n + c.record_bytes.len;
+        const cell_size: usize = payload_len_n + rowid_n + c.record_bytes.len + tail_size;
         if (cell_size > content_start - (ptr_array_offset + required_ptr_array)) {
             return Error.IoError; // would collide with pointer array
         }
         content_start -= cell_size;
 
         var pos = content_start;
-        pos += record.encodeVarint(c.record_bytes.len, page[pos..]);
+        pos += record.encodeVarint(payload_len, page[pos..]);
         pos += record.encodeVarint(@as(u64, @bitCast(c.rowid)), page[pos..]);
         @memcpy(page[pos .. pos + c.record_bytes.len], c.record_bytes);
+        pos += c.record_bytes.len;
+        if (c.overflow_head != 0) {
+            page[pos] = @intCast((c.overflow_head >> 24) & 0xff);
+            page[pos + 1] = @intCast((c.overflow_head >> 16) & 0xff);
+            page[pos + 2] = @intCast((c.overflow_head >> 8) & 0xff);
+            page[pos + 3] = @intCast(c.overflow_head & 0xff);
+        }
 
         // Write the pointer slot for this cell. Slot index = k.
         const ptr_slot = ptr_array_offset + k * 2;

@@ -107,10 +107,12 @@ pub fn splitLeafCells(cells: []const btree_insert.RebuildCell) Error!SplitResult
 }
 
 fn cellByteCost(c: btree_insert.RebuildCell) usize {
+    const tail: usize = if (c.overflow_head != 0) 4 else 0;
     return 2 + // ptr-array slot
-        record_encode.varintLen(c.record_bytes.len) +
+        record_encode.varintLen(c.fullPayloadLen()) +
         record_encode.varintLen(@as(u64, @bitCast(c.rowid))) +
-        c.record_bytes.len;
+        c.record_bytes.len +
+        tail;
 }
 
 pub const InteriorFitClass = enum { fits, needs_split };
@@ -138,9 +140,17 @@ pub const FitClass = enum { fits, needs_split, oversize_record };
 
 /// Predicate over a candidate list of leaf cells. `fits` means
 /// `rebuildLeafTablePage` will succeed; `needs_split` means total cell
-/// content exceeds the contiguous gap (caller should balance-deeper);
-/// `oversize_record` means at least one record exceeds `usable_size−35`
-/// and would need an overflow chain (Iter26.C scope).
+/// content (inline portions only — overflow chain pages don't compete
+/// for leaf space) exceeds the contiguous gap.
+///
+/// `oversize_record` is now an INVARIANT-VIOLATION marker: a cell
+/// where `overflow_head == 0` but `record_bytes.len > X` means the
+/// caller forgot to allocate a chain via
+/// `btree_overflow.allocateOverflowChain`. After Iter26.C wires the
+/// INSERT path to pre-split, this arm is unreachable through the
+/// production call sites — but kept as a defensive check so a future
+/// caller that bypasses the helper fails loudly instead of returning
+/// `Error.IoError` later in `rebuildLeafTablePage`.
 pub fn classifyForLeaf(
     cells: []const btree_insert.RebuildCell,
     header_offset: usize,
@@ -148,13 +158,14 @@ pub fn classifyForLeaf(
 ) FitClass {
     const x: usize = usable_size - 35;
     for (cells) |c| {
-        if (c.record_bytes.len > x) return .oversize_record;
+        if (c.overflow_head == 0 and c.record_bytes.len > x) return .oversize_record;
     }
     var total: usize = header_offset + 8 + cells.len * 2;
     for (cells) |c| {
-        total += record_encode.varintLen(c.record_bytes.len);
+        const tail: usize = if (c.overflow_head != 0) 4 else 0;
+        total += record_encode.varintLen(c.fullPayloadLen());
         total += record_encode.varintLen(@as(u64, @bitCast(c.rowid)));
-        total += c.record_bytes.len;
+        total += c.record_bytes.len + tail;
         if (total > usable_size) return .needs_split;
     }
     return .fits;

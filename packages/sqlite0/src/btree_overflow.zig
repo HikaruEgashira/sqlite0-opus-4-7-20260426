@@ -129,6 +129,109 @@ pub fn assemblePayload(
     return result;
 }
 
+/// Allocate an overflow chain for `payload[inline_len..]` and write
+/// every chain page. Returns the head page number to embed in the
+/// leaf cell. The chain pages each carry a 4-byte u32 BE next-link
+/// (0 sentinel on the tail) plus up to `usable_size − 4` payload
+/// bytes. Caller commits the leaf cell with the head pointer LAST
+/// to land the chain transactionally (parent-last invariant).
+///
+/// Write order: tail-first. Each `pager.allocatePage` bumps page-1
+/// dbsize, so a crash mid-loop leaves orphan pages — same accepted
+/// window as B.1/B.2; integrity_check would warn until Phase 4 (WAL).
+///
+/// `pager.allocatePage` allocates each new page contiguous to the
+/// end-of-file when the freelist is empty. With an empty freelist
+/// (the differential fixtures stay in this regime) sqlite3 hands
+/// out the same page numbers in the same order, which keeps byte-
+/// equivalent output realistic to assert.
+pub fn allocateOverflowChain(
+    pager: *pager_mod.Pager,
+    payload: []const u8,
+    inline_len: usize,
+) Error!u32 {
+    if (inline_len > payload.len) return Error.IoError;
+    const spill = payload[inline_len..];
+    if (spill.len == 0) return Error.IoError; // caller should not chain a fully-inline payload
+
+    const usable = try pager.usableSize();
+    if (usable < 5) return Error.IoError;
+    const per_page: usize = usable - 4;
+    const page_count: usize = (spill.len + per_page - 1) / per_page;
+
+    const allocator = pager.allocator;
+    const pages = try allocator.alloc(u32, page_count);
+    defer allocator.free(pages);
+    for (pages) |*slot| slot.* = try pager.allocatePage();
+
+    // Build & write tail-first so the chain on disk is consistent
+    // before any earlier page links to it. A crash between writes
+    // leaves orphan pages but no dangling pointers.
+    //
+    // Layout: page i carries `spill[i*per_page .. min((i+1)*per_page,
+    // spill.len)]`. The tail (i == page_count − 1) is the only page
+    // that may carry less than `per_page` bytes; every earlier page
+    // is fully utilised. Matches sqlite3's chain-writer.
+    const buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(buf);
+
+    var i: usize = page_count;
+    while (i > 0) {
+        i -= 1;
+        @memset(buf, 0);
+        const next: u32 = if (i + 1 < page_count) pages[i + 1] else 0;
+        buf[0] = @intCast((next >> 24) & 0xff);
+        buf[1] = @intCast((next >> 16) & 0xff);
+        buf[2] = @intCast((next >> 8) & 0xff);
+        buf[3] = @intCast(next & 0xff);
+        const start = i * per_page;
+        const end = @min(start + per_page, spill.len);
+        @memcpy(buf[4 .. 4 + (end - start)], spill[start..end]);
+        try pager.writePage(pages[i], buf);
+    }
+    return pages[0];
+}
+
+/// Walk the chain rooted at `head`, returning every page number to a
+/// freshly-allocated slice (caller frees), then call `pager.freePage`
+/// on each in reverse (tail → head) order so the most-recently-
+/// allocated page lands at the head of the freelist's leaf array
+/// first. That matches sqlite3's own allocation/free pairing pattern
+/// and keeps subsequent INSERT chain reuse deterministic.
+///
+/// Caller must first remove or rewrite the leaf cell so the chain is
+/// no longer reachable BEFORE freeing pages — otherwise a crash
+/// mid-loop leaves the leaf pointing at a freed page.
+pub fn freeOverflowChain(pager: *pager_mod.Pager, head: u32) Error!void {
+    if (head == 0) return;
+    const allocator = pager.allocator;
+
+    // First pass: walk the chain, collect every page number.
+    var collected: std.ArrayList(u32) = .empty;
+    defer collected.deinit(allocator);
+
+    var next: u32 = head;
+    var hops: usize = 0;
+    while (next != 0) {
+        if (hops > 1024 * 1024) return Error.IoError; // cyclic-chain guard
+        hops += 1;
+        try collected.append(allocator, next);
+        const page = try pager.getPage(next);
+        if (page.len < 4) return Error.IoError;
+        next = (@as(u32, page[0]) << 24) |
+            (@as(u32, page[1]) << 16) |
+            (@as(u32, page[2]) << 8) |
+            @as(u32, page[3]);
+    }
+
+    // Second pass: free in reverse (tail-first).
+    var i: usize = collected.items.len;
+    while (i > 0) {
+        i -= 1;
+        try pager.freePage(collected.items[i]);
+    }
+}
+
 // -- tests --
 
 const testing = std.testing;
