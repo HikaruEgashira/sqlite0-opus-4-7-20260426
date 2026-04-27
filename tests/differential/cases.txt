@@ -1878,5 +1878,19 @@ SELECT typeof(printf(''))
 SELECT typeof(printf('%s', NULL))
 SELECT printf('%s|', NULL)
 SELECT typeof(printf('%s|', NULL))
+# Iter29.AC: length() on TEXT honors C-string NUL-truncation (count up to
+# first NUL); octet_length stays raw byte count. BLOB length is unaffected.
+SELECT length(cast(x'410042' as text))
+SELECT length(cast(x'00' as text))
+SELECT length(cast(x'4142' as text))
+SELECT length(cast(x'E38182004142' as text))
+SELECT length(cast(x'4142E38182' as text))
+SELECT length(printf('%c', cast(x'00' as text)))
+SELECT length(printf('%c', x'00'))
+SELECT octet_length(cast(x'410042' as text))
+SELECT octet_length(cast(x'00' as text))
+SELECT octet_length(printf('%c', cast(x'00' as text)))
+SELECT length(cast(x'410042' as blob))
+
 
 

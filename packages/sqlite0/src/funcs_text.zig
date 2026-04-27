@@ -14,7 +14,13 @@ pub fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     const v = args[0];
     return switch (v) {
         .null => Value.null,
-        .text => |t| Value{ .integer = @intCast(util.utf8CharCount(t)) },
+        .text => |t| blk: {
+            // sqlite3 treats TEXT as a C string in `length()`: scanning
+            // stops at the first NUL byte. `octet_length` is unaffected
+            // (returns the raw byte count even with embedded NULs).
+            const scan = if (std.mem.indexOfScalar(u8, t, 0)) |n| t[0..n] else t;
+            break :blk Value{ .integer = @intCast(util.utf8CharCount(scan)) };
+        },
         .blob => |b| Value{ .integer = @intCast(b.len) },
         .integer, .real => blk: {
             const t = ops.valueToOwnedText(allocator, v) catch |err| switch (err) {
@@ -414,6 +420,27 @@ test "fnOctetLength: TEXT byte count" {
     var args = [_]Value{.{ .text = "aあ" }};
     const r = try fnOctetLength(allocator, &args);
     try std.testing.expectEqual(@as(i64, 4), r.integer);
+}
+
+test "fnLength: TEXT NUL-truncates (C-string convention)" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "A\x00B" }};
+    const r = try fnLength(allocator, &args);
+    try std.testing.expectEqual(@as(i64, 1), r.integer);
+}
+
+test "fnLength: leading NUL TEXT → 0" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "\x00xyz" }};
+    const r = try fnLength(allocator, &args);
+    try std.testing.expectEqual(@as(i64, 0), r.integer);
+}
+
+test "fnOctetLength: TEXT with embedded NUL counts raw bytes" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "A\x00B" }};
+    const r = try fnOctetLength(allocator, &args);
+    try std.testing.expectEqual(@as(i64, 3), r.integer);
 }
 
 test "fnUnhex: ignore-set strips spaces, decodes to BLOB" {
