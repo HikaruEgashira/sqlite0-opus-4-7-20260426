@@ -194,8 +194,13 @@ fn parseSelectInner(p: *Parser, allow_post: bool) Error!ParsedSelect {
 /// the private `parseSelectInner`.
 fn parseSetopBranches(p: *Parser) Error![]SetopBranch {
     var list: std.ArrayList(SetopBranch) = .empty;
-    errdefer freeSetopBranches(p.allocator, list.items);
-    errdefer list.deinit(p.allocator);
+    // Same single-errdefer pattern as `parseOrderBy` — separate errdefers
+    // for `freeSetopBranches(... list.items)` and `list.deinit()` would
+    // double-free on any inner-select parse failure.
+    errdefer {
+        for (list.items) |b| freeParsedSelectFields(p.allocator, b.select);
+        list.deinit(p.allocator);
+    }
 
     while (stmt_setop.matchSetopKind(p)) |kind| {
         const inner = try parseSelectInner(p, false);
@@ -248,8 +253,16 @@ fn parseOrderBy(p: *Parser) ![]OrderTerm {
     try p.expect(.keyword_order);
     try p.expect(.keyword_by);
     var terms: std.ArrayList(OrderTerm) = .empty;
-    errdefer freeOrderTerms(p.allocator, terms.items);
-    errdefer terms.deinit(p.allocator);
+    // Single combined errdefer: deinit each term's expr THEN release the
+    // ArrayList capacity. Two separate errdefers used to free the items
+    // slice via `allocator.free(terms.items)` and then again via
+    // `terms.deinit()` — that double-free / use-after-free segfaulted on
+    // any failed parse like `ORDER BY @` (parseOrderTerm error → both
+    // errdefers fire in reverse, the second touching freed memory).
+    errdefer {
+        for (terms.items) |t| t.expr.deinit(p.allocator);
+        terms.deinit(p.allocator);
+    }
     try parseOrderTerm(p, &terms);
     while (p.cur.kind == .comma) {
         p.advance();
