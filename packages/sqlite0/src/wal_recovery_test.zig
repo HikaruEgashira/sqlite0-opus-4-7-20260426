@@ -117,6 +117,80 @@ test "wal_recovery.openIfPresent: missing -wal returns null" {
     try std.testing.expect(state == null);
 }
 
+test "wal_recovery.openIfPresent: bad-magic header returns null (not half-init state)" {
+    // sqlite3 treats a -wal with a corrupt header as nonexistent. Iter27.B.1
+    // depends on this two-outcome contract: openIfPresent → null OR
+    // fully-populated state. A half-initialised state here would give
+    // the writer no way to tell "valid empty WAL" from "garbage WAL".
+    const allocator = std.testing.allocator;
+    const path = try test_db_util.makeTempPath("wal-bad-magic");
+    defer allocator.free(path);
+    defer test_db_util.unlinkPath(path);
+    var p1: [PAGE_SIZE]u8 = @splat(0);
+    try test_db_util.writePages(path, &.{&p1});
+
+    const wal_path = try std.fmt.allocPrint(allocator, "{s}-wal", .{path});
+    defer allocator.free(wal_path);
+    defer test_db_util.unlinkPath(wal_path);
+
+    var bytes: [WAL_HEADER_SIZE]u8 = @splat(0xff); // bogus magic
+    try writeFile(wal_path, &bytes);
+
+    const state = try wal_recovery.openIfPresent(allocator, path);
+    try std.testing.expect(state == null);
+}
+
+test "wal_recovery.openIfPresent: tampered-checksum header returns null" {
+    const allocator = std.testing.allocator;
+    const path = try test_db_util.makeTempPath("wal-bad-cksum");
+    defer allocator.free(path);
+    defer test_db_util.unlinkPath(path);
+    var p1: [PAGE_SIZE]u8 = @splat(0);
+    try test_db_util.writePages(path, &.{&p1});
+
+    const wal_path = try std.fmt.allocPrint(allocator, "{s}-wal", .{path});
+    defer allocator.free(wal_path);
+    defer test_db_util.unlinkPath(wal_path);
+
+    var buf: [WAL_HEADER_SIZE]u8 = undefined;
+    wal.encodeHeader(&buf, PAGE_SIZE, 0, 1, 2, wal.MAGIC_LE);
+    buf[24] ^= 0xff; // mutate checksum-1 byte
+    try writeFile(wal_path, &buf);
+
+    const state = try wal_recovery.openIfPresent(allocator, path);
+    try std.testing.expect(state == null);
+}
+
+test "wal_recovery.openIfPresent: valid header zero frames inherits seed" {
+    // The legitimate "WAL exists, no commits yet" case — writer should
+    // continue from header.checksum1/2 at HEADER_SIZE.
+    const allocator = std.testing.allocator;
+    const path = try test_db_util.makeTempPath("wal-zero-frames");
+    defer allocator.free(path);
+    defer test_db_util.unlinkPath(path);
+    var p1: [PAGE_SIZE]u8 = @splat(0);
+    try test_db_util.writePages(path, &.{&p1});
+
+    const wal_path = try std.fmt.allocPrint(allocator, "{s}-wal", .{path});
+    defer allocator.free(wal_path);
+    defer test_db_util.unlinkPath(wal_path);
+
+    var buf: [WAL_HEADER_SIZE]u8 = undefined;
+    wal.encodeHeader(&buf, PAGE_SIZE, 0, 0xaaaa, 0xbbbb, wal.MAGIC_LE);
+    const header = try wal.parseHeader(&buf);
+    try writeFile(wal_path, &buf);
+
+    var state = (try wal_recovery.openIfPresent(allocator, path)).?;
+    defer state.deinit();
+    try std.testing.expectEqual(@as(u32, 0), state.wal_dbsize);
+    try std.testing.expectEqual(@as(usize, 0), state.index.count());
+    try std.testing.expectEqual(header.salt1, state.salt1);
+    try std.testing.expectEqual(header.salt2, state.salt2);
+    try std.testing.expectEqual(@as(u32, header.checksum1), state.last_checksum[0]);
+    try std.testing.expectEqual(@as(u32, header.checksum2), state.last_checksum[1]);
+    try std.testing.expectEqual(@as(u64, WAL_HEADER_SIZE), state.next_frame_offset);
+}
+
 test "wal_recovery.openIfPresent: empty -wal returns null" {
     const allocator = std.testing.allocator;
     const path = try test_db_util.makeTempPath("wal-empty");
@@ -339,68 +413,10 @@ test "Database.openFile + WAL: getPage returns WAL-resident bytes over main" {
 }
 
 // ---------- Iter27.B.0 writer-inheritance state ----------
-
-test "wal.encodeHeader+encodeFrame chain matches recovery scan" {
-    // Encode a 2-frame committed transaction with the encode primitives,
-    // run it through openIfPresent, and confirm the recovered state
-    // (index contents + wal_dbsize + chain seed) matches what we wrote.
-    const allocator = std.testing.allocator;
-    const path = try test_db_util.makeTempPath("wal-encode-rt");
-    defer allocator.free(path);
-    defer test_db_util.unlinkPath(path);
-    var p1_main: [PAGE_SIZE]u8 = @splat(0x11);
-    try test_db_util.writePages(path, &.{&p1_main});
-
-    const wal_path = try std.fmt.allocPrint(allocator, "{s}-wal", .{path});
-    defer allocator.free(wal_path);
-    defer test_db_util.unlinkPath(wal_path);
-
-    const total = wal.HEADER_SIZE + 2 * wal.FRAME_SIZE;
-    const buf = try allocator.alloc(u8, total);
-    defer allocator.free(buf);
-
-    wal.encodeHeader(buf[0..wal.HEADER_SIZE], PAGE_SIZE, 0, 0xa1a1a1a1, 0xb2b2b2b2, wal.MAGIC_LE);
-    const header = try wal.parseHeader(buf[0..wal.HEADER_SIZE]);
-
-    const p2: [PAGE_SIZE]u8 = @splat(0xC2);
-    const p3: [PAGE_SIZE]u8 = @splat(0xC3);
-
-    var chain: [2]u32 = .{ header.checksum1, header.checksum2 };
-    chain = wal.encodeFrame(
-        buf[wal.HEADER_SIZE .. wal.HEADER_SIZE + wal.FRAME_SIZE][0..wal.FRAME_SIZE],
-        chain,
-        2,
-        0, // mid-tx, no commit yet
-        header.salt1,
-        header.salt2,
-        &p2,
-        .le,
-    );
-    const last_chain = wal.encodeFrame(
-        buf[wal.HEADER_SIZE + wal.FRAME_SIZE .. total][0..wal.FRAME_SIZE],
-        chain,
-        3,
-        3, // commit, dbsize=3
-        header.salt1,
-        header.salt2,
-        &p3,
-        .le,
-    );
-
-    try writeFile(wal_path, buf);
-
-    var state = (try wal_recovery.openIfPresent(allocator, path)).?;
-    defer state.deinit();
-    try std.testing.expectEqual(@as(u32, 3), state.wal_dbsize);
-    try std.testing.expect(state.index.contains(2));
-    try std.testing.expect(state.index.contains(3));
-    // Writer-inheritance state should describe "after the commit".
-    try std.testing.expectEqual(header.salt1, state.salt1);
-    try std.testing.expectEqual(header.salt2, state.salt2);
-    try std.testing.expectEqual(wal.Endianness.le, state.endian);
-    try std.testing.expectEqual(last_chain, state.last_checksum);
-    try std.testing.expectEqual(@as(u64, total), state.next_frame_offset);
-}
+//
+// The encode→scan round-trip is exercised end-to-end through the
+// actual writer API in `wal_writer_test.zig`; we keep just the chain-
+// seed-rewind property here since it's a pure recovery-side invariant.
 
 test "wal_recovery: chain seed only advances on commit (uncommitted tail rewinds)" {
     // Frame 1: commit (dbsize=2). Frame 2: mid-tx (commit_size=0).

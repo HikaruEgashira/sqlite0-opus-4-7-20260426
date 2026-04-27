@@ -56,24 +56,28 @@ pub const WalState = struct {
     wal_dbsize: u32 = 0,
     /// Iter27.B writer-inheritance state. After a successful scan these
     /// fields describe "where the next writer would pick up": the salt
-    /// epoch, the running checksum, the byte offset where new frames go,
-    /// and which endianness the chain was computed in. Iter27.B.1's
-    /// `WalWriter.fromExistingState(state)` reads these so an append
-    /// continues the same chain sqlite3 would have continued.
+    /// epoch (copied from the WAL header), the running checksum, the
+    /// byte offset where new frames go, and which endianness the chain
+    /// was computed in. Iter27.B.1's `WalWriter.fromExistingState(state)`
+    /// reads these so an append continues the same chain sqlite3 would
+    /// have continued.
     ///
-    /// On a fresh / empty WAL these stay at their zero defaults; the
-    /// writer takes the create() path instead.
+    /// A valid header but zero frames still produces a usable seed
+    /// (`last_checksum = header.checksum1/2`, `next_frame_offset =
+    /// HEADER_SIZE`) — that's the legitimate "WAL exists but no commits
+    /// yet" case and writers should inherit it. Only `openIfPresent`
+    /// returning `null` (missing file, empty file, bad header) means
+    /// "no inheritable state, take create()".
     salt1: u32 = 0,
     salt2: u32 = 0,
     endian: wal.Endianness = .le,
-    /// Cumulative checksum after the LAST validated frame (= seed for
-    /// the next frame). When `wal_dbsize == 0` (no commits yet) this is
-    /// `(0, 0)` — but writers should treat that as "no inheritable state"
-    /// and create a fresh epoch instead.
+    /// Cumulative checksum after the LAST validated commit frame, OR
+    /// the header's checksum if no commits have happened yet (= seed
+    /// for the next frame the writer will encode).
     last_checksum: [2]u32 = .{ 0, 0 },
-    /// Byte offset of the first unwritten frame slot. Equals
-    /// `HEADER_SIZE + n_validated_frames * FRAME_SIZE`. The next encoded
-    /// frame goes here.
+    /// Byte offset of the first slot the writer should append to.
+    /// Equals `HEADER_SIZE + n_committed_frames * FRAME_SIZE` — past
+    /// any uncommitted tail (which a new writer overwrites).
     next_frame_offset: u64 = 0,
 
     pub fn deinit(self: *WalState) void {
@@ -147,20 +151,30 @@ pub fn openIfPresent(allocator: std.mem.Allocator, db_path: []const u8) Error!?W
     var state = WalState{ .allocator = allocator, .fd = fd };
     errdefer state.deinit();
 
-    try scanFrames(&state, size);
+    // scanFrames returns false if the header is unparseable / fails its
+    // own checksum — in that case we drop the WAL entirely (matches
+    // sqlite3 wal.c behaviour: a bad WAL header = "no WAL"). We hand
+    // back null instead of a half-initialised WalState so B.1 has
+    // exactly two open-time outcomes: "inherit this state" or "create
+    // a fresh WAL".
+    if (!try scanFrames(&state, size)) {
+        state.deinit();
+        return null;
+    }
     return state;
 }
 
-fn scanFrames(state: *WalState, file_size: usize) Error!void {
+fn scanFrames(state: *WalState, file_size: usize) Error!bool {
     // pread the header in one shot.
     var header_buf: [wal.HEADER_SIZE]u8 = undefined;
     const hn = std.c.pread(state.fd, &header_buf, wal.HEADER_SIZE, 0);
     if (hn != @as(isize, @intCast(wal.HEADER_SIZE))) return Error.IoError;
-    const header = try wal.parseHeader(&header_buf);
-    // A header with a tampered checksum = the whole WAL is suspect.
-    // sqlite3's recovery does the same — bail out completely (treat
-    // as if no WAL existed) rather than guess.
-    if (!wal.verifyHeaderChecksum(&header_buf, header)) return;
+    // Bad magic / file_format / page_size and a tampered header
+    // checksum are all "the whole WAL is suspect" — sqlite3's recovery
+    // treats them as "no WAL exists". Return false so `openIfPresent`
+    // can drop the state and surface null.
+    const header = wal.parseHeader(&header_buf) catch return false;
+    if (!wal.verifyHeaderChecksum(&header_buf, header)) return false;
 
     state.salt1 = header.salt1;
     state.salt2 = header.salt2;
@@ -217,4 +231,5 @@ fn scanFrames(state: *WalState, file_size: usize) Error!void {
 
     state.last_checksum = commit_running;
     state.next_frame_offset = commit_off;
+    return true;
 }
