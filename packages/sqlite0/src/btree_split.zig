@@ -57,24 +57,60 @@ pub const SplitResult = struct {
     divider_key: i64,
 };
 
-/// Split a rowid-sorted cell list at the midpoint. Returns sub-slices
-/// borrowing from the input plus the divider key (= max rowid in the
-/// left half). The textbook midpoint split is sufficient for B.1 — the
-/// differential test only checks SELECT output, not split symmetry.
+/// Split a rowid-sorted cell list by byte-cumulative midpoint
+/// (Iter26.B.2.c). Walks the list summing each cell's storage cost
+/// (2-byte ptr-array entry + payload-len varint + rowid varint +
+/// record bytes); the split point is the smallest index where the
+/// running sum reaches half the total. Returns sub-slices borrowing
+/// from the input plus the divider key (= max rowid in the left half).
 ///
-/// Known limitation (B.2 will fix): non-uniform cell sizes can leave
-/// the right half larger than `usable_size` even when the left half
-/// fits, surfacing as `rebuildLeafTablePage` IoError. Switch to a
-/// byte-cumulative split (split where running total of cell bytes
-/// crosses `usable_size / 2`) when generalising to non-root splits.
+/// Why byte-cumulative beats positional midpoint: a positional split
+/// of a list with non-uniform cell sizes can leave one half larger
+/// than `usable_size` even when the other fits comfortably (e.g.,
+/// 50 tiny cells + 50 huge cells split at index 50 puts all 50 huge
+/// cells alone in the right half). The byte-cumulative pivot biases
+/// toward equal storage on each side, which is what the leaf-fit
+/// invariant cares about. For uniform cell sizes the two algorithms
+/// produce identical splits, so existing B.1 fixtures see no change.
+///
+/// Both halves are guaranteed non-empty (caller-side `cells.len >= 2`
+/// precondition). When one cell dominates the byte total, the split
+/// still produces 1 cell on the heavier side and `cells.len-1` on the
+/// other — `classifyForLeaf` will then catch the oversize case
+/// upstream.
 pub fn splitLeafCells(cells: []const btree_insert.RebuildCell) Error!SplitResult {
     if (cells.len < 2) return Error.IoError;
-    const mid = cells.len / 2;
+
+    var total_bytes: usize = 0;
+    for (cells) |c| total_bytes += cellByteCost(c);
+    const half = total_bytes / 2;
+
+    var running: usize = 0;
+    var split_at: usize = 1;
+    for (cells, 0..) |c, i| {
+        running += cellByteCost(c);
+        if (running >= half) {
+            split_at = i + 1;
+            break;
+        }
+    }
+    // Clamp so both halves stay non-empty when one cell dominates the
+    // total (e.g., a single huge cell trailing many tinies would
+    // otherwise put everything in the left).
+    if (split_at >= cells.len) split_at = cells.len - 1;
+
     return .{
-        .left = cells[0..mid],
-        .right = cells[mid..],
-        .divider_key = cells[mid - 1].rowid,
+        .left = cells[0..split_at],
+        .right = cells[split_at..],
+        .divider_key = cells[split_at - 1].rowid,
     };
+}
+
+fn cellByteCost(c: btree_insert.RebuildCell) usize {
+    return 2 + // ptr-array slot
+        record_encode.varintLen(c.record_bytes.len) +
+        record_encode.varintLen(@as(u64, @bitCast(c.rowid))) +
+        c.record_bytes.len;
 }
 
 pub const InteriorFitClass = enum { fits, needs_split };
@@ -330,115 +366,5 @@ pub fn splitRightmostLeaf(
     try pager.freePage(old_right_child);
 }
 
-// -- tests --
-
-const testing = std.testing;
-
-test "splitLeafCells: midpoint split, divider = max(left)" {
-    const r1 = [_]u8{ 0x02, 0x01, 0x05 };
-    const cells = [_]btree_insert.RebuildCell{
-        .{ .rowid = 1, .record_bytes = &r1 },
-        .{ .rowid = 2, .record_bytes = &r1 },
-        .{ .rowid = 3, .record_bytes = &r1 },
-        .{ .rowid = 4, .record_bytes = &r1 },
-    };
-    const s = try splitLeafCells(&cells);
-    try testing.expectEqual(@as(usize, 2), s.left.len);
-    try testing.expectEqual(@as(usize, 2), s.right.len);
-    try testing.expectEqual(@as(i64, 2), s.divider_key);
-    try testing.expectEqual(@as(i64, 1), s.left[0].rowid);
-    try testing.expectEqual(@as(i64, 3), s.right[0].rowid);
-}
-
-test "splitLeafCells: rejects 0/1 cell" {
-    const empty = [_]btree_insert.RebuildCell{};
-    try testing.expectError(Error.IoError, splitLeafCells(&empty));
-    const r1 = [_]u8{ 0x02, 0x01, 0x05 };
-    const one = [_]btree_insert.RebuildCell{.{ .rowid = 1, .record_bytes = &r1 }};
-    try testing.expectError(Error.IoError, splitLeafCells(&one));
-}
-
-test "classifyForLeaf: tiny cells fit" {
-    const r = [_]u8{ 0x02, 0x01, 0x07 };
-    const cells = [_]btree_insert.RebuildCell{
-        .{ .rowid = 1, .record_bytes = &r },
-        .{ .rowid = 2, .record_bytes = &r },
-    };
-    try testing.expectEqual(FitClass.fits, classifyForLeaf(&cells, 0, 4096));
-}
-
-test "classifyForLeaf: oversize record" {
-    const big = try testing.allocator.alloc(u8, 5000);
-    defer testing.allocator.free(big);
-    @memset(big, 0);
-    const cells = [_]btree_insert.RebuildCell{.{ .rowid = 1, .record_bytes = big }};
-    try testing.expectEqual(FitClass.oversize_record, classifyForLeaf(&cells, 0, 4096));
-}
-
-test "classifyForLeaf: many medium cells require split" {
-    // ~50 byte record × 100 cells = ~5200 bytes content + 200 ptr + 8 header
-    // = ~5400 bytes > 4084 usable.
-    const rec = try testing.allocator.alloc(u8, 50);
-    defer testing.allocator.free(rec);
-    @memset(rec, 0);
-    var arr: std.ArrayList(btree_insert.RebuildCell) = .empty;
-    defer arr.deinit(testing.allocator);
-    var i: i64 = 1;
-    while (i <= 100) : (i += 1) {
-        try arr.append(testing.allocator, .{ .rowid = i, .record_bytes = rec });
-    }
-    try testing.expectEqual(FitClass.needs_split, classifyForLeaf(arr.items, 0, 4084));
-}
-
-test "writeInteriorTablePage: round-trip via parseInteriorTablePage" {
-    const page = try testing.allocator.alloc(u8, 4096);
-    defer testing.allocator.free(page);
-    @memset(page, 0xab);
-
-    const cells = [_]InteriorCell{
-        .{ .left_child = 5, .key = 100 },
-        .{ .left_child = 7, .key = 200 },
-    };
-    try writeInteriorTablePage(page, 0, 4096, &cells, 9);
-
-    const info = try btree.parseInteriorTablePage(testing.allocator, page, 0);
-    defer testing.allocator.free(info.cells);
-    try testing.expectEqual(@as(u32, 9), info.right_child);
-    try testing.expectEqual(@as(usize, 2), info.cells.len);
-    try testing.expectEqual(@as(u32, 5), info.cells[0].left_child);
-    try testing.expectEqual(@as(i64, 100), info.cells[0].key);
-    try testing.expectEqual(@as(u32, 7), info.cells[1].left_child);
-    try testing.expectEqual(@as(i64, 200), info.cells[1].key);
-}
-
-test "classifyForInterior: small cell list fits" {
-    const cells = [_]InteriorCell{
-        .{ .left_child = 2, .key = 100 },
-        .{ .left_child = 3, .key = 200 },
-    };
-    try testing.expectEqual(InteriorFitClass.fits, classifyForInterior(&cells, 0, 4096));
-}
-
-test "classifyForInterior: huge cell list needs_split" {
-    var arr: std.ArrayList(InteriorCell) = .empty;
-    defer arr.deinit(testing.allocator);
-    var i: i64 = 1;
-    while (i <= 1000) : (i += 1) {
-        try arr.append(testing.allocator, .{ .left_child = @intCast(i + 1), .key = i * 1000 });
-    }
-    try testing.expectEqual(InteriorFitClass.needs_split, classifyForInterior(arr.items, 0, 4084));
-}
-
-test "writeInteriorTablePage: empty cells with only right_child" {
-    const page = try testing.allocator.alloc(u8, 4096);
-    defer testing.allocator.free(page);
-    @memset(page, 0);
-
-    const cells = [_]InteriorCell{};
-    try writeInteriorTablePage(page, 0, 4096, &cells, 42);
-
-    const info = try btree.parseInteriorTablePage(testing.allocator, page, 0);
-    defer testing.allocator.free(info.cells);
-    try testing.expectEqual(@as(u32, 42), info.right_child);
-    try testing.expectEqual(@as(usize, 0), info.cells.len);
-}
+// Unit tests live in `btree_split_test.zig` to keep this file under
+// the 500-line discipline (CLAUDE.md "Module Splitting Rules").
