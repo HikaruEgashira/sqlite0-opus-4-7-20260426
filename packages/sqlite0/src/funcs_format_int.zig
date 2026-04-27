@@ -90,6 +90,85 @@ pub fn writeUnsignedInt(
     try writeIntPaddedPrefixed(allocator, out, digits, null, prefix, spec);
 }
 
+/// `%p`: uppercase hex of the integer-coerced value with a LOWERCASE
+/// `0x` alt-form prefix. Distinct from `%X` (uppercase prefix `0X`) and
+/// `%x` (lowercase digits) — sqlite3's printf treats `%p` as the
+/// "pointer" form, which mirrors C `printf("%p", ...)` on most libcs:
+/// digits use uppercase ABCDEF, but the literal `0x` introducer is
+/// lowercase. Negative values are bit-cast to u64 (so `-1` → 16 F's).
+pub fn writePointer(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    v: Value,
+    spec: Spec,
+) !void {
+    const n = coerceToInt(v);
+    const u: u64 = @bitCast(n);
+    var digits_buf: [32]u8 = undefined;
+    const digits = formatDigits(&digits_buf, u, 16, true);
+    const prefix: []const u8 = if (spec.alt and u != 0) "0x" else "";
+    try writeIntPaddedPrefixed(allocator, out, digits, null, prefix, spec);
+}
+
+/// `%r`: decimal integer suffixed with an English ordinal (`st`, `nd`,
+/// `rd`, `th`). The teen-exception applies to the last two digits of
+/// the absolute value: 11/12/13 → "th" regardless of last digit; for
+/// other endings, last-digit 1 → "st", 2 → "nd", 3 → "rd", else "th".
+/// Negative values keep the leading `-` and follow the same last-2-digit
+/// rule on the magnitude (`-11` → "-11th", `-1` → "-1st"). NULL coerces
+/// to 0 → "0th".
+///
+/// Precision sets the **total `digits+suffix` length** (sign excluded),
+/// not the digit count alone — sqlite3 quirk distinct from `%d`'s
+/// digit-only precision. `%.5r` of 1 → "001st" (5 chars: 3 digits + "st"),
+/// not "00001st". Width / `0` flag follow the same `0`-wins-over-`-`
+/// rule as `%d`, with the digit field swallowed up to `width - sign - suffix`.
+pub fn writeOrdinal(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    v: Value,
+    spec: Spec,
+) !void {
+    const n = coerceToInt(v);
+    var digits_buf: [32]u8 = undefined;
+    const abs_val: u64 = if (n < 0) @as(u64, @intCast(-(n + 1))) + 1 else @as(u64, @intCast(n));
+    const digits = formatDigits(&digits_buf, abs_val, 10, false);
+
+    const last2: u64 = abs_val % 100;
+    const last1: u64 = abs_val % 10;
+    const suffix: []const u8 = if (last2 >= 11 and last2 <= 13)
+        "th"
+    else switch (last1) {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        else => "th",
+    };
+
+    const sign_len: usize = if (n < 0) 1 else 0;
+    // Precision targets total `digits+suffix` length: digit field gets
+    // boosted to `precision - suffix.len` (clamped at 0).
+    const explicit_prec = spec.precision orelse 0;
+    const prec_min_digits: usize = if (explicit_prec > suffix.len)
+        explicit_prec - suffix.len
+    else
+        0;
+    const width_min_digits: usize = if (spec.zero_pad and spec.width > sign_len + suffix.len)
+        spec.width - sign_len - suffix.len
+    else
+        0;
+    const min_digits: usize = @max(prec_min_digits, width_min_digits);
+    const pad_zeros: usize = if (digits.len < min_digits) min_digits - digits.len else 0;
+    const content_len = sign_len + pad_zeros + digits.len + suffix.len;
+    const total_pad: usize = if (content_len < spec.width) spec.width - content_len else 0;
+    if (!spec.left_align) try funcs_format.appendN(allocator, out, ' ', total_pad);
+    if (n < 0) try out.append(allocator, '-');
+    try funcs_format.appendN(allocator, out, '0', pad_zeros);
+    try out.appendSlice(allocator, digits);
+    try out.appendSlice(allocator, suffix);
+    if (spec.left_align) try funcs_format.appendN(allocator, out, ' ', total_pad);
+}
+
 fn formatDigits(buf: []u8, value: u64, base: u8, upper: bool) []const u8 {
     if (value == 0) {
         buf[0] = '0';

@@ -120,6 +120,11 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
 
         switch (spec.conv) {
             '%' => try out.append(allocator, '%'),
+            // `%n` in sqlite3 SQL printf is a no-op — it doesn't write
+            // anything and doesn't consume an arg. (In C printf it would
+            // store the byte count to a `int*` arg; sqlite3 disables this
+            // for safety.)
+            'n' => {},
             'd', 'i' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
@@ -145,10 +150,23 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
                 arg_idx += 1;
                 try int_fmt.writeUnsignedInt(allocator, &out, v, spec, 8, false);
             },
-            's' => {
+            's', 'z' => {
+                // `%z` is identical to `%s` from a user-visible standpoint —
+                // sqlite3 internally uses `%z` for "free this C-string after
+                // rendering" (etDYNSTRING), which is moot for our SQL surface.
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
                 arg_idx += 1;
                 try writeString(allocator, &out, v, spec);
+            },
+            'p' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try int_fmt.writePointer(allocator, &out, v, spec);
+            },
+            'r' => {
+                const v = if (arg_idx < args.len) args[arg_idx] else Value.null;
+                arg_idx += 1;
+                try int_fmt.writeOrdinal(allocator, &out, v, spec);
             },
             'c' => {
                 const v = if (arg_idx < args.len) args[arg_idx] else Value.null;

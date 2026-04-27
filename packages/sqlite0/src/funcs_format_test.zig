@@ -329,6 +329,80 @@ test "fnPrintf: %*.*f consumes both width and precision args" {
     try std.testing.expectEqualStrings("     3.142", r.text);
 }
 
+test "fnPrintf: %z is alias for %s (string with width/precision)" {
+    const a = std.testing.allocator;
+    var p1 = [_]Value{ .{ .text = "%5z|" }, .{ .text = "hi" } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("   hi|", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "%.3z" }, .{ .text = "hello" } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("hel", r2.text);
+}
+
+test "fnPrintf: %p uppercase hex digits, lowercase 0x prefix" {
+    const a = std.testing.allocator;
+    var p1 = [_]Value{ .{ .text = "%p" }, .{ .integer = 255 } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("FF", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "%#p" }, .{ .integer = 255 } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("0xFF", r2.text);
+
+    // -1 bit-cast to u64 → 0xFFFFFFFFFFFFFFFF
+    var p3 = [_]Value{ .{ .text = "%p" }, .{ .integer = -1 } };
+    const r3 = try fnPrintf(a, &p3);
+    defer a.free(r3.text);
+    try std.testing.expectEqualStrings("FFFFFFFFFFFFFFFF", r3.text);
+}
+
+test "fnPrintf: %r adds English ordinal suffix with teen exception" {
+    const a = std.testing.allocator;
+    const cases = .{
+        .{ 1, "1st" },     .{ 2, "2nd" },     .{ 3, "3rd" }, .{ 4, "4th" },
+        .{ 11, "11th" },   .{ 12, "12th" },   .{ 13, "13th" }, // teens always "th"
+        .{ 21, "21st" },   .{ 111, "111th" }, // last-2 = 11 → "th"
+        .{ 0, "0th" },     .{ -1, "-1st" },   .{ -11, "-11th" },
+    };
+    inline for (cases) |c| {
+        var p = [_]Value{ .{ .text = "%r" }, .{ .integer = c[0] } };
+        const r = try fnPrintf(a, &p);
+        defer a.free(r.text);
+        try std.testing.expectEqualStrings(c[1], r.text);
+    }
+}
+
+test "fnPrintf: %.Nr precision targets total digits+suffix length" {
+    // sqlite3 quirk: precision is the total `digits+suffix` length budget,
+    // not the digit count alone (which is what `%d` precision means).
+    const a = std.testing.allocator;
+    var p1 = [_]Value{ .{ .text = "[%.5r]" }, .{ .integer = 1 } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings("[001st]", r1.text);
+
+    var p2 = [_]Value{ .{ .text = "[%.5r]" }, .{ .integer = 22 } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("[022nd]", r2.text);
+}
+
+test "fnPrintf: %n is no-op (no output, no arg consumed)" {
+    // sqlite3 disables C printf's `%n` byte-count-write for safety; the
+    // spec is silently skipped without consuming any arg.
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "[%n %s]" }, .{ .integer = 5 }, .{ .text = "hi" } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    // %n consumes nothing → first arg (5) goes to %s, "hi" is ignored.
+    try std.testing.expectEqualStrings("[ 5]", r.text);
+}
+
 test "fnPrintf: %5c width-pads single byte; %05c uses spaces (no zero-pad)" {
     const a = std.testing.allocator;
     var p1 = [_]Value{ .{ .text = "%5c" }, .{ .integer = 65 } };
