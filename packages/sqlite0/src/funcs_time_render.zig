@@ -53,9 +53,11 @@ pub fn renderFormat(
             continue;
         }
         if (i + 1 >= fmt.len) {
-            try out.append(allocator, '%');
-            i += 1;
-            continue;
+            // sqlite3 strftime: trailing bare `%` is a malformed spec —
+            // PRINTF_DATEFUNC abort path returns NULL (unlike printf,
+            // which emits a literal `%`).
+            out.deinit(allocator);
+            return Value.null;
         }
         const conv = fmt[i + 1];
         switch (conv) {
@@ -64,7 +66,17 @@ pub fn renderFormat(
             'm' => try writeZeroPadded(allocator, &out, dt.month, 2),
             'd' => try writeZeroPadded(allocator, &out, dt.day, 2),
             'e' => try writeSpacePadded(allocator, &out, dt.day, 2),
+            'F' => {
+                // sqlite3 3.42+: alias for `%Y-%m-%d`.
+                try writeYear(allocator, &out, dt.year, year_format);
+                try out.append(allocator, '-');
+                try writeZeroPadded(allocator, &out, dt.month, 2);
+                try out.append(allocator, '-');
+                try writeZeroPadded(allocator, &out, dt.day, 2);
+            },
             'H' => try writeZeroPadded(allocator, &out, dt.hour, 2),
+            'k' => try writeSpacePadded(allocator, &out, dt.hour, 2),
+            'l' => try writeSpacePadded(allocator, &out, twelveHour(dt.hour), 2),
             'I' => try writeZeroPadded(allocator, &out, twelveHour(dt.hour), 2),
             'M' => try writeZeroPadded(allocator, &out, dt.minute, 2),
             'S' => try writeZeroPadded(allocator, &out, dt.second, 2),

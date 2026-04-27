@@ -2921,3 +2921,20 @@ SELECT time('2024-01-01 12:00:00 +09:00')
 SELECT time('12:00:00 +09:00')
 SELECT julianday('2024-01-01 12:00:00 +09:00')
 SELECT strftime('%H:%M:%S', '2024-01-01 12:00:00 +09:00')
+
+# strftime extra specs + trailing-% NULL (Iter30.U):
+#  * `%F` (3.42+) → `%Y-%m-%d` alias.
+#  * `%k` → hour 0-23 with space-pad (` 9` for 09:30, `14` for 14:30).
+#  * `%l` → hour 1-12 with space-pad. 0 → 12, 12 → 12.
+#  * Trailing bare `%` → NULL (sqlite3 PRINTF_DATEFUNC abort, unlike
+#    printf where `%` literal is emitted).
+SELECT strftime('%F','2024-01-01')
+SELECT strftime('%F','2024-01-01 12:34:56')
+SELECT strftime('%k','2024-01-01 09:30:00')
+SELECT strftime('%k','2024-01-01 14:30:00')
+SELECT strftime('%l','2024-01-01 09:30:00')
+SELECT strftime('%l','2024-01-01 14:30:00')
+SELECT strftime('%l','2024-01-01 00:30:00')
+SELECT strftime('%l','2024-01-01 12:30:00')
+SELECT strftime('%','2024-01-01')
+SELECT strftime('a%','2024-01-01')
