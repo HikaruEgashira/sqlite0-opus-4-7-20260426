@@ -35,6 +35,7 @@ pub const engine_dml = @import("engine_dml.zig");
 pub const cursor = @import("cursor.zig");
 pub const pager = @import("pager.zig");
 pub const record = @import("record.zig");
+pub const btree = @import("btree.zig");
 
 pub const Value = value.Value;
 pub const Result = exec.Result;
