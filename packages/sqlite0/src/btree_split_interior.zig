@@ -45,6 +45,7 @@
 const std = @import("std");
 const ops = @import("ops.zig");
 const btree_split = @import("btree_split.zig");
+const pager_mod = @import("pager.zig");
 const record_encode = @import("record_encode.zig");
 
 pub const Error = ops.Error;
@@ -52,6 +53,15 @@ pub const Error = ops.Error;
 /// Re-export so callers don't need a parallel `btree_split` import for
 /// the cell type alone. Identical to `btree_split.InteriorCell`.
 pub const InteriorCell = btree_split.InteriorCell;
+
+/// What an interior split (or balance-deeper) hands back to its
+/// grandparent: a divider cell to insert and a new right_child. The
+/// grandparent (or top-level orchestrator if this came from the
+/// root's child) merges this into its own cell list.
+pub const PromotedSplit = struct {
+    new_cell: InteriorCell,
+    new_right_child: u32,
+};
 
 /// Result of `splitInteriorCells`. All three slices borrow from the
 /// caller's `cells_in` — no allocation. `pivot` cell (whose `key`
@@ -158,6 +168,161 @@ fn interiorCellByteCost(c: InteriorCell) usize {
         2;
 }
 
+/// Split an overflowing interior page (Iter26.B.3.b). Allocates two
+/// fresh interior pages (L_new, R_new), writes the byte-cumulative
+/// halves of `merged_cells`, and returns a `PromotedSplit` for the
+/// grandparent to install. Does NOT touch the old interior page —
+/// the caller knows its page number and is responsible for
+/// `pager.freePage(old)` AFTER its grandparent commits the new
+/// child pointer (parent-last invariant; see module doc).
+///
+/// `merged_cells` is the existing parent's cells plus the cell
+/// promoted up from a child split, already merged in rowid order.
+/// `merged_right_child` is the parent's new right_child after the
+/// child split (= the rightmost subtree's new root page).
+///
+/// `merged_cells.len < 2` is `Error.IoError` — there's nothing
+/// meaningful to split. Each half is also re-checked against
+/// `usable_size` via `classifyForInterior`; failure there is also
+/// `Error.IoError` (would indicate a bug in the splitter, since
+/// byte-cumulative midpoint guarantees both halves ≤ original size).
+pub fn splitInteriorPage(
+    pager: *pager_mod.Pager,
+    merged_cells: []const InteriorCell,
+    merged_right_child: u32,
+) Error!PromotedSplit {
+    if (merged_cells.len < 2) return Error.IoError;
+
+    const usable_size = try pager.usableSize();
+    const split = try splitInteriorCells(merged_cells, merged_right_child);
+
+    if (btree_split.classifyForInterior(split.left_cells, 0, usable_size) != .fits) return Error.IoError;
+    if (btree_split.classifyForInterior(split.right_cells, 0, usable_size) != .fits) return Error.IoError;
+
+    const allocator = pager.allocator;
+
+    // Allocate L_new + R_new BEFORE writing anything: a failure at
+    // alloc leaves the on-disk dbsize alone. Order: L then R so the
+    // page numbers ascend with key, matching sqlite3's layout
+    // convention. (Same as `balanceDeeperRoot`.)
+    const left_page = try pager.allocatePage();
+    const right_page = try pager.allocatePage();
+
+    // Build both child bodies in scratch buffers so a partial alloc
+    // failure above doesn't leave a half-formatted page on disk.
+    const left_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(left_buf);
+    @memset(left_buf, 0);
+    try btree_split.writeInteriorTablePage(
+        left_buf,
+        0,
+        usable_size,
+        split.left_cells,
+        split.left_right_child,
+    );
+
+    const right_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(right_buf);
+    @memset(right_buf, 0);
+    try btree_split.writeInteriorTablePage(
+        right_buf,
+        0,
+        usable_size,
+        split.right_cells,
+        split.right_right_child,
+    );
+
+    try pager.writePage(left_page, left_buf);
+    try pager.writePage(right_page, right_buf);
+
+    return .{
+        .new_cell = .{ .left_child = left_page, .key = split.promoted_key },
+        .new_right_child = right_page,
+    };
+}
+
+/// Balance-deeper for an overflowing INTERIOR root (Iter26.B.3.b).
+/// Symmetric with `btree_split.balanceDeeperRoot` (which handles a
+/// LEAF root) — `root_page_no` is preserved (same `sqlite_schema.rootpage`
+/// invariant), the existing root bytes get rewritten LAST as a 1-cell
+/// interior page pointing at the two new interior children.
+///
+/// Inputs match `splitInteriorPage`: `merged_cells` + `merged_right_child`
+/// are what the root would have held had it not overflowed. Caller has
+/// already merged the child-promoted cell into the root's cell list.
+///
+/// Page 1 root is rejected with `UnsupportedFeature` — sqlite_schema
+/// growth past one page is deferred (same reason `balanceDeeperRoot`
+/// rejects page 1).
+///
+/// Crash window: same parent-last shape as `balanceDeeperRoot`. New
+/// interior children are written first; root rewrite is the LAST
+/// pager mutation. A crash before the root write leaves the OLD root
+/// untouched at `root_page_no` (queryable, just stale) plus orphan
+/// child pages — `PRAGMA integrity_check` warns but data is preserved.
+/// Phase 4 (WAL) absorbs the residual window end-to-end.
+pub fn balanceDeeperInterior(
+    pager: *pager_mod.Pager,
+    root_page_no: u32,
+    merged_cells: []const InteriorCell,
+    merged_right_child: u32,
+) Error!void {
+    if (root_page_no == 1) return Error.UnsupportedFeature;
+    if (merged_cells.len < 2) return Error.IoError;
+
+    const usable_size = try pager.usableSize();
+    const split = try splitInteriorCells(merged_cells, merged_right_child);
+
+    if (btree_split.classifyForInterior(split.left_cells, 0, usable_size) != .fits) return Error.IoError;
+    if (btree_split.classifyForInterior(split.right_cells, 0, usable_size) != .fits) return Error.IoError;
+
+    const allocator = pager.allocator;
+
+    const left_page = try pager.allocatePage();
+    const right_page = try pager.allocatePage();
+
+    const left_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(left_buf);
+    @memset(left_buf, 0);
+    try btree_split.writeInteriorTablePage(
+        left_buf,
+        0,
+        usable_size,
+        split.left_cells,
+        split.left_right_child,
+    );
+
+    const right_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(right_buf);
+    @memset(right_buf, 0);
+    try btree_split.writeInteriorTablePage(
+        right_buf,
+        0,
+        usable_size,
+        split.right_cells,
+        split.right_right_child,
+    );
+
+    try pager.writePage(left_page, left_buf);
+    try pager.writePage(right_page, right_buf);
+
+    // Root rewrite LAST. The old root bytes at `root_page_no` are
+    // overwritten; no freePage needed (page is reused).
+    const root_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(root_buf);
+    @memset(root_buf, 0);
+    const root_cells = [_]InteriorCell{
+        .{ .left_child = left_page, .key = split.promoted_key },
+    };
+    try btree_split.writeInteriorTablePage(
+        root_buf,
+        0,
+        usable_size,
+        &root_cells,
+        right_page,
+    );
+    try pager.writePage(root_page_no, root_buf);
+}
+
 // Unit tests live in `btree_split_interior_test.zig` to keep this
-// file headed for sub-500-line discipline once B.3.b adds the
-// pager-touching `splitInteriorPage` + `balanceDeeperInterior`.
+// file under the 500-line discipline.
