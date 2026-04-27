@@ -210,6 +210,9 @@ fn parseAndApplyModifiers(args: []const Value) ?ParseResult {
             const jd = numericFromArg(args[0]) orelse return null;
             dt = calendar.julianFloatToDateTime(jd) orelse return null;
             mod_start = 2;
+        } else if (isLiteralModifier(args[1], "auto")) {
+            dt = autoInterpret(args[0]) orelse return null;
+            mod_start = 2;
         } else {
             const datestr = switch (args[0]) {
                 .null => return null,
@@ -258,10 +261,50 @@ fn numericFromArg(v: Value) ?f64 {
     return switch (v) {
         .integer => |i| @floatFromInt(i),
         .real => |r| r,
-        .text => |t| std.fmt.parseFloat(f64, t) catch null,
-        .blob => |b| std.fmt.parseFloat(f64, b) catch null,
+        .text => |t| parseFloatTrimmed(t),
+        .blob => |b| parseFloatTrimmed(b),
         .null => null,
     };
+}
+
+/// sqlite3 quirk: numeric inputs to `'unixepoch'` / `'julianday'` /
+/// `'auto'` accept ASCII whitespace around the digits (`'  10  '` parses
+/// as `10`), but reject any other tail (`'10xyz'` → NULL). `parseFloat`
+/// alone fails on whitespace, so trim first.
+fn parseFloatTrimmed(bytes: []const u8) ?f64 {
+    const trimmed = std.mem.trim(u8, bytes, &std.ascii.whitespace);
+    if (trimmed.len == 0) return null;
+    return std.fmt.parseFloat(f64, trimmed) catch null;
+}
+
+/// `'auto'` modifier (sqlite3 3.46+): if the argument is numeric, choose
+/// JD or unixepoch by magnitude — `0 ≤ v ≤ 5373484.5` lands inside the
+/// JD range that maps to year 0..=9999, so use it as JD; everything else
+/// (including negatives) is unixepoch seconds. Non-numeric TEXT falls
+/// through to normal date-string parsing. Verified against sqlite3
+/// 3.51.0 with `datetime(0,'auto')` → JD 0 (BC 4713-11-24) and
+/// `datetime(5373485,'auto')` → unixepoch 5373485.
+fn autoInterpret(arg: Value) ?DateTime {
+    if (arg == .null) return null;
+    const num: ?f64 = switch (arg) {
+        .integer => |i| @as(f64, @floatFromInt(i)),
+        .real => |r| r,
+        .text => |t| parseFloatTrimmed(t),
+        .blob => |b| parseFloatTrimmed(b),
+        .null => null,
+    };
+    if (num) |v| {
+        if (v >= 0 and v <= 5373484.5) {
+            return calendar.julianFloatToDateTime(v);
+        }
+        return unixepochToDateTime(v);
+    }
+    const s = switch (arg) {
+        .text => |t| t,
+        .blob => |b| b,
+        else => return null,
+    };
+    return calendar.parseDateTime(s);
 }
 
 /// Convert seconds-since-epoch (1970-01-01 00:00:00 UTC) to DateTime via
