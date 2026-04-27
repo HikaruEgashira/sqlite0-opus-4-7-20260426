@@ -87,18 +87,9 @@ pub const ExecResult = struct {
     }
 };
 
-/// Journal mode declared by header bytes 18 (write_format) / 19 (read_format)
-/// per SQLite3 file format spec §1.6. Iter27.0.a sets this on `openFile` so
-/// downstream iterations (write gate in 27.B, WAL frame routing in 27.A/B) can
-/// dispatch on it without re-parsing the header. ADR-0007 §1.5 commits to
-/// "respect existing file's mode" — sqlite0 does not silently flip the bytes.
-///
-/// Only the two combinations sqlite3 actually writes are recognised:
-///   - `(1, 1)` = `.delete_legacy` (rollback-journal mode, sqlite3 default)
-///   - `(2, 2)` = `.wal`           (write-ahead-log mode)
-/// Any other pair is `Error.IoError` at open time — sqlite3 itself treats
-/// unknown formats as corrupt.
-pub const JournalMode = enum { delete_legacy, wal };
+/// Re-export from `journal.zig` so callers (and the existing
+/// `database_journal_mode_test.zig` API) can spell it `database.JournalMode`.
+pub const JournalMode = @import("journal.zig").JournalMode;
 
 pub const Database = struct {
     allocator: std.mem.Allocator,
@@ -120,15 +111,21 @@ pub const Database = struct {
 
     /// Open a sqlite3 .db file. Acquires the Pager's exclusive flock
     /// for the lifetime of the Database, reads the journal-mode bits
-    /// from the page-1 header (Iter27.0.a / ADR-0007 §1.5), then scans
-    /// `sqlite_schema` to populate `tables` with `root_page` set.
-    /// `deinit` releases the flock.
+    /// from the page-1 header (Iter27.0.a / ADR-0007 §1.5), runs
+    /// hot-journal recovery if a `<path>-journal` sidecar exists in
+    /// delete_legacy mode (Iter27.0.b), then scans `sqlite_schema` to
+    /// populate `tables` with `root_page` set. `deinit` releases the
+    /// flock.
     pub fn openFile(allocator: std.mem.Allocator, path: []const u8) !Database {
         const p = try pager_mod.Pager.open(allocator, path);
         var db: Database = .{ .allocator = allocator, .pager = p };
         errdefer db.deinit();
 
-        db.journal_mode = try detectJournalMode(&db.pager.?);
+        const journal = @import("journal.zig");
+        db.journal_mode = try journal.detectJournalMode(&db.pager.?);
+        if (db.journal_mode == .delete_legacy) {
+            try journal.maybeRunRecovery(&db.pager.?, path);
+        }
 
         const schema = @import("schema.zig");
         try schema.loadFromPager(&db, &db.pager.?);
@@ -209,24 +206,6 @@ pub const Database = struct {
         };
     }
 };
-
-/// Decode the journal-mode bits at file-header bytes 18 (write_format) and
-/// 19 (read_format) per SQLite3 file format §1.6. Both bytes must agree —
-/// sqlite3 itself writes them as a pair (`(1,1)` legacy or `(2,2)` WAL).
-/// Disagreement or any other value surfaces as `Error.IoError` so we never
-/// guess at half-corrupt headers.
-fn detectJournalMode(p: *pager_mod.Pager) !JournalMode {
-    const page1 = try p.getPage(1);
-    if (page1.len < 20) return Error.IoError;
-    const write_format = page1[18];
-    const read_format = page1[19];
-    if (write_format != read_format) return Error.IoError;
-    return switch (write_format) {
-        1 => .delete_legacy,
-        2 => .wal,
-        else => Error.IoError,
-    };
-}
 
 pub fn lowerCaseDupe(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
     const buf = try allocator.alloc(u8, src.len);

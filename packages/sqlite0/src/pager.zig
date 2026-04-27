@@ -311,6 +311,29 @@ pub const Pager = struct {
         }
     }
 
+    /// Truncate the underlying file to exactly `n_pages * PAGE_SIZE`
+    /// bytes and drop any cached entries whose page_no exceeds
+    /// `n_pages` (their backing bytes no longer exist on disk).
+    /// Iter27.0.b uses this for hot-journal recovery — the journal
+    /// header records the pre-transaction `initial_db_size`, and
+    /// rollback must shrink the file back if a later `allocatePage`
+    /// extended it. `n_pages == 0` is rejected (a sqlite3 file always
+    /// has at least page 1).
+    pub fn truncate(self: *Pager, n_pages: u32) Error!void {
+        if (n_pages == 0) return Error.IoError;
+        const new_len: std.c.off_t = @intCast(@as(usize, n_pages) * PAGE_SIZE);
+        if (std.c.ftruncate(self.fd, new_len) != 0) return Error.IoError;
+        var i: usize = 0;
+        while (i < self.cache.items.len) {
+            if (self.cache.items[i].page_no > n_pages) {
+                const evicted = self.cache.orderedRemove(i);
+                self.allocator.free(evicted.data);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// Return page `page_no` (1-indexed). On cache hit, the entry moves
     /// to the head. On miss, the page is `pread`'d, inserted at head,
     /// and the LRU tail is evicted if over capacity.
@@ -355,137 +378,8 @@ pub const Pager = struct {
     }
 };
 
-// -- tests --
-
-const testing = std.testing;
-const test_db_util = @import("test_db_util.zig");
-const makeTempPath = test_db_util.makeTempPath;
-const unlinkPath = test_db_util.unlinkPath;
-const writeFixture = test_db_util.writeFixture;
-
-test "Pager.open: rejects nonexistent file" {
-    const path = try makeTempPath("missing");
-    defer testing.allocator.free(path);
-    // No fixture written — open must fail.
-    try testing.expectError(Error.IoError, Pager.open(testing.allocator, path));
-}
-
-test "Pager.getPage: reads page 1 contents" {
-    const path = try makeTempPath("page1");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    var content: [16]u8 = .{ 'H', 'e', 'l', 'l', 'o', '!', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    try writeFixture(path, &content);
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-    const data = try p.getPage(1);
-    try testing.expectEqual(@as(usize, PAGE_SIZE), data.len);
-    try testing.expectEqualStrings("Hello!", data[0..6]);
-    try testing.expectEqual(@as(u8, 0), data[6]);
-}
-
-test "Pager.getPage: page 0 is invalid" {
-    const path = try makeTempPath("p0");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-    try writeFixture(path, "x");
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-    try testing.expectError(Error.IoError, p.getPage(0));
-}
-
-test "Pager.getPage: cache hit returns same backing slice" {
-    const path = try makeTempPath("hit");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-    try writeFixture(path, "abc");
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-    const a = try p.getPage(1);
-    const b = try p.getPage(1);
-    // Cache hit: pointer identity, not just byte equality.
-    try testing.expect(a.ptr == b.ptr);
-}
-
-test "Pager.getPage: LRU eviction at capacity" {
-    const path = try makeTempPath("lru");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    // 20 pages, each tagged with its page number in the first byte.
-    const n_pages: u32 = 20;
-    const content = try testing.allocator.alloc(u8, PAGE_SIZE * n_pages);
-    defer testing.allocator.free(content);
-    @memset(content, 0);
-    for (0..n_pages) |i| {
-        // Page (i+1)'s first byte = (i+1) so we can verify reads.
-        content[i * PAGE_SIZE] = @intCast(i + 1);
-    }
-    try writeFixture(path, content);
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-    p.cache_capacity = 4; // Force eviction quickly.
-
-    var i: u32 = 1;
-    while (i <= 6) : (i += 1) {
-        const data = try p.getPage(i);
-        try testing.expectEqual(@as(u8, @intCast(i)), data[0]);
-    }
-    // Cache should hold pages 6, 5, 4, 3 (head→tail). Page 1 and 2 evicted.
-    try testing.expectEqual(@as(usize, 4), p.cache.items.len);
-    try testing.expectEqual(@as(u32, 6), p.cache.items[0].page_no);
-    try testing.expectEqual(@as(u32, 3), p.cache.items[3].page_no);
-
-    // Re-read page 1: cache miss, brings it to head, evicts page 3.
-    const page1 = try p.getPage(1);
-    try testing.expectEqual(@as(u8, 1), page1[0]);
-    try testing.expectEqual(@as(u32, 1), p.cache.items[0].page_no);
-    try testing.expectEqual(@as(u32, 4), p.cache.items[3].page_no);
-}
-
-test "Pager.open: second instance fails with DatabaseLocked" {
-    const path = try makeTempPath("lock");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-    try writeFixture(path, "x");
-
-    var p1 = try Pager.open(testing.allocator, path);
-    defer p1.close();
-    try testing.expectError(Error.DatabaseLocked, Pager.open(testing.allocator, path));
-}
-
-test "Pager.getPage: LRU promotion on hit" {
-    const path = try makeTempPath("promote");
-    defer testing.allocator.free(path);
-    defer unlinkPath(path);
-
-    const n_pages: u32 = 4;
-    const content = try testing.allocator.alloc(u8, PAGE_SIZE * n_pages);
-    defer testing.allocator.free(content);
-    @memset(content, 0);
-    for (0..n_pages) |i| content[i * PAGE_SIZE] = @intCast(i + 1);
-    try writeFixture(path, content);
-
-    var p = try Pager.open(testing.allocator, path);
-    defer p.close();
-
-    _ = try p.getPage(1);
-    _ = try p.getPage(2);
-    _ = try p.getPage(3);
-    // Order now: 3, 2, 1
-    try testing.expectEqual(@as(u32, 3), p.cache.items[0].page_no);
-    try testing.expectEqual(@as(u32, 1), p.cache.items[2].page_no);
-
-    _ = try p.getPage(1); // hit; promotes 1 to head
-    try testing.expectEqual(@as(u32, 1), p.cache.items[0].page_no);
-    try testing.expectEqual(@as(u32, 3), p.cache.items[1].page_no);
-    try testing.expectEqual(@as(u32, 2), p.cache.items[2].page_no);
-}
-
-// `Pager.writePage` and `Pager.allocatePage` tests live in
-// `pager_write_test.zig` to keep this file under the 500-line discipline.
+// Unit tests live in sibling files to keep this module under the
+// 500-line discipline:
+//   - `pager_read_test.zig`  : open / close / getPage / LRU
+//   - `pager_write_test.zig` : writePage / allocatePage / freePage
+//   - `journal_test.zig`     : truncate + Iter27.0.b recovery
