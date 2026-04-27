@@ -89,22 +89,55 @@ run_mutate_case() {
   local mutate="$2"
   local verify="$3"
   local skip_rt="$4"
+  local wal_setup="$5"
+  local mutate2="$6"
   total=$((total + 1))
 
   local fixture_a="${WORK_DIR}/case-${total}-a.db"
   local fixture_b="${WORK_DIR}/case-${total}-b.db"
-  rm -f "$fixture_a" "$fixture_b" "${fixture_a}-journal" "${fixture_b}-journal"
+  rm -f "$fixture_a" "$fixture_b" "${fixture_a}-journal" "${fixture_b}-journal" "${fixture_a}-wal" "${fixture_b}-wal" "${fixture_a}-shm" "${fixture_b}-shm"
 
   if ! sqlite3 "$fixture_a" "$setup" 2>/dev/null; then
     fail=$((fail + 1)); fails+=("SETUP failed (case $total): $setup"); return
   fi
+  # WAL_SETUP runs the same way as in run_query_case: persistent -wal
+  # via no_ckpt_on_close + autocheckpoint disabled, so sqlite0's
+  # MUTATE opens a real WAL-mode fixture (header bytes 18/19 = 2/2)
+  # rather than silently falling through to the legacy delete path.
+  if [[ -n "$wal_setup" ]]; then
+    if ! sqlite3 -cmd '.dbconfig no_ckpt_on_close on' "$fixture_a" "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; $wal_setup" >/dev/null 2>&1; then
+      fail=$((fail + 1)); fails+=("WAL_SETUP failed (case $total): $wal_setup"); return
+    fi
+  fi
   cp "$fixture_a" "$fixture_b"
+  if [[ -f "${fixture_a}-wal" ]]; then cp "${fixture_a}-wal" "${fixture_b}-wal"; fi
+  if [[ -f "${fixture_a}-shm" ]]; then cp "${fixture_a}-shm" "${fixture_b}-shm"; fi
 
   if ! "$SQLITE0" -file "$fixture_a" -c "$mutate" >/dev/null 2>&1; then
     fail=$((fail + 1)); fails+=("Case $total (MUTATE) sqlite0 failed: $mutate"); return
   fi
-  if ! sqlite3 "$fixture_b" "$mutate" >/dev/null 2>&1; then
+  # Run the reference mutation under no_ckpt_on_close+autocheckpoint=0
+  # so the -wal sidecar persists (and stays unbounded) for parity with
+  # sqlite0's behaviour. Without this, sqlite3 checkpoints on close and
+  # the next reader sees only main-file bytes, which masks WAL write
+  # bugs.
+  if ! sqlite3 -cmd '.dbconfig no_ckpt_on_close on' "$fixture_b" "PRAGMA wal_autocheckpoint=0; $mutate" >/dev/null 2>&1; then
     fail=$((fail + 1)); fails+=("Case $total (MUTATE) sqlite3 failed: $mutate"); return
+  fi
+
+  # MUTATE2: optional second mutation session against the same
+  # fixture, after the MUTATE session closed. Exercises sqlite0's
+  # WalWriter.fromExistingState in production — appending to a WAL we
+  # ourselves wrote in a previous process. Single-process MUTATE only
+  # tests fromExistingState when the fixture had a WAL_SETUP-supplied
+  # WAL; MUTATE2 covers the chain-an-empty-or-our-own-WAL case too.
+  if [[ -n "$mutate2" ]]; then
+    if ! "$SQLITE0" -file "$fixture_a" -c "$mutate2" >/dev/null 2>&1; then
+      fail=$((fail + 1)); fails+=("Case $total (MUTATE2) sqlite0 failed: $mutate2"); return
+    fi
+    if ! sqlite3 -cmd '.dbconfig no_ckpt_on_close on' "$fixture_b" "PRAGMA wal_autocheckpoint=0; $mutate2" >/dev/null 2>&1; then
+      fail=$((fail + 1)); fails+=("Case $total (MUTATE2) sqlite3 failed: $mutate2"); return
+    fi
   fi
 
   local actual expected sqlite0_roundtrip
@@ -138,6 +171,7 @@ setup=""
 query=""
 wal_setup=""
 mutate=""
+mutate2=""
 verify=""
 skip_rt="0"
 flush_case() {
@@ -145,10 +179,10 @@ flush_case() {
     if [[ -n "$query" ]]; then
       run_query_case "$setup" "$query" "$wal_setup"
     elif [[ -n "$mutate" && -n "$verify" ]]; then
-      run_mutate_case "$setup" "$mutate" "$verify" "$skip_rt"
+      run_mutate_case "$setup" "$mutate" "$verify" "$skip_rt" "$wal_setup" "$mutate2"
     fi
   fi
-  setup=""; query=""; wal_setup=""; mutate=""; verify=""; skip_rt="0"
+  setup=""; query=""; wal_setup=""; mutate=""; mutate2=""; verify=""; skip_rt="0"
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
@@ -159,6 +193,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     'WAL_SETUP: '*) wal_setup="${line#WAL_SETUP: }" ;;
     'QUERY: '*)     query="${line#QUERY: }" ;;
     'MUTATE: '*)    mutate="${line#MUTATE: }" ;;
+    'MUTATE2: '*)   mutate2="${line#MUTATE2: }" ;;
     'VERIFY: '*)    verify="${line#VERIFY: }" ;;
     'SKIP_RT: '*)   skip_rt="${line#SKIP_RT: }" ;;
     *)

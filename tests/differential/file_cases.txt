@@ -422,14 +422,19 @@ VERIFY: SELECT n, s FROM t ORDER BY n
 
 
 
-# Iter27.B.3+ — staged-page LRU eviction regression. 45 rows × 100
+# Iter27.B.3+ — staged-page LRU eviction regression. 10 rows × 100
 # byte TEXT spans multiple leaf pages within one statement; getPage
 # during the cascading allocate/split must reach back into
 # `staged_frames` for pages already evicted from the 16-entry LRU.
 # Without the staged_frames consult in pager.zig, this surfaces as
 # IoError (newly-allocated page beyond EOF) or stale bytes from
 # pre-tx main-file reads. Advisor-caught hole.
-SETUP: CREATE TABLE t(n INTEGER PRIMARY KEY, s TEXT);
+#
+# `n INTEGER` (not INTEGER PRIMARY KEY) — sqlite0 lacks IPK column-
+# rowid aliasing (Iter28 candidate); using IPK here would conflate the
+# WAL bug this fixture is meant to discriminate with the orthogonal
+# read/write IPK gap.
+SETUP: CREATE TABLE t(n INTEGER, s TEXT);
 WAL_SETUP: INSERT INTO t VALUES(0, 'seed');
 MUTATE: INSERT INTO t(n,s) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),(2,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),(3,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),(4,'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'),(5,'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'),(6,'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'),(7,'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'),(8,'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh'),(9,'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'),(10,'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj');
 VERIFY: SELECT count(*), min(n), max(n) FROM t
@@ -475,3 +480,30 @@ SETUP: CREATE TABLE t(n INTEGER);
 WAL_SETUP: INSERT INTO t VALUES (1);
 MUTATE: INSERT INTO t VALUES (2); INSERT INTO t VALUES (3);
 VERIFY: SELECT n FROM t ORDER BY n
+
+# Iter27.B.5 — multi-session reopen. MUTATE writes through sqlite0 once,
+# the process exits (closing both fds), MUTATE2 opens the same file in
+# a brand-new sqlite0 invocation. The second session must inherit our
+# OWN previously-written WAL chain via WalWriter.fromExistingState
+# (chain seed, salts, next_frame_offset all recovered from the on-disk
+# frames). Without correct inheritance, MUTATE2 either rewrites a
+# committed frame (chain seed off) or appends with a wrong checksum
+# (sqlite3's reader rejects the new tail). Advisor-flagged as the
+# load-bearing pre-C correctness check; the existing single-process
+# MUTATE only exercises fromExistingState against a sqlite3-written WAL.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1);
+MUTATE: INSERT INTO t VALUES (2);
+MUTATE2: INSERT INTO t VALUES (3); UPDATE t SET n = n * 10 WHERE n = 1;
+VERIFY: SELECT n FROM t ORDER BY n
+
+# Same shape but starting from a sqlite3-fresh WAL_SETUP-less DB so
+# the first sqlite0 session is `wal_writer.create` and the second is
+# `fromExistingState` against ONLY our own bytes — discriminates "we
+# can chain after sqlite3 wrote" (covered by other cases) from "we
+# can chain after we ourselves wrote".
+SETUP: CREATE TABLE u(a INTEGER, b TEXT);
+WAL_SETUP: SELECT 1;
+MUTATE: INSERT INTO u VALUES (1, 'first');
+MUTATE2: INSERT INTO u VALUES (2, 'second'); INSERT INTO u VALUES (3, 'third');
+VERIFY: SELECT a, b FROM u ORDER BY a
