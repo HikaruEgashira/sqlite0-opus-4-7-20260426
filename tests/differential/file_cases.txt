@@ -418,3 +418,18 @@ SETUP: CREATE TABLE t(n INTEGER, s TEXT);
 WAL_SETUP: INSERT INTO t VALUES(1, 'one');
 MUTATE: INSERT INTO t VALUES(2, 'two'); INSERT INTO t VALUES(3, 'three'); UPDATE t SET s = upper(s);
 VERIFY: SELECT n, s FROM t ORDER BY n
+
+
+
+
+# Iter27.B.3+ — staged-page LRU eviction regression. 45 rows × 100
+# byte TEXT spans multiple leaf pages within one statement; getPage
+# during the cascading allocate/split must reach back into
+# `staged_frames` for pages already evicted from the 16-entry LRU.
+# Without the staged_frames consult in pager.zig, this surfaces as
+# IoError (newly-allocated page beyond EOF) or stale bytes from
+# pre-tx main-file reads. Advisor-caught hole.
+SETUP: CREATE TABLE t(n INTEGER PRIMARY KEY, s TEXT);
+WAL_SETUP: INSERT INTO t VALUES(0, 'seed');
+MUTATE: INSERT INTO t(n,s) VALUES(1,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'),(2,'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'),(3,'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'),(4,'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'),(5,'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'),(6,'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'),(7,'gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg'),(8,'hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh'),(9,'iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii'),(10,'jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj');
+VERIFY: SELECT count(*), min(n), max(n) FROM t

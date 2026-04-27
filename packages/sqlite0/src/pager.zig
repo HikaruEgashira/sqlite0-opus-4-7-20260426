@@ -412,9 +412,31 @@ pub const Pager = struct {
             }
         }
 
-        // Cache miss: WAL takes precedence over the main file (Iter27.A).
-        // If the page is in the WAL index, pread the page payload from
-        // the WAL fd. Otherwise fall through to the main file pread.
+        // Cache miss: precedence order is staged_frames → WAL index →
+        // main file. staged_frames must come first because in-flight
+        // mutations of the current statement (Iter27.B.3) haven't
+        // been promoted to WalState.index yet — promotion happens in
+        // commit. Without this branch, a btree statement that fans
+        // beyond `cache_capacity` distinct pages would evict its own
+        // staged page from the LRU and then either re-read the
+        // pre-mutation bytes from main file (silent corruption) or
+        // hit IoError on a newly-allocated page beyond EOF (advisor
+        // -caught hole, regression-pinned by the 30-row × 400 byte
+        // INSERT MUTATE fixture).
+        for (self.staged_frames.items) |s| {
+            if (s.page_no == page_no) {
+                const buf = try self.allocator.alloc(u8, PAGE_SIZE);
+                errdefer self.allocator.free(buf);
+                @memcpy(buf, s.data);
+                try self.cache.insert(self.allocator, 0, .{ .page_no = page_no, .data = buf });
+                if (self.cache.items.len > self.cache_capacity) {
+                    const evicted = self.cache.pop().?;
+                    self.allocator.free(evicted.data);
+                }
+                return self.cache.items[0].data;
+            }
+        }
+
         const buf = try self.allocator.alloc(u8, PAGE_SIZE);
         errdefer self.allocator.free(buf);
 
