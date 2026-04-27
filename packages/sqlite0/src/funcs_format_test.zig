@@ -106,3 +106,59 @@ test "fnPrintf: %e (deferred — Ryu vs dtoa) treated as unknown → NULL" {
     const r = try fnPrintf(a, &p);
     try std.testing.expect(r == .null);
 }
+
+test "fnPrintf: %s NUL-truncates TEXT before precision" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%.10s" }, .{ .text = "ab\x00cd" } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("ab", r.text);
+}
+
+test "fnPrintf: %s width pads truncated length, not raw" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%5s|" }, .{ .text = "ab\x00cd" } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("   ab|", r.text);
+}
+
+test "fnPrintf: %s NUL-truncates BLOB" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%s|" }, .{ .blob = "\x00ab" } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("|", r.text);
+}
+
+test "fnPrintf: %c on leading-NUL TEXT writes 1 NUL byte (sqlite3 quirk)" {
+    // sqlite3 always emits exactly 1 byte for `%c` — the C-string's first
+    // byte (the NUL terminator if input is empty / NUL-leading / NULL).
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%c" }, .{ .text = "\x00xyz" } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("\x00", r.text);
+}
+
+test "fnPrintf: %c on NULL writes 1 NUL byte (not empty string)" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%c" }, .null };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("\x00", r.text);
+}
+
+test "fnPrintf: empty fmt → NULL (sqlite3 sqlite3_str_finish empty rule)" {
+    const a = std.testing.allocator;
+    var p = [_]Value{.{ .text = "" }};
+    const r = try fnPrintf(a, &p);
+    try std.testing.expect(r == .null);
+}
+
+test "fnPrintf: %s with NULL → NULL (empty accumulator)" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%s" }, .null };
+    const r = try fnPrintf(a, &p);
+    try std.testing.expect(r == .null);
+}

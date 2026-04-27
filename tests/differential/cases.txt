@@ -1859,4 +1859,24 @@ SELECT printf(' %j', 1)
 SELECT printf('%5d %j', 1, 2)
 SELECT printf('%j%5d', 1, 2)
 SELECT printf('hello %a world', 1)
+# Iter29.AB: printf %s/%c NUL-truncate (sqlite3 C-string convention).
+# %s and %c argument bytes stop at the first 0x00; precision counts only
+# pre-NUL bytes; width pads against the truncated length; BLOB and TEXT
+# follow the same rule. NULL still maps to empty string (no NUL byte).
+SELECT printf('%s|', cast(x'6162006364' as text))
+SELECT length(printf('%s', cast(x'6162006364' as text)))
+SELECT printf('%.10s', cast(x'6162006364' as text))
+SELECT printf('%5s|', cast(x'6162006364' as text))
+SELECT printf('%-5s|', cast(x'6162006364' as text))
+SELECT printf('a%sb', cast(x'636400' as text))
+SELECT printf('%s|', x'006162')
+SELECT length(printf('%s', x'006162'))
+SELECT length(printf('%s', cast(x'00' as text)))
+SELECT typeof(printf('%c', cast(x'00' as text)))
+SELECT printf('%c', cast(x'4100' as text))
+SELECT typeof(printf(''))
+SELECT typeof(printf('%s', NULL))
+SELECT printf('%s|', NULL)
+SELECT typeof(printf('%s|', NULL))
+
 

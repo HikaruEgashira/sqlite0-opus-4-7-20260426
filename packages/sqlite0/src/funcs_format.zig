@@ -146,6 +146,15 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
             },
         }
     }
+    // sqlite3 PRINTF_SQLFUNC: `sqlite3_str_finish` returns NULL when zero
+    // bytes have been written; `sqlite3_result_text(..., NULL, ...)` converts
+    // that to a SQL NULL. Mirror it so `printf('')`, `printf('%s', NULL)`,
+    // `printf('%s', '')`, and any other empty-accumulator result becomes
+    // NULL instead of empty TEXT.
+    if (out.items.len == 0) {
+        out.deinit(allocator);
+        return Value.null;
+    }
     return Value{ .text = try out.toOwnedSlice(allocator) };
 }
 
@@ -297,7 +306,7 @@ fn writeString(
 ) !void {
     var owned: ?[]u8 = null;
     defer if (owned) |b| allocator.free(b);
-    const s: []const u8 = switch (v) {
+    const raw: []const u8 = switch (v) {
         .null => "",
         .text => |t| t,
         .blob => |b| b,
@@ -309,6 +318,11 @@ fn writeString(
             break :blk owned.?;
         },
     };
+    // sqlite3 treats the %s argument as a C string and stops at the first
+    // NUL byte. NUL-truncate BEFORE precision so `%.10s` of `"ab\0cd"`
+    // returns `"ab"`, not `"ab\0cd"` (precision 10 doesn't pull post-NUL
+    // bytes back). Width pads against the truncated length.
+    const s = nulTruncate(raw);
     const slice = if (spec.precision) |p| s[0..@min(p, s.len)] else s;
     const pad: usize = if (slice.len < spec.width) spec.width - slice.len else 0;
     if (!spec.left_align) try appendN(allocator, out, ' ', pad);
@@ -317,12 +331,14 @@ fn writeString(
 }
 
 fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) !void {
-    // sqlite3 quirk: `%c` writes the FIRST CHARACTER of the substituted
-    // string (not a codepoint from an integer). `printf('%c', 65)` → "6"
-    // (first char of "65"), not "A". Match that behavior.
+    // sqlite3 quirk: `%c` reads the C-string's first byte and ALWAYS writes
+    // exactly 1 byte to the accumulator. Empty / NULL / leading-NUL inputs
+    // all produce a NUL byte (because `bufpt[0]` is the NUL terminator).
+    // INTEGER 65 is text-rendered to `"65"` first, so `printf('%c', 65)`
+    // emits `'6'` (first char of `"65"`), not `'A'`.
     var owned: ?[]u8 = null;
     defer if (owned) |b| allocator.free(b);
-    const s: []const u8 = switch (v) {
+    const raw: []const u8 = switch (v) {
         .null => "",
         .text => |t| t,
         .blob => |b| b,
@@ -334,7 +350,12 @@ fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value) !v
             break :blk owned.?;
         },
     };
-    if (s.len > 0) try out.append(allocator, s[0]);
+    const c: u8 = if (raw.len > 0) raw[0] else 0;
+    try out.append(allocator, c);
+}
+
+fn nulTruncate(s: []const u8) []const u8 {
+    return if (std.mem.indexOfScalar(u8, s, 0)) |n| s[0..n] else s;
 }
 
 /// Render a value as an SQL-quoted body and append with width padding.
@@ -374,10 +395,7 @@ fn writeQuoted(
         };
         // sqlite3's C-string convention stops scanning at the first NUL byte —
         // mirror that so embedded-NUL inputs produce byte-equal output.
-        const raw_to_nul: []const u8 = if (std.mem.indexOfScalar(u8, raw_full, 0)) |n|
-            raw_full[0..n]
-        else
-            raw_full;
+        const raw_to_nul = nulTruncate(raw_full);
         const slice = if (spec.precision) |p| raw_to_nul[0..@min(p, raw_to_nul.len)] else raw_to_nul;
         if (wrap) try body.append(allocator, qc);
         for (slice) |c| {
