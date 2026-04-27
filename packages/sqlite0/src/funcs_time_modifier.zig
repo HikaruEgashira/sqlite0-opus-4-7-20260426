@@ -30,7 +30,30 @@ pub fn applyModifier(dt: DateTime, mod: []const u8) ?DateTime {
         return applyStartOf(dt, rest);
     }
 
+    if (matchPrefixIgnoreCase(mod, "weekday ")) |rest| {
+        return applyWeekday(dt, rest);
+    }
+
     return applyDelta(dt, mod);
+}
+
+/// `'weekday N'` (sqlite3) — move the date forward (≥0 days) so the
+/// resulting weekday matches `N`, where 0=Sun..6=Sat. If `N` already
+/// matches the current weekday, the date is unchanged. The time of day
+/// rides through untouched (`'2024-01-01 12:34:56' + weekday 3'` →
+/// `'2024-01-03 12:34:56'`). `N` must be an integer literal in 0..=6;
+/// `'weekday 7'` / `'weekday -1'` / `'weekday 2.5'` / `'weekday'` all
+/// reject (sqlite3 → NULL).
+fn applyWeekday(dt: DateTime, n_str: []const u8) ?DateTime {
+    if (n_str.len != 1) return null;
+    const c = n_str[0];
+    if (c < '0' or c > '6') return null;
+    const target: u8 = c - '0';
+    const current = calendar.dayOfWeek(dt);
+    const delta: u8 = (target + 7 - current) % 7;
+    if (delta == 0) return dt;
+    const jd = calendar.dateTimeToJulianFloat(dt) + @as(f64, @floatFromInt(delta));
+    return calendar.julianFloatToDateTime(jd);
 }
 
 fn applyStartOf(dt: DateTime, scope: []const u8) ?DateTime {
