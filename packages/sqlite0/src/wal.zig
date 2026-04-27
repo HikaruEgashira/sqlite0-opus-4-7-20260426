@@ -215,3 +215,63 @@ pub fn verifyFrame(
     if (running[0] != fh.checksum1 or running[1] != fh.checksum2) return null;
     return running;
 }
+
+// ---------- Iter27.B.0 — write-side encoders (pure, no I/O) ----------
+
+/// Encode a 32-byte WAL header with valid checksum-1/2. The chosen
+/// magic determines the checksum endianness (LE host writes
+/// `MAGIC_LE`, BE host writes `MAGIC_BE`). sqlite0 always writes
+/// `MAGIC_LE` at runtime — we're effectively choosing "LE host" for
+/// portability, since the on-disk format itself doesn't care which
+/// host writes it (sqlite3 reads either fine).
+pub fn encodeHeader(
+    out: *[HEADER_SIZE]u8,
+    page_size: u32,
+    checkpoint_seq: u32,
+    salt1: u32,
+    salt2: u32,
+    magic: u32,
+) void {
+    writeU32BE(out[0..4], magic);
+    writeU32BE(out[4..8], FILE_FORMAT);
+    writeU32BE(out[8..12], page_size);
+    writeU32BE(out[12..16], checkpoint_seq);
+    writeU32BE(out[16..20], salt1);
+    writeU32BE(out[20..24], salt2);
+    const endian: Endianness = if (magic == MAGIC_BE) .be else .le;
+    const cksum = walChecksum(.{ 0, 0 }, out[0..24], endian);
+    writeU32BE(out[24..28], cksum[0]);
+    writeU32BE(out[28..32], cksum[1]);
+}
+
+/// Encode one frame: 24-byte frame header + PAGE_SIZE page bytes.
+/// `prev_checksum` is the running chain (header's checksum for the
+/// first frame, the previous frame's stored checksum thereafter).
+/// Returns the new running chain so the caller can feed it into the
+/// next call.
+///
+/// `out` must be `FRAME_SIZE` bytes; the page bytes are written
+/// straight from `page_bytes` (no copy if caller writes through
+/// `out[FRAME_HEADER_SIZE..]` themselves).
+pub fn encodeFrame(
+    out: *[FRAME_SIZE]u8,
+    prev_checksum: [2]u32,
+    page_no: u32,
+    commit_size: u32,
+    salt1: u32,
+    salt2: u32,
+    page_bytes: *const [pager_mod.PAGE_SIZE]u8,
+    endian: Endianness,
+) [2]u32 {
+    writeU32BE(out[0..4], page_no);
+    writeU32BE(out[4..8], commit_size);
+    writeU32BE(out[8..12], salt1);
+    writeU32BE(out[12..16], salt2);
+    @memcpy(out[FRAME_HEADER_SIZE..FRAME_SIZE], page_bytes);
+
+    var running = walChecksum(prev_checksum, out[0..8], endian);
+    running = walChecksum(running, out[FRAME_HEADER_SIZE..FRAME_SIZE], endian);
+    writeU32BE(out[16..20], running[0]);
+    writeU32BE(out[20..24], running[1]);
+    return running;
+}

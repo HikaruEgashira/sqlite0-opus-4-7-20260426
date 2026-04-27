@@ -34,6 +34,7 @@ pub const journal_test = @import("journal_test.zig");
 pub const wal = @import("wal.zig");
 pub const wal_recovery = @import("wal_recovery.zig");
 pub const wal_test = @import("wal_test.zig");
+pub const wal_recovery_test = @import("wal_recovery_test.zig");
 pub const engine = @import("engine.zig");
 pub const engine_from = @import("engine_from.zig");
 pub const engine_setop = @import("engine_setop.zig");

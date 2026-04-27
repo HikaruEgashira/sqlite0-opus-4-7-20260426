@@ -54,6 +54,27 @@ pub const WalState = struct {
     /// Iter27.A trusts main_file_size here for any page not in `index`;
     /// truncate-via-WAL semantics land in Iter27.C/D.
     wal_dbsize: u32 = 0,
+    /// Iter27.B writer-inheritance state. After a successful scan these
+    /// fields describe "where the next writer would pick up": the salt
+    /// epoch, the running checksum, the byte offset where new frames go,
+    /// and which endianness the chain was computed in. Iter27.B.1's
+    /// `WalWriter.fromExistingState(state)` reads these so an append
+    /// continues the same chain sqlite3 would have continued.
+    ///
+    /// On a fresh / empty WAL these stay at their zero defaults; the
+    /// writer takes the create() path instead.
+    salt1: u32 = 0,
+    salt2: u32 = 0,
+    endian: wal.Endianness = .le,
+    /// Cumulative checksum after the LAST validated frame (= seed for
+    /// the next frame). When `wal_dbsize == 0` (no commits yet) this is
+    /// `(0, 0)` — but writers should treat that as "no inheritable state"
+    /// and create a fresh epoch instead.
+    last_checksum: [2]u32 = .{ 0, 0 },
+    /// Byte offset of the first unwritten frame slot. Equals
+    /// `HEADER_SIZE + n_validated_frames * FRAME_SIZE`. The next encoded
+    /// frame goes here.
+    next_frame_offset: u64 = 0,
 
     pub fn deinit(self: *WalState) void {
         self.index.deinit(self.allocator);
@@ -141,7 +162,17 @@ fn scanFrames(state: *WalState, file_size: usize) Error!void {
     // as if no WAL existed) rather than guess.
     if (!wal.verifyHeaderChecksum(&header_buf, header)) return;
 
+    state.salt1 = header.salt1;
+    state.salt2 = header.salt2;
+    state.endian = header.endianness();
+
     var running: [2]u32 = .{ header.checksum1, header.checksum2 };
+    // The writer-inheritance seed advances only on commit promotion.
+    // Uncommitted frames never become visible to readers, and an
+    // appending writer must restart the chain from the last commit (any
+    // frames after that are about to be overwritten).
+    var commit_running: [2]u32 = running;
+    var commit_off: u64 = wal.HEADER_SIZE;
 
     var tentative: std.AutoHashMapUnmanaged(u32, u64) = .{};
     defer tentative.deinit(state.allocator);
@@ -175,10 +206,15 @@ fn scanFrames(state: *WalState, file_size: usize) Error!void {
             }
             tentative.clearRetainingCapacity();
             state.wal_dbsize = fh.commit_size;
+            commit_running = running;
+            commit_off = @as(u64, @intCast(frame_off)) + wal.FRAME_SIZE;
         }
 
         frame_off += wal.FRAME_SIZE;
     }
     // Anything left in `tentative` is a partial transaction — discarded
     // by virtue of never being copied to `state.index`.
+
+    state.last_checksum = commit_running;
+    state.next_frame_offset = commit_off;
 }
