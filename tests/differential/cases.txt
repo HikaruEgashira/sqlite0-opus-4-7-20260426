@@ -1726,3 +1726,40 @@ CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT string_agg(x) FROM t
 CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT string_agg(DISTINCT x,',') FROM t
 SELECT concat_ws(123,'a','b')
 
+# Iter29.Y: SQL boolean literals TRUE / FALSE.
+# sqlite3 maps TRUE → INTEGER 1, FALSE → INTEGER 0 (case-insensitive),
+# typeof = 'integer'. They participate in arithmetic, comparisons, and
+# the three-valued logic of NULL/AND/OR/NOT just like 1 and 0 do.
+# (sqlite3 also resolves `true` to a same-named column when one is in
+# scope — that edge case is deferred; sqlite0's lexer always tokenises
+# the bare word as keyword_true.)
+SELECT TRUE
+SELECT FALSE
+SELECT true
+SELECT false
+SELECT True, FaLsE
+SELECT typeof(TRUE)
+SELECT typeof(FALSE)
+SELECT TRUE + 1
+SELECT FALSE + 1
+SELECT TRUE * 2
+SELECT TRUE = 1
+SELECT FALSE = 0
+SELECT TRUE = TRUE
+SELECT TRUE = FALSE
+SELECT NOT TRUE
+SELECT NOT FALSE
+SELECT TRUE AND FALSE
+SELECT TRUE OR FALSE
+SELECT TRUE AND TRUE
+SELECT FALSE OR FALSE
+SELECT NULL OR TRUE
+SELECT NULL OR FALSE
+SELECT NULL AND TRUE
+SELECT NULL AND FALSE
+SELECT CASE WHEN TRUE THEN 'yes' ELSE 'no' END
+SELECT CASE WHEN FALSE THEN 'yes' ELSE 'no' END
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t WHERE TRUE
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t WHERE FALSE
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT count(*) FROM t WHERE TRUE
+

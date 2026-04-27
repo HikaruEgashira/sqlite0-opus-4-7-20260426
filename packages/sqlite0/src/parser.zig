@@ -369,6 +369,21 @@ pub const Parser = struct {
                 self.advance();
                 return ast.makeLiteral(self.allocator, Value.null);
             },
+            .keyword_true => {
+                // sqlite3 collapses TRUE/FALSE to INTEGER 1/0 (typeof =
+                // 'integer'); no boolean type. The lexer always emits
+                // keyword_true/keyword_false here, so a column literally
+                // named `true`/`false` can't shadow the literal — sqlite3
+                // resolves it to the column when one is in scope; we
+                // deferred that edge case (would need lexer two-mode or
+                // identifier-fallback in parser).
+                self.advance();
+                return ast.makeLiteral(self.allocator, Value{ .integer = 1 });
+            },
+            .keyword_false => {
+                self.advance();
+                return ast.makeLiteral(self.allocator, Value{ .integer = 0 });
+            },
             .lparen => {
                 self.advance();
                 if (self.cur.kind == .keyword_select) {
