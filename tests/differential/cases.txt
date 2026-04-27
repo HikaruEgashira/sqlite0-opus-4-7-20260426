@@ -1928,6 +1928,21 @@ SELECT length(printf('%#x', 0))
 SELECT typeof(printf('%#x', 0))
 SELECT printf('%#d', 42)
 SELECT printf('%#u', 42)
+# Iter29.AF: char() out-of-range → U+FFFD; surrogate codepoints → WTF-8.
+# sqlite3 quirks: char(0x110000) and char(-1) emit replacement char (EFBFBD)
+# instead of empty; surrogates 0xD800-0xDFFF emit literal 3-byte sequences.
+SELECT hex(char(0x110000))
+SELECT hex(char(-1))
+SELECT hex(char(65, 0x110000, 66))
+SELECT hex(char(0xD800))
+SELECT hex(char(0xDFFF))
+SELECT hex(char(0xFFFD))
+SELECT length(char(0x110000))
+SELECT typeof(char(0x110000))
+SELECT hex(char(0))
+SELECT hex(char(0x80))
+SELECT hex(char(0x10000))
+
 
 
 

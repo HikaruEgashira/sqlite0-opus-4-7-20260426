@@ -188,17 +188,34 @@ pub fn fnInstr(allocator: std.mem.Allocator, args: []const Value) Error!Value {
 }
 
 /// SQLite `char(N1, N2, ...)` — concatenate the UTF-8 encodings of the given
-/// unicode code points. Out-of-range or invalid code points are silently
-/// skipped (matches the sqlite3 CLI behavior on bad inputs).
+/// unicode code points.
+///
+/// sqlite3 quirks reproduced here:
+///   * Out-of-range codepoints (`< 0` or `> 0x10FFFF`) emit U+FFFD
+///     (EF BF BD), the Unicode replacement character — NOT skipped.
+///   * Surrogate codepoints (0xD800-0xDFFF) emit a literal 3-byte
+///     WTF-8 sequence (ED Ax/Bx xx). sqlite3's UTF-8 encoder doesn't
+///     reject surrogates the way std.unicode.utf8Encode does — match
+///     by writing the bytes directly.
+///   * `char(0)` emits a single NUL byte (no replacement).
 pub fn fnChar(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     for (args) |a| {
         const cp = try util.toIntCoerce(a);
-        if (cp < 0 or cp > 0x10FFFF) continue;
-        const code: u21 = @intCast(cp);
+        if (cp < 0 or cp > 0x10FFFF) {
+            try out.appendSlice(allocator, "\xEF\xBF\xBD");
+            continue;
+        }
+        const code: u32 = @intCast(cp);
+        if (code >= 0xD800 and code <= 0xDFFF) {
+            try out.append(allocator, 0xE0 | @as(u8, @intCast((code >> 12) & 0x0F)));
+            try out.append(allocator, 0x80 | @as(u8, @intCast((code >> 6) & 0x3F)));
+            try out.append(allocator, 0x80 | @as(u8, @intCast(code & 0x3F)));
+            continue;
+        }
         var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(code, &buf) catch continue;
+        const len = std.unicode.utf8Encode(@intCast(code), &buf) catch unreachable;
         try out.appendSlice(allocator, buf[0..len]);
     }
     return Value{ .text = try out.toOwnedSlice(allocator) };
@@ -341,139 +358,4 @@ fn hexDigitValue(c: u8) u8 {
     };
 }
 
-test "fnReplace: simple replacement" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "hello world" }, .{ .text = "world" }, .{ .text = "zig" } };
-    const r = try fnReplace(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("hello zig", r.text);
-}
-
-test "fnReplace: empty find returns subject unchanged" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "abc" }, .{ .text = "" }, .{ .text = "X" } };
-    const r = try fnReplace(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("abc", r.text);
-}
-
-test "fnHex: ASCII bytes" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "abc" }};
-    const r = try fnHex(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("616263", r.text);
-}
-
-test "fnQuote: text wraps and doubles apostrophes" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "it's" }};
-    const r = try fnQuote(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("'it''s'", r.text);
-}
-
-test "fnQuote: NULL is the literal text 'NULL'" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.null};
-    const r = try fnQuote(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("NULL", r.text);
-}
-
-test "fnTrim: defaults to whitespace, both sides" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "  hi  " }};
-    const r = try fnTrim(allocator, &args, .both);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("hi", r.text);
-}
-
-test "fnInstr: 1-based offset, 0 when missing" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "hello world" }, .{ .text = "world" } };
-    const r1 = try fnInstr(allocator, &args);
-    try std.testing.expectEqual(@as(i64, 7), r1.integer);
-
-    var miss = [_]Value{ .{ .text = "hello" }, .{ .text = "world" } };
-    const r2 = try fnInstr(allocator, &miss);
-    try std.testing.expectEqual(@as(i64, 0), r2.integer);
-}
-
-test "fnChar: ASCII code points" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .integer = 72 }, .{ .integer = 105 } };
-    const r = try fnChar(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("Hi", r.text);
-}
-
-test "fnLength: UTF-8 char count not byte count" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "aあ" }};
-    const r = try fnLength(allocator, &args);
-    try std.testing.expectEqual(@as(i64, 2), r.integer);
-}
-
-test "fnOctetLength: TEXT byte count" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "aあ" }};
-    const r = try fnOctetLength(allocator, &args);
-    try std.testing.expectEqual(@as(i64, 4), r.integer);
-}
-
-test "fnLength: TEXT NUL-truncates (C-string convention)" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "A\x00B" }};
-    const r = try fnLength(allocator, &args);
-    try std.testing.expectEqual(@as(i64, 1), r.integer);
-}
-
-test "fnLength: leading NUL TEXT → 0" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "\x00xyz" }};
-    const r = try fnLength(allocator, &args);
-    try std.testing.expectEqual(@as(i64, 0), r.integer);
-}
-
-test "fnOctetLength: TEXT with embedded NUL counts raw bytes" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "A\x00B" }};
-    const r = try fnOctetLength(allocator, &args);
-    try std.testing.expectEqual(@as(i64, 3), r.integer);
-}
-
-test "fnUnhex: ignore-set strips spaces, decodes to BLOB" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .{ .text = "41 42" }, .{ .text = " " } };
-    const r = try fnUnhex(allocator, &args);
-    defer allocator.free(r.blob);
-    try std.testing.expectEqualSlices(u8, &.{ 0x41, 0x42 }, r.blob);
-}
-
-test "fnUnhex: odd hex length yields NULL" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{.{ .text = "414" }};
-    const r = try fnUnhex(allocator, &args);
-    try std.testing.expectEqual(Value.null, r);
-}
-
-test "fnConcat: NULL skipped, all-NULL returns empty TEXT not NULL" {
-    const allocator = std.testing.allocator;
-    var args = [_]Value{ .null, .null };
-    const r = try fnConcat(allocator, &args);
-    defer allocator.free(r.text);
-    try std.testing.expectEqualStrings("", r.text);
-}
-
-test "fnConcatWs: NULL sep collapses, NULL value skipped" {
-    const allocator = std.testing.allocator;
-    var null_sep = [_]Value{ .null, .{ .text = "a" }, .{ .text = "b" } };
-    const r1 = try fnConcatWs(allocator, &null_sep);
-    try std.testing.expectEqual(Value.null, r1);
-
-    var null_value = [_]Value{ .{ .text = "-" }, .{ .text = "a" }, .null, .{ .text = "b" } };
-    const r2 = try fnConcatWs(allocator, &null_value);
-    defer allocator.free(r2.text);
-    try std.testing.expectEqualStrings("a-b", r2.text);
-}
+// Tests live in funcs_text_test.zig (split out for the 500-line discipline).
