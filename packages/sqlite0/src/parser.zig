@@ -7,7 +7,13 @@ const eval = @import("eval.zig");
 const parser_predicate = @import("parser_predicate.zig");
 const parser_cast = @import("parser_cast.zig");
 const parser_call = @import("parser_call.zig");
+const parser_literal = @import("parser_literal.zig");
 const database = @import("database.zig");
+
+const hexDigitValue = parser_literal.hexDigitValue;
+const parseIntegerLiteralAsValue = parser_literal.parseIntegerLiteralAsValue;
+const parseNegatedDecimalI64 = parser_literal.parseNegatedDecimalI64;
+const parseRealLiteral = parser_literal.parseRealLiteral;
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
@@ -267,23 +273,32 @@ pub const Parser = struct {
             // LLONG_MIN, but the positive form `9223372036854775808`
             // overflows i64. Sign-fold here so the resulting literal
             // stays INTEGER (sqlite3 3.51 confirmed). Hex literals are
-            // intentionally not sign-folded — `-0x8000000000000000`
-            // hits sqlite3's "hex literal too big" error which we don't
-            // mimic; the standard unary-negate path falls back to REAL
-            // promotion via Iter29.N's `negateValue` LLONG_MIN branch.
+            // sign-folded too — `-0x8000000000000000` is the one u64
+            // value whose negation overflows i64, and sqlite3 errors
+            // ("hex literal too big") rather than promoting to REAL.
             if (self.cur.kind == .integer) {
                 const itext = self.cur.slice(self.src);
                 const is_hex = itext.len > 2 and itext[0] == '0' and (itext[1] == 'x' or itext[1] == 'X');
-                if (!is_hex) {
-                    if (parseNegatedDecimalI64(itext)) |neg_i| {
-                        self.advance();
-                        return ast.makeLiteral(self.allocator, Value{ .integer = neg_i });
-                    } else |_| {
-                        // Operand exceeds LLONG_MIN — fall through. The
-                        // positive literal will be parsed as REAL by
-                        // `parseIntegerLiteralAsValue`, then negated at
-                        // eval time (REAL → REAL).
+                if (is_hex) {
+                    const u = std.fmt.parseInt(u64, itext[2..], 16) catch return Error.InvalidNumber;
+                    const llong_min_mag: u64 = @as(u64, 1) << 63;
+                    if (u == llong_min_mag) {
+                        // Mirrors sqlite3 codeInteger() fallback for
+                        // `negFlag && value==SMALLEST_INT64` on hex.
+                        return Error.SyntaxError;
                     }
+                    const i_val: i64 = -@as(i64, @bitCast(u));
+                    self.advance();
+                    return ast.makeLiteral(self.allocator, Value{ .integer = i_val });
+                }
+                if (parseNegatedDecimalI64(itext)) |neg_i| {
+                    self.advance();
+                    return ast.makeLiteral(self.allocator, Value{ .integer = neg_i });
+                } else |_| {
+                    // Operand exceeds LLONG_MIN — fall through. The
+                    // positive literal will be parsed as REAL by
+                    // `parseIntegerLiteralAsValue`, then negated at
+                    // eval time (REAL → REAL).
                 }
             }
             const inner = try self.parseUnary();
@@ -411,67 +426,6 @@ pub const Parser = struct {
     }
 
 };
-
-/// Decode one ASCII hex digit. Caller must ensure the byte was already
-/// validated by the lexer (so we don't bother returning ?u8).
-fn hexDigitValue(c: u8) u8 {
-    if (c >= '0' and c <= '9') return c - '0';
-    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-    return c - 'A' + 10;
-}
-
-/// Parse a `.integer` token's text into a `Value`. Hex literals
-/// (`0x`/`0X` prefix) are read as u64 and bit-cast to i64 — sqlite3
-/// wraps the same way (`0xFFFFFFFFFFFFFFFF` → -1, `0x8000000000000000`
-/// → LLONG_MIN). Decimal literals fit as i64 when in range; otherwise
-/// they fall back to REAL (sqlite3 quirk: `9223372036854775808` →
-/// `9.22337203685478e+18`). `std.fmt.parseInt` accepts embedded `_` as
-/// a digit separator natively; the REAL fallback delegates to
-/// `parseRealLiteral` which strips them before calling parseFloat.
-fn parseIntegerLiteralAsValue(allocator: std.mem.Allocator, text: []const u8) !Value {
-    if (text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
-        const u = try std.fmt.parseInt(u64, text[2..], 16);
-        return Value{ .integer = @bitCast(u) };
-    }
-    if (std.fmt.parseInt(i64, text, 10)) |i| {
-        return Value{ .integer = i };
-    } else |err| switch (err) {
-        error.Overflow => return Value{ .real = try parseRealLiteral(allocator, text) },
-        else => return err,
-    }
-}
-
-/// Returns `-<text>` parsed as i64 if the operand fits as a signed
-/// negative i64 (i.e., the u64 magnitude ≤ 2^63). The boundary case
-/// `2^63` maps to LLONG_MIN, the only i64 value whose positive form
-/// overflows. Caller must not pass hex-prefixed text — sqlite3's
-/// `-0x...` form is handled differently (see `parseUnary`).
-fn parseNegatedDecimalI64(text: []const u8) !i64 {
-    const u = try std.fmt.parseInt(u64, text, 10);
-    const llong_min_mag: u64 = @as(u64, 1) << 63;
-    if (u > llong_min_mag) return error.Overflow;
-    if (u == llong_min_mag) return std.math.minInt(i64);
-    return -@as(i64, @intCast(u));
-}
-
-/// Parse a `.real` token's text into f64. `std.fmt.parseFloat` does not
-/// strip digit-separator underscores, so we copy out a clean span when
-/// `text` contains any. Allocation only fires for the rare separator
-/// case; the hot path stays zero-alloc.
-fn parseRealLiteral(allocator: std.mem.Allocator, text: []const u8) !f64 {
-    if (std.mem.indexOfScalar(u8, text, '_') == null) {
-        return std.fmt.parseFloat(f64, text);
-    }
-    const buf = try allocator.alloc(u8, text.len);
-    defer allocator.free(buf);
-    var w: usize = 0;
-    for (text) |c| {
-        if (c == '_') continue;
-        buf[w] = c;
-        w += 1;
-    }
-    return std.fmt.parseFloat(f64, buf[0..w]);
-}
 
 test "Parser: parseExpr literal" {
     const allocator = std.testing.allocator;
