@@ -2970,3 +2970,23 @@ SELECT 'αβ' GLOB '??'
 SELECT '𝕏Y' LIKE '_Y'
 SELECT '𝕏Y' GLOB '?Y'
 SELECT 'aαb' LIKE '_α_'
+
+# printf %d/%i/%u/%x/%o on TEXT 'inf'/'nan' = 0 (Iter30.X):
+#  * sqlite3 sqlite3AtoF rejects literal Inf/NaN — for printf integer
+#    specs this means TEXT 'inf' / 'nan' / 'Infinity' coerces to 0.
+#  * Numeric exponential strings ('9.99e99', '1e99') still saturate via
+#    the lenient prefix → REAL → i64 fallback.
+SELECT printf('%d', 'inf')
+SELECT printf('%d', 'nan')
+SELECT printf('%d', 'Inf')
+SELECT printf('%d', 'Infinity')
+SELECT printf('%d', '-inf')
+SELECT printf('%d', 'inf99')
+SELECT printf('%d', '9.99e99')
+SELECT printf('%d', '1e99')
+SELECT printf('%d', '1e-99')
+SELECT printf('%d', '.5')
+SELECT printf('%i', 'inf')
+SELECT printf('%u', 'inf')
+SELECT printf('%x', 'inf')
+SELECT printf('%o', 'inf')

@@ -35,13 +35,15 @@ pub fn coerceToInt(v: Value) i64 {
 
 /// printf TEXT→i64: try the atoi64 prefix parse first (sqlite3's
 /// printf accepts `'10abc'` → 10, `'  10  '` → 10, `'0x10'` → 0). If
-/// that finds nothing, fall back to parseFloat → saturating-i64 so
-/// pure-exponential strings like `'9.99e99'` still produce a saturated
-/// integer the way sqlite3 does. atoi64 itself lives in `func_util` so
-/// `eval_cast` can share it.
+/// that finds nothing (no leading digit run), fall back to the
+/// lenient `sqlite3AtoF`-prefix parser → saturating-i64 so
+/// `'.5'` → 0 (truncated), `'9.99e99'` → LLONG_MAX, but
+/// `'inf'`/`'nan'` correctly stay 0 (sqlite3's lenient parser
+/// rejects literal Inf/NaN; Zig's `std.fmt.parseFloat` would accept
+/// them and saturate, diverging from sqlite3).
 fn coerceTextToInt(s: []const u8) i64 {
     if (util.atoi64Prefix(s)) |i| return i;
-    if (std.fmt.parseFloat(f64, s)) |f| return std.math.lossyCast(i64, f) else |_| {}
+    if (util.parseFloatLooseOpt(s)) |f| return std.math.lossyCast(i64, f);
     return 0;
 }
 
