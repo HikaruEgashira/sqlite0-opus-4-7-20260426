@@ -2845,3 +2845,28 @@ SELECT unhex('  41 42 43  ', ' ')
 SELECT unhex('41XYZ', 'XYZ')
 SELECT unhex('44 44 44', '4 ')
 SELECT unhex('4142 43', ' ')
+
+# printf truncated-spec sqlite3 quirk (Iter30.R):
+#  * Trailing bare `%` (no flags/width/precision/length consumed) emits
+#    literal `%`: `printf('%')` → '%', `printf('a%')` → 'a%'.
+#  * Any spec partially-consumed before EOS (e.g. `%5`, `%-`, `%.5`,
+#    `%05.3`, `%l`, `%ll`) drops the unfinished spec AND aborts the
+#    format scan; bytes accumulated by preceding specs are returned as-is
+#    (empty accumulator → NULL).
+SELECT printf('%')
+SELECT printf('a%')
+SELECT printf('%5')
+SELECT printf('%-5')
+SELECT printf('%-')
+SELECT printf('%+')
+SELECT printf('%.5')
+SELECT printf('%5.')
+SELECT printf('%5.5')
+SELECT printf('%05')
+SELECT printf('%#')
+SELECT printf('%l')
+SELECT printf('%ll')
+SELECT printf('%lll')
+SELECT printf('a%5')
+SELECT printf('a%5dc%5', 1)
+SELECT printf('a%db%', 0)

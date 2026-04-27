@@ -119,8 +119,21 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
         }
 
         switch (spec.conv) {
+            // Truncated spec (format ended mid-flags/width/precision/length).
+            // sqlite3 PRINTF_SQLFUNC drops the unfinished spec and stops the
+            // format scan; same accumulator-empty → NULL contract as the
+            // unknown-spec else branch.
+            0 => {
+                if (out.items.len == 0) {
+                    out.deinit(allocator);
+                    return Value.null;
+                }
+                return Value{ .text = try out.toOwnedSlice(allocator) };
+            },
             // `%%` honors width (sqlite3 quirk — verified against 3.51.0:
             // `printf('%5%')` → `'    %'`, `printf('%-5%')` → `'%    '`).
+            // Trailing bare `%` (no spec chars consumed) routes here too —
+            // emits literal `%` with width=0.
             '%' => try writePercentLiteral(allocator, &out, spec),
             // `%n` in sqlite3 SQL printf is a no-op — it doesn't write
             // anything and doesn't consume an arg. (In C printf it would
@@ -324,6 +337,14 @@ fn parseSpec(fmt: []const u8, start: usize) Spec {
         s.end = p + 1;
     } else {
         s.end = p;
+        // sqlite3 quirk: when the format string ends without a conversion
+        // char, "trailing bare %" emits a literal `%` (`printf('%')` → `'%'`)
+        // BUT a partially-consumed spec — anything past `%` was consumed
+        // (flags / width / precision / length modifier) before EOS — aborts
+        // the entire format scan, dropping the unfinished spec. Differentiate
+        // by start == p: nothing consumed → keep the literal-% default;
+        // anything consumed → sentinel 0 routes to the abort branch.
+        if (p != start) s.conv = 0;
     }
     return s;
 }
