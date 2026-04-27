@@ -27,8 +27,16 @@ ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が 
 
 ### Phase 3c: 書き込み path
 
-- [ ] Iter26.A: B-tree page 更新 + page split + sqlite_schema への INSERT。**Cursor write-side API (`delete_current` / `update_column_at_current` / `insert`) を導入し、`engine_dml.executeDelete` / `executeUpdate` を Cursor 経由に切替** (Iter24.B 由来の作業をここで吸収)。CREATE TABLE / INSERT / DELETE / UPDATE が persistent に。**rollback はまだ無い** (Phase 4 で WAL)。
-- [ ] Iter26.B: page split overflow (record が page サイズを超えるケース)。
+advisor split (Iter26.A は scope が広すぎたため細分化):
+
+- [x] Iter26.guard: file-mode DB に対する DDL/DML を `Error.ReadOnlyDatabase` で reject。Iter25.B.5+C 完了直後の silent in-memory shadow state を防ぐ (registerTable / executeInsert / executeDelete / executeUpdate を `assertWritable(db)` で gate)。SELECT は引き続き許可。Unit test: file-mode DB が 4 種の write すべて拒否し SELECT は通る。
+- [ ] Iter26.A.0: `Pager.writePage(page_no, bytes)` 単独 primitive。pwrite + cache 更新 + (要決定) fsync。Pager open → write → close → reopen → getPage で round-trip 検証。
+- [ ] Iter26.A.1: insert-into-leaf-with-room (split 無し)。`engine_dml.executeInsert` の `t.root_page != 0` 経路を追加し、leaf cell pointer array を rowid 順に更新、cell content area へ record bytes を書き込み、Pager 経由で page を fsync。fixture は sqlite3-created (CREATE TABLE 永続化は Iter26.A.3 まで未対応)。
+- [ ] Iter26.A.2: DELETE / UPDATE 用の cell removal / replacement。
+- [ ] Iter26.A.3: CREATE TABLE 永続化 (page allocation: file 拡張 + header offset 28 の dbsize 更新 + sqlite_schema INSERT)。これで pure sqlite0 で fixture 生成 → 別プロセスの sqlite0/sqlite3 で読める。
+- [ ] Iter26.B: page split (leaf overflow → 兄弟 leaf 分裂 + interior 更新)。
+- [ ] Iter26.C: overflow page chain (record が usable_size−35 を超えるケース)。
+- [ ] Iter26.refactor: Cursor write-side API (`delete_current` / `update_column_at_current` / `insert`) — file-mode write が落ち着いてから in-memory DML 経路も Cursor 経由に統一 (元 Iter24.B 由来)。
 
 ### 残課題 (低優先, Phase 2 由来)
 

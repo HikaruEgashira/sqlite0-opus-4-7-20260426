@@ -337,3 +337,38 @@ test "loadFromPager: rejects non-sqlite3 file" {
     defer db.deinit();
     try testing.expectError(Error.IoError, loadFromPager(&db, &p));
 }
+
+test "file-mode Database rejects writes (Iter25.B.5+C → Iter26.A guard)" {
+    const path = try makeTempPath("readonly");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+
+    const rec = try buildSchemaRecord(testing.allocator, "table", "t", "t", 2, "CREATE TABLE t(a, b)");
+    defer testing.allocator.free(rec);
+    const inputs = [_]test_util.TestCellInput{.{ .rowid = 1, .record = rec }};
+    const page1 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 100, &inputs);
+    defer testing.allocator.free(page1);
+    @memcpy(page1[0..SQLITE_FILE_HEADER.len], SQLITE_FILE_HEADER);
+
+    const empty_inputs = [_]test_util.TestCellInput{};
+    const page2 = try test_util.buildLeafTablePage(testing.allocator, PAGE_SIZE, 0, &empty_inputs);
+    defer testing.allocator.free(page2);
+
+    try writePages(path, &[_][]const u8{ page1, page2 });
+
+    var db = try database.Database.openFile(testing.allocator, path);
+    defer db.deinit();
+
+    // Without the guard, each of these would silently mutate the
+    // in-memory shadow state and pretend to succeed. The guard makes
+    // them fail loud so users discover Iter26.A isn't done yet.
+    try testing.expectError(Error.ReadOnlyDatabase, db.execute("INSERT INTO t VALUES (1, 'x')"));
+    try testing.expectError(Error.ReadOnlyDatabase, db.execute("DELETE FROM t"));
+    try testing.expectError(Error.ReadOnlyDatabase, db.execute("UPDATE t SET a = 1"));
+    try testing.expectError(Error.ReadOnlyDatabase, db.execute("CREATE TABLE u(z)"));
+
+    // SELECT still works against file-mode databases (Iter25 read path).
+    var sr = try db.execute("SELECT a, b FROM t");
+    defer sr.deinit();
+    try testing.expectEqual(@as(usize, 1), sr.statements.len);
+}

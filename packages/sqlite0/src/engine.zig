@@ -64,26 +64,39 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_create => {
             const parsed = try stmt_mod.parseCreateTableStatement(p);
+            try assertWritable(db);
             try db.registerTable(parsed);
             return .create_table;
         },
         .keyword_insert => {
             const parsed = try stmt_mod.parseInsertStatement(p);
+            try assertWritable(db);
             const rowcount = try engine_dml.executeInsert(db, p.allocator, parsed);
             return .{ .insert = .{ .rowcount = rowcount } };
         },
         .keyword_delete => {
             const parsed = try stmt_dml.parseDeleteStatement(p);
+            try assertWritable(db);
             const rowcount = try engine_dml.executeDelete(db, p.allocator, parsed);
             return .{ .delete = .{ .rowcount = rowcount } };
         },
         .keyword_update => {
             const parsed = try stmt_dml.parseUpdateStatement(p);
+            try assertWritable(db);
             const rowcount = try engine_dml.executeUpdate(db, p.allocator, parsed);
             return .{ .update = .{ .rowcount = rowcount } };
         },
         else => return Error.SyntaxError,
     }
+}
+
+/// Reject DDL/DML against a Pager-backed Database until Iter26.A lands
+/// the write path. This guards against silent in-memory shadow state
+/// masquerading as a persisted mutation: `Database.openFile` populates
+/// `tables` from sqlite_schema, but `registerTable` / `executeInsert` /
+/// etc. all mutate per-process state with no path back to the file.
+fn assertWritable(db: *Database) Error!void {
+    if (db.pager != null) return Error.ReadOnlyDatabase;
 }
 
 /// Result of a SELECT used as a row source. Iter21 added this so subqueries
