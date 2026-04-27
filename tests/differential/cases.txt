@@ -998,3 +998,12 @@ SELECT typeof(CAST(3 AS NUMERIC))
 SELECT typeof(CAST(3.0 AS NUMERIC))
 # CAST in FROM-row context with NULL pass-through
 CREATE TABLE t23(x); INSERT INTO t23 VALUES('42'),('abc'),(NULL); SELECT CAST(x AS INTEGER) FROM t23
+
+# Iter28.fix — in-memory INTEGER PRIMARY KEY auto-rowid. Mirrors the
+# Iter28 file-mode chooseRowid: omitted IPK column receives the next
+# rowid (max(IPK) + 1, starting at 1 for an empty table). Explicit
+# IPK values bump the watermark forward.
+CREATE TABLE ipk1(id INTEGER PRIMARY KEY, x); INSERT INTO ipk1(x) VALUES('a'),('b'); SELECT * FROM ipk1
+CREATE TABLE ipk2(id INTEGER PRIMARY KEY, x); INSERT INTO ipk2 VALUES(5,'a'); INSERT INTO ipk2(x) VALUES('b'); SELECT * FROM ipk2 ORDER BY id
+CREATE TABLE ipk3(id INTEGER PRIMARY KEY, x); INSERT INTO ipk3 VALUES(99,'a'); INSERT INTO ipk3(x) VALUES('b'),('c'); SELECT * FROM ipk3 ORDER BY id
+CREATE TABLE ipk4(id INTEGER PRIMARY KEY, x); INSERT INTO ipk4(x) VALUES('a'); INSERT INTO ipk4(x) VALUES('b'); INSERT INTO ipk4 VALUES(50,'c'); INSERT INTO ipk4(x) VALUES('d'); SELECT * FROM ipk4 ORDER BY id

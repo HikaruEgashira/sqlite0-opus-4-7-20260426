@@ -198,6 +198,14 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
 
     try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);
     var inserted: u64 = 0;
+    // Iter28.fix — in-memory IPK auto-rowid. Mirrors Iter28's file-mode
+    // chooseRowid: scan existing rows for the highest integer value in
+    // the IPK column (default 0 for empty table), then bump for each
+    // row whose IPK column is NULL after column-target resolution.
+    // Explicit IPK values bump max_rowid forward so subsequent NULL
+    // entries continue from there. sqlite3 returns 1 for the first
+    // auto-assigned rowid in a fresh table; we match.
+    var max_rowid: i64 = if (t.ipk_column) |ipk| computeMaxIpkValue(t, ipk) else 0;
     errdefer {
         // Roll back any rows already appended in this call (ADR-0003 §1
         // all-or-nothing). Schema mutations from registerTable are not
@@ -224,10 +232,34 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             else
                 Value.null;
         }
+        if (t.ipk_column) |ipk| switch (new_row[ipk]) {
+            .null => {
+                max_rowid += 1;
+                new_row[ipk] = .{ .integer = max_rowid };
+            },
+            .integer => |explicit| {
+                if (explicit > max_rowid) max_rowid = explicit;
+            },
+            else => {},
+        };
         t.rows.appendAssumeCapacity(new_row);
         inserted += 1;
     }
     return inserted;
+}
+
+fn computeMaxIpkValue(t: *const Table, ipk: usize) i64 {
+    var max_val: i64 = 0;
+    for (t.rows.items) |row| {
+        if (ipk >= row.len) continue;
+        switch (row[ipk]) {
+            .integer => |n| if (n > max_val) {
+                max_val = n;
+            },
+            else => {},
+        }
+    }
+    return max_val;
 }
 
 /// Build a per-table-column slice mapping each table column index to either
