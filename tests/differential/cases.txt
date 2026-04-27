@@ -1021,3 +1021,32 @@ CREATE TABLE nn4(a NOT NULL, b); INSERT INTO nn4 VALUES(1, 'first'), (NULL, 'sec
 CREATE TABLE nn5(a NOT NULL, b); INSERT INTO nn5 VALUES(1, 'x'), (2, NULL); SELECT * FROM nn5 ORDER BY a
 # IPK + NOT NULL: omitted IPK auto-fills with rowid → constraint OK.
 CREATE TABLE nn6(a INTEGER PRIMARY KEY NOT NULL, b NOT NULL); INSERT INTO nn6(b) VALUES('hello'); SELECT * FROM nn6
+
+# Iter29.C — iif(cond, a, b) ≡ CASE WHEN cond THEN a ELSE b END.
+# Eager 3-arg evaluation; both branches always materialised.
+SELECT iif(1=1, 'yes', 'no')
+SELECT iif(0, 'a', 'b')
+SELECT iif(NULL, 'a', 'b')
+SELECT iif('hello', 'a', 'b')
+SELECT iif(0.0, 'a', 'b')
+SELECT iif(0.5, 'a', 'b')
+CREATE TABLE iif1(x); INSERT INTO iif1 VALUES(1),(5),(10); SELECT iif(x>=5, 'big', 'small') FROM iif1 ORDER BY x
+
+# Iter29.C — date()/time()/datetime() shorthand wrappers around
+# strftime. The 0-arg form (current time via 'now') is deferred until
+# std.Io plumbing lands; both engines reject 0-arg the same way as
+# 1-arg-non-string here.
+SELECT date('2024-01-15')
+SELECT date('2024-01-15', '+1 day')
+SELECT date('2024-12-31', '+1 day')
+SELECT time('14:30:45')
+SELECT time('14:30:45', '+30 minutes')
+SELECT datetime('2024-01-15')
+SELECT datetime('2024-01-15 14:30:45')
+SELECT datetime('2024-01-15 14:30:45', '+1 hour')
+# NULL / invalid input → NULL (rendered as empty in CLI). Discriminating:
+# strict parseDateTime rejects what sqlite3 accepts loosely (e.g.
+# '2024' alone), so only the parses we handle are exercised.
+SELECT date(NULL)
+SELECT date('invalid')
+SELECT time(NULL)

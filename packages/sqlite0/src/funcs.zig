@@ -36,7 +36,26 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "random")) return fnRandom(args);
     if (util.eqlIgnoreCase(name, "printf") or util.eqlIgnoreCase(name, "format")) return fmt_mod.fnPrintf(allocator, args);
     if (util.eqlIgnoreCase(name, "strftime")) return time_mod.fnStrftime(allocator, args);
+    if (util.eqlIgnoreCase(name, "date")) return time_mod.fnDate(allocator, args);
+    if (util.eqlIgnoreCase(name, "time")) return time_mod.fnTime(allocator, args);
+    if (util.eqlIgnoreCase(name, "datetime")) return time_mod.fnDatetime(allocator, args);
+    if (util.eqlIgnoreCase(name, "iif")) return fnIif(allocator, args);
     return Error.UnknownFunction;
+}
+
+/// `iif(cond, a, b)` — sqlite3's CASE WHEN shorthand. Returns `a` when
+/// the condition is truthy, `b` otherwise (NULL → ELSE branch, matching
+/// CASE WHEN's "not-true" semantics rather than three-valued logic).
+/// Both branches are eagerly evaluated upstream — sqlite0 has no
+/// short-circuit pathway for scalar args, and sqlite3's iif
+/// documentation calls it "syntactic sugar" without a documented
+/// short-circuit guarantee, so the divergence is invisible to
+/// byte-comparison tests.
+fn fnIif(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 3) return Error.WrongArgumentCount;
+    const cond = ops.truthy(args[0]) orelse false;
+    const picked = if (cond) args[1] else args[2];
+    return util.dupeValue(allocator, picked);
 }
 
 /// Process-wide PRNG state for `random()`. Lazily initialized on first call.

@@ -42,14 +42,42 @@ const Error = util.Error;
 
 pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len < 2) return Error.WrongArgumentCount;
-
     const fmt = switch (args[0]) {
         .null => return Value.null,
         .text => |t| t,
         .blob => |b| b,
         else => return Value.null,
     };
-    const datestr = switch (args[1]) {
+    return formatDateTime(allocator, fmt, args[1..]);
+}
+
+/// `date(timestring, [modifier]*)` — sqlite3 shorthand for
+/// `strftime('%Y-%m-%d', timestring, ...)`. Returns NULL on missing
+/// arg / NULL / unparsable date / unknown modifier (mirrors strftime).
+/// The 0-arg form (current date via `'now'`) is deferred until
+/// std.Io plumbing lands.
+pub fn fnDate(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len == 0) return Error.WrongArgumentCount;
+    return formatDateTime(allocator, "%Y-%m-%d", args);
+}
+
+pub fn fnTime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len == 0) return Error.WrongArgumentCount;
+    return formatDateTime(allocator, "%H:%M:%S", args);
+}
+
+pub fn fnDatetime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len == 0) return Error.WrongArgumentCount;
+    return formatDateTime(allocator, "%Y-%m-%d %H:%M:%S", args);
+}
+
+/// Core formatter shared by strftime/date/time/datetime. `args` is the
+/// post-format slice: [datestring, modifier1, modifier2, ...]. A NULL
+/// or non-text/blob datestring or modifier collapses the whole result
+/// to NULL (sqlite3 parity); an unrecognised %-specifier in `fmt`
+/// likewise → NULL.
+fn formatDateTime(allocator: std.mem.Allocator, fmt: []const u8, args: []const Value) Error!Value {
+    const datestr = switch (args[0]) {
         .null => return Value.null,
         .text => |t| t,
         .blob => |b| b,
@@ -57,7 +85,7 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
     };
 
     var dt = parseDateTime(datestr) orelse return Value.null;
-    for (args[2..]) |mod_arg| {
+    for (args[1..]) |mod_arg| {
         const mod_str = switch (mod_arg) {
             .null => return Value.null,
             .text => |t| t,
@@ -116,11 +144,21 @@ const DateTime = struct {
     second: u8 = 0,
 };
 
-/// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, and `YYYY-MM-DDTHH:MM:SS`.
-/// Returns null on malformed input or out-of-range fields. Stricter than
-/// sqlite3 in some edge cases (no fractional seconds, no timezone offsets) —
-/// expand as needed when differential cases demand it.
+/// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, `YYYY-MM-DDTHH:MM:SS`,
+/// or `HH:MM:SS` (time-only — date defaults to 2000-01-01 per sqlite3
+/// time() docs). Returns null on malformed input or out-of-range fields.
+/// Stricter than sqlite3 in some edge cases (no fractional seconds, no
+/// timezone offsets) — expand as needed when differential cases demand
+/// it.
 fn parseDateTime(s: []const u8) ?DateTime {
+    // Time-only `HH:MM:SS`: sqlite3 fills the date with 2000-01-01.
+    if (s.len == 8 and s[2] == ':' and s[5] == ':') {
+        const hour = parseUintFixed(u8, s[0..2]) orelse return null;
+        const minute = parseUintFixed(u8, s[3..5]) orelse return null;
+        const second = parseUintFixed(u8, s[6..8]) orelse return null;
+        if (hour > 23 or minute > 59 or second > 59) return null;
+        return .{ .year = 2000, .month = 1, .day = 1, .hour = hour, .minute = minute, .second = second };
+    }
     if (s.len < 10) return null;
     if (s[4] != '-' or s[7] != '-') return null;
     const year = parseUintFixed(u16, s[0..4]) orelse return null;
