@@ -19,6 +19,7 @@ const fnOctetLength = text.fnOctetLength;
 const fnUnhex = text.fnUnhex;
 const fnConcat = text.fnConcat;
 const fnConcatWs = text.fnConcatWs;
+const fnUnicode = text.fnUnicode;
 
 test "fnReplace: simple replacement" {
     const allocator = std.testing.allocator;
@@ -187,4 +188,46 @@ test "fnConcatWs: NULL sep collapses, NULL value skipped" {
     const r2 = try fnConcatWs(allocator, &null_value);
     defer allocator.free(r2.text);
     try std.testing.expectEqualStrings("a-b", r2.text);
+}
+
+test "fnUnicode: lone 0xFF orphan byte → U+FFFD (overlong sentinel)" {
+    const a = std.testing.allocator;
+    var args = [_]Value{.{ .blob = "\xFF" }};
+    const r = try fnUnicode(a, &args);
+    try std.testing.expectEqual(@as(i64, 0xFFFD), r.integer);
+}
+
+test "fnUnicode: lone 0x80 continuation byte returned raw (lead < 0xC0)" {
+    const a = std.testing.allocator;
+    var args = [_]Value{.{ .blob = "\x80" }};
+    const r = try fnUnicode(a, &args);
+    try std.testing.expectEqual(@as(i64, 0x80), r.integer);
+}
+
+test "fnUnicode: surrogate-encoded 0xED 0xA0 0x80 → U+FFFD" {
+    const a = std.testing.allocator;
+    var args = [_]Value{.{ .blob = "\xED\xA0\x80" }};
+    const r = try fnUnicode(a, &args);
+    try std.testing.expectEqual(@as(i64, 0xFFFD), r.integer);
+}
+
+test "fnUnicode: 4-byte lead with only 3 bytes decodes as 3-byte (lenient)" {
+    const a = std.testing.allocator;
+    var args = [_]Value{.{ .blob = "\xF0\xA0\x80" }};
+    const r = try fnUnicode(a, &args);
+    try std.testing.expectEqual(@as(i64, 0x800), r.integer);
+}
+
+test "fnUnicode: leading-NUL TEXT → NULL (C-string convention)" {
+    const a = std.testing.allocator;
+    var args = [_]Value{.{ .text = "\x00abc" }};
+    const r = try fnUnicode(a, &args);
+    try std.testing.expectEqual(Value.null, r);
+}
+
+test "fnUnicode: INTEGER coerces to text, returns first codepoint" {
+    const a = std.testing.allocator;
+    var args = [_]Value{.{ .integer = 1 }};
+    const r = try fnUnicode(a, &args);
+    try std.testing.expectEqual(@as(i64, '1'), r.integer);
 }

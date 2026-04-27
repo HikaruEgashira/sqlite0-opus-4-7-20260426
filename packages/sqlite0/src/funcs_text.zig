@@ -221,20 +221,75 @@ pub fn fnChar(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     return Value{ .text = try out.toOwnedSlice(allocator) };
 }
 
+// sqlite3 utf.c::sqlite3Utf8Trans1: lookup table for the initial accumulator
+// value when reading a multi-byte UTF-8 sequence. Indexed by lead-byte − 0xC0.
+// Entries 0..31 mask 5 LSBs (2-byte lead 0xC0..0xDF), 32..47 mask 4 LSBs
+// (3-byte lead 0xE0..0xEF), 48..55 mask 3 LSBs (4-byte lead 0xF0..0xF7),
+// 56..59 mask 2 LSBs (5-byte invalid 0xF8..0xFB), 60..61 mask 1 LSB (6-byte
+// invalid 0xFC..0xFD), 62..63 are 0 (0xFE/0xFF — never UTF-8 lead).
+const utf8_trans1 = [_]u8{
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x00, 0x01, 0x02, 0x03, 0x00, 0x01, 0x00, 0x00,
+};
+
 pub fn fnUnicode(allocator: std.mem.Allocator, args: []const Value) Error!Value {
-    _ = allocator;
     if (args.len != 1) return Error.WrongArgumentCount;
     if (args[0] == .null) return Value.null;
-    const bytes = switch (args[0]) {
+    // sqlite3's `unicodeFunc` reads `sqlite3_value_text(argv[0])` so all input
+    // types funnel through the TEXT casting path. INTEGER/REAL render to their
+    // canonical text form (`unicode(1)` → 49 = ASCII '1'), BLOB bytes are
+    // treated as TEXT bytes verbatim. Then `if (z && z[0])` gates the result —
+    // empty TEXT and TEXT whose first byte is NUL both yield SQL NULL.
+    var owned: ?[]u8 = null;
+    defer if (owned) |b| allocator.free(b);
+    const raw: []const u8 = switch (args[0]) {
         .text => |t| t,
         .blob => |b| b,
-        else => return Error.UnsupportedFeature,
+        else => blk: {
+            owned = ops.valueToOwnedText(allocator, args[0]) catch |err| switch (err) {
+                error.OutOfMemory => return Error.OutOfMemory,
+                error.NotConvertible => return Error.UnsupportedFeature,
+            };
+            break :blk owned.?;
+        },
     };
+    // C-string convention: stop at first NUL. Empty input → NULL (sqlite3:
+    // `if (z[0]) sqlite3_result_int(...)` — false branch leaves the result
+    // unset, which the API converts to SQL NULL).
+    const bytes = if (std.mem.indexOfScalar(u8, raw, 0)) |n| raw[0..n] else raw;
     if (bytes.len == 0) return Value.null;
-    const cp_len = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return Value{ .integer = bytes[0] };
-    if (cp_len > bytes.len) return Value{ .integer = bytes[0] };
-    const cp = std.unicode.utf8Decode(bytes[0..cp_len]) catch return Value{ .integer = bytes[0] };
-    return Value{ .integer = cp };
+    return Value{ .integer = @intCast(decodeUtf8FirstCodepoint(bytes)) };
+}
+
+// sqlite3 utf.c::sqlite3Utf8Read — lenient UTF-8 codepoint reader. Differs
+// from a strict decoder in three ways:
+//   * Bytes < 0xC0 are returned raw (so 0x80..0xBF "orphan continuation"
+//     bytes pass through unchanged — `unicode(x'80')` → 128).
+//   * Lead bytes >= 0xC0 always consume the maximum run of continuation
+//     bytes available; the lead byte's nominal length (e.g. 0xE0 = 3 bytes)
+//     is NOT enforced. `unicode(x'f0a080')` decodes as a 3-byte form despite
+//     0xF0 being a 4-byte lead (result: 0x0800).
+//   * After accumulation, the result is replaced with U+FFFD if it would be
+//     overlong (< 0x80), a UTF-16 surrogate (D800..DFFF), or a non-character
+//     ending in FFFE/FFFF.
+fn decodeUtf8FirstCodepoint(bytes: []const u8) u32 {
+    const lead = bytes[0];
+    if (lead < 0xC0) return lead;
+    var c: u32 = utf8_trans1[lead - 0xC0];
+    var i: usize = 1;
+    while (i < bytes.len and (bytes[i] & 0xC0) == 0x80) : (i += 1) {
+        c = (c << 6) + (bytes[i] & 0x3F);
+    }
+    if (c < 0x80) return 0xFFFD;
+    if ((c & 0xFFFFF800) == 0xD800) return 0xFFFD;
+    if ((c & 0xFFFFFFFE) == 0xFFFE) return 0xFFFD;
+    return c;
 }
 
 /// `concat(a, b, ...)` — sqlite3's NULL-skipping TEXT concatenator.

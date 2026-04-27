@@ -1964,6 +1964,35 @@ SELECT '[' || printf('%-08o', 7) || ']'
 SELECT '[' || printf('%-05x', 255) || ']'
 SELECT '[' || printf('%-05o', 7) || ']'
 SELECT '[' || printf('%05.10d', 42) || ']'
+# Iter29.AH: unicode() lenient UTF-8 + C-string convention + INTEGER/REAL coercion.
+# sqlite3's unicodeFunc coerces all input to TEXT (sqlite3_value_text) and uses
+# sqlite3Utf8Read which: (1) returns raw byte for lead < 0xC0, (2) consumes max
+# continuation run regardless of nominal length, (3) substitutes U+FFFD for
+# overlong (<0x80), surrogate (D800..DFFF), or non-character (FFFE/FFFF) results.
+# Empty TEXT and TEXT-with-leading-NUL both yield SQL NULL.
+SELECT unicode(x'ff')
+SELECT unicode(x'fe')
+SELECT unicode(x'fc')
+SELECT unicode(x'c0')
+SELECT unicode(x'e0')
+SELECT unicode(x'e0a0')
+SELECT unicode(x'f0')
+SELECT unicode(x'f0a0')
+SELECT unicode(x'f0a080')
+SELECT unicode(x'f0a08080')
+SELECT unicode(x'eda080')
+SELECT unicode(x'edbfbf')
+SELECT unicode(x'efbfbd')
+SELECT unicode(cast(x'00' as text))
+SELECT typeof(unicode(cast(x'00' as text)))
+SELECT unicode(cast(x'00' as blob))
+SELECT typeof(unicode(cast(x'00' as blob)))
+SELECT unicode(cast(x'4100' as text))
+SELECT unicode(1)
+SELECT unicode(1.5)
+SELECT typeof(unicode(1))
+SELECT unicode(x'80')
+SELECT unicode(x'c280')
 
 
 
