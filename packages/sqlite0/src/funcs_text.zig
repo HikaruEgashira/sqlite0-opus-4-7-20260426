@@ -177,14 +177,45 @@ pub fn fnTrim(allocator: std.mem.Allocator, args: []const Value, side: TrimSide)
 pub fn fnInstr(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len != 2) return Error.WrongArgumentCount;
     if (args[0] == .null or args[1] == .null) return Value.null;
+    // sqlite3 quirk: when haystack is TEXT (regardless of needle type),
+    // the search advances char-by-char and matches the needle bytes only
+    // at character boundaries. Two consequences fall out:
+    //   * `instr('é', x'a9')` → 0 (needle is the *second* byte of 'é';
+    //     matching at byte 1 isn't a char boundary, so the search misses).
+    //   * `instr('日本語', '本')` → 2 (returns *char* position, not byte).
+    // BLOB haystack always uses byte-by-byte search and byte position.
+    const hay_is_text = args[0] != .blob;
+
     const hay = try util.ensureText(allocator, args[0]);
     defer allocator.free(hay);
     const needle = try util.ensureText(allocator, args[1]);
     defer allocator.free(needle);
 
     if (needle.len == 0) return Value{ .integer = 1 };
+    if (hay_is_text) return Value{ .integer = textInstrCharPos(hay, needle) };
     const idx = std.mem.indexOf(u8, hay, needle) orelse return Value{ .integer = 0 };
     return Value{ .integer = @intCast(idx + 1) };
+}
+
+/// Char-by-char advance through a TEXT haystack, raw-byte-comparing the
+/// needle at each character boundary. Returns 1-indexed char position
+/// (sqlite3 parity) or 0 if no match. Lenient about malformed UTF-8 —
+/// non-leading bytes (`>= 0x80`, `< 0xC0`) advance one byte at a time
+/// like sqlite3's `SQLITE_SKIP_UTF8` macro.
+fn textInstrCharPos(hay: []const u8, needle: []const u8) i64 {
+    var byte_pos: usize = 0;
+    var char_pos: usize = 0;
+    while (byte_pos + needle.len <= hay.len) {
+        if (std.mem.eql(u8, hay[byte_pos .. byte_pos + needle.len], needle)) {
+            return @intCast(char_pos + 1);
+        }
+        const lead = hay[byte_pos];
+        const step: usize = if (lead >= 0xF0) 4 else if (lead >= 0xE0) 3 else if (lead >= 0xC0) 2 else 1;
+        const advance = @min(step, hay.len - byte_pos);
+        byte_pos += advance;
+        char_pos += 1;
+    }
+    return 0;
 }
 
 /// SQLite `char(N1, N2, ...)` — concatenate the UTF-8 encodings of the given
