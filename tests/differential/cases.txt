@@ -1519,3 +1519,22 @@ CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; SELECT 
 CREATE TABLE t(x); INSERT INTO t VALUES(1); INSERT INTO t VALUES(2); SELECT total_changes();
 CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT changes(); SELECT changes();
 CREATE TABLE t(x); INSERT INTO t VALUES(1); BEGIN; INSERT INTO t VALUES(2); ROLLBACK; SELECT last_insert_rowid();
+
+# Iter29.T: in-memory non-IPK rowid uses max(rowid)+1 algorithm.
+# Replaces the Iter29.S monotonic counter that diverged from sqlite3
+# after DELETE-from-end (counter advanced past max). Discriminating
+# fixtures for the corrected behaviour:
+#  - DELETE-from-end → next INSERT reuses the freed rowid.
+#  - DELETE-all → next INSERT starts at 1.
+#  - DELETE-from-middle → max unchanged (regression guard for the
+#    Iter29.S existing fixture which already locked this).
+#  - UPDATE doesn't shift the rowid sequence.
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=3; INSERT INTO t VALUES(4); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t; INSERT INTO t VALUES(99); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; INSERT INTO t VALUES(4); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); DELETE FROM t; INSERT INTO t VALUES(10),(20); DELETE FROM t WHERE x=20; INSERT INTO t VALUES(30); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; INSERT INTO t VALUES(99); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=3; SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t; SELECT last_insert_rowid();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(NULL,'a'),(NULL,'b'),(NULL,'c'); DELETE FROM t WHERE x=3; INSERT INTO t VALUES(NULL,'d'); SELECT last_insert_rowid();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(NULL,'a'),(NULL,'b'),(NULL,'c'); DELETE FROM t; INSERT INTO t VALUES(NULL,'d'); SELECT last_insert_rowid();

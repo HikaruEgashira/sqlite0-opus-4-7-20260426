@@ -88,14 +88,17 @@ pub const Table = struct {
     /// sqlite_schema` would silently corrupt page 1 (sqlite3 rejects
     /// with "table sqlite_master may not be modified" — we mirror).
     is_system: bool = false,
-    /// Iter29.S — monotonic rowid sequence for in-memory non-IPK tables.
-    /// Bumped per row by `executeInsert`; the bumped value becomes
-    /// `db.last_insert_rowid` after a successful INSERT. Unused for
-    /// IPK tables (the IPK column value is the rowid) and for
-    /// file-mode tables (rowid comes from B-tree leaf cell metadata).
-    /// Not decremented on DELETE — sqlite3 doesn't reuse rowids by
-    /// default (max+1 selection). 0 = no rows ever inserted.
-    next_implicit_rowid: i64 = 0,
+    /// Iter29.T — per-row rowid storage for in-memory non-IPK tables.
+    /// Maintained parallel to `rows`: index `i` of `rowids` is the
+    /// rowid assigned to `rows[i]`. INSERT computes a new rowid as
+    /// `max(rowids) + 1` (or `1` on empty), DELETE drops the matching
+    /// index, UPDATE preserves it. Unused for IPK tables (the IPK
+    /// column value IS the rowid; never appended) and for file-mode
+    /// tables (rowid comes from B-tree leaf cell metadata; this list
+    /// stays empty). Replaces Iter29.S's monotonic counter so DELETE
+    /// then INSERT matches sqlite3's `max(rowid)+1` algorithm — the
+    /// counter would diverge after DELETE-from-end.
+    rowids: std.ArrayListUnmanaged(i64) = .empty,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         for (self.rows.items) |row| {
@@ -103,6 +106,7 @@ pub const Table = struct {
             allocator.free(row);
         }
         self.rows.deinit(allocator);
+        self.rowids.deinit(allocator);
         for (self.columns) |c| allocator.free(c);
         allocator.free(self.columns);
         allocator.free(self.not_null);

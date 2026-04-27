@@ -53,10 +53,13 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     if (parsed.where) |w_ast| {
         var survivors: std.ArrayList([]Value) = .empty;
         errdefer survivors.deinit(arena);
+        var survivor_rowids: std.ArrayList(i64) = .empty;
+        errdefer survivor_rowids.deinit(arena);
         var to_free: std.ArrayList([]Value) = .empty;
         errdefer to_free.deinit(arena);
 
-        for (t.rows.items) |row| {
+        const track_rowids = t.ipk_column == null;
+        for (t.rows.items, 0..) |row, idx| {
             const ctx = eval.EvalContext{
                 .allocator = arena,
                 .current_row = row,
@@ -70,11 +73,15 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
                 try to_free.append(arena, row);
             } else {
                 try survivors.append(arena, row);
+                if (track_rowids) {
+                    try survivor_rowids.append(arena, t.rowids.items[idx]);
+                }
             }
         }
 
         // Atomic swap: install survivors as the new row list, then free the
-        // dropped rows.
+        // dropped rows. Iter29.T — non-IPK tables also swap the parallel
+        // rowids list so DELETE-from-end correctly lowers max(rowid).
         const new_rows = try db.allocator.alloc([]Value, survivors.items.len);
         @memcpy(new_rows, survivors.items);
         const old_storage = t.rows;
@@ -84,6 +91,18 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         var os = old_storage;
         os.deinit(db.allocator);
         db.allocator.free(new_rows);
+
+        if (track_rowids) {
+            const new_rowids = try db.allocator.alloc(i64, survivor_rowids.items.len);
+            @memcpy(new_rowids, survivor_rowids.items);
+            const old_rowid_storage = t.rowids;
+            t.rowids = .empty;
+            try t.rowids.ensureTotalCapacity(db.allocator, new_rowids.len);
+            for (new_rowids) |rid| t.rowids.appendAssumeCapacity(rid);
+            var ors = old_rowid_storage;
+            ors.deinit(db.allocator);
+            db.allocator.free(new_rowids);
+        }
 
         for (to_free.items) |row| {
             for (row) |v| ops.freeValue(db.allocator, v);
@@ -98,6 +117,9 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             db.allocator.free(row);
         }
         t.rows.clearAndFree(db.allocator);
+        if (t.ipk_column == null) {
+            t.rowids.clearAndFree(db.allocator);
+        }
         return count;
     }
 }
@@ -213,6 +235,9 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     }
 
     try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);
+    if (t.ipk_column == null) {
+        try t.rowids.ensureUnusedCapacity(db.allocator, source_rows.len);
+    }
     var inserted: u64 = 0;
     // Iter28.fix — in-memory IPK auto-rowid. Mirrors Iter28's file-mode
     // chooseRowid: scan existing rows for the highest integer value in
@@ -220,12 +245,18 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     // row whose IPK column is NULL after column-target resolution.
     // Explicit IPK values bump max_rowid forward so subsequent NULL
     // entries continue from there. sqlite3 returns 1 for the first
-    // auto-assigned rowid in a fresh table; we match.
-    var max_rowid: i64 = if (t.ipk_column) |ipk| computeMaxIpkValue(t, ipk) else 0;
+    // auto-assigned rowid in a fresh table; we match. Iter29.T —
+    // non-IPK path computes max from the parallel `rowids` list, so
+    // DELETE-from-end correctly reduces `max+1` next iteration.
+    var max_rowid: i64 = if (t.ipk_column) |ipk|
+        computeMaxIpkValue(t, ipk)
+    else
+        currentMaxImplicitRowid(t);
     errdefer {
         // Roll back any rows already appended in this call (ADR-0003 §1
         // all-or-nothing). Schema mutations from registerTable are not
-        // rolled back; only same-call row appends are.
+        // rolled back; only same-call row appends are. For non-IPK
+        // tables the parallel rowids entry is popped in lockstep.
         var i: u64 = 0;
         while (i < inserted) : (i += 1) {
             const last_idx = t.rows.items.len - 1;
@@ -233,16 +264,14 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             t.rows.items.len = last_idx;
             for (undone_row) |v| ops.freeValue(db.allocator, v);
             db.allocator.free(undone_row);
+            if (t.ipk_column == null) {
+                t.rowids.items.len -= 1;
+            }
         }
     }
     // Iter29.S — track last-inserted rowid in a local that we commit
     // to `db.last_insert_rowid` only after the full for-loop succeeds.
-    // The errdefer above rolls rows back on failure; same rollback
-    // shape applies here. For non-IPK tables we additionally stage
-    // a local copy of `t.next_implicit_rowid` so the counter doesn't
-    // advance on a failed (partial) INSERT.
     var last_rowid: i64 = db.last_insert_rowid;
-    var local_next_implicit: i64 = t.next_implicit_rowid;
     for (source_rows) |row| {
         const new_row = try db.allocator.alloc(Value, t.columns.len);
         var k: usize = 0;
@@ -268,18 +297,28 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             },
             else => {},
         } else {
-            local_next_implicit += 1;
-            last_rowid = local_next_implicit;
+            max_rowid += 1;
+            last_rowid = max_rowid;
         }
         try enforceNotNull(t, new_row);
         t.rows.appendAssumeCapacity(new_row);
+        if (t.ipk_column == null) {
+            t.rowids.appendAssumeCapacity(max_rowid);
+        }
         inserted += 1;
     }
     if (inserted > 0) {
         db.last_insert_rowid = last_rowid;
-        if (t.ipk_column == null) t.next_implicit_rowid = local_next_implicit;
     }
     return inserted;
+}
+
+fn currentMaxImplicitRowid(t: *const Table) i64 {
+    var max_val: i64 = 0;
+    for (t.rowids.items) |rid| {
+        if (rid > max_val) max_val = rid;
+    }
+    return max_val;
 }
 
 fn computeMaxIpkValue(t: *const Table, ipk: usize) i64 {
