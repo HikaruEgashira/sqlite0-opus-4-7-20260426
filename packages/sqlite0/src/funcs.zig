@@ -4,6 +4,7 @@ const util = @import("func_util.zig");
 const text = @import("funcs_text.zig");
 const fmt_mod = @import("funcs_format.zig");
 const time_mod = @import("funcs_time.zig");
+const math_mod = @import("funcs_math.zig");
 
 const Value = util.Value;
 const Error = util.Error;
@@ -41,6 +42,35 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "datetime")) return time_mod.fnDatetime(allocator, args);
     if (util.eqlIgnoreCase(name, "julianday")) return time_mod.fnJulianday(allocator, args);
     if (util.eqlIgnoreCase(name, "iif")) return fnIif(allocator, args);
+    // sqlite3 math extension (SQLITE_ENABLE_MATH_FUNCTIONS).
+    if (util.eqlIgnoreCase(name, "pi")) return math_mod.fnPi(args);
+    if (util.eqlIgnoreCase(name, "sqrt")) return math_mod.fnSqrt(args);
+    if (util.eqlIgnoreCase(name, "log")) return math_mod.fnLog(args);
+    if (util.eqlIgnoreCase(name, "ln")) return math_mod.fnLn(args);
+    if (util.eqlIgnoreCase(name, "log10")) return math_mod.fnLog10(args);
+    if (util.eqlIgnoreCase(name, "log2")) return math_mod.fnLog2(args);
+    if (util.eqlIgnoreCase(name, "exp")) return math_mod.fnExp(args);
+    if (util.eqlIgnoreCase(name, "pow") or util.eqlIgnoreCase(name, "power")) return math_mod.fnPow(args);
+    if (util.eqlIgnoreCase(name, "sin")) return math_mod.fnSin(args);
+    if (util.eqlIgnoreCase(name, "cos")) return math_mod.fnCos(args);
+    if (util.eqlIgnoreCase(name, "tan")) return math_mod.fnTan(args);
+    if (util.eqlIgnoreCase(name, "asin")) return math_mod.fnAsin(args);
+    if (util.eqlIgnoreCase(name, "acos")) return math_mod.fnAcos(args);
+    if (util.eqlIgnoreCase(name, "atan")) return math_mod.fnAtan(args);
+    if (util.eqlIgnoreCase(name, "atan2")) return math_mod.fnAtan2(args);
+    if (util.eqlIgnoreCase(name, "sinh")) return math_mod.fnSinh(args);
+    if (util.eqlIgnoreCase(name, "cosh")) return math_mod.fnCosh(args);
+    if (util.eqlIgnoreCase(name, "tanh")) return math_mod.fnTanh(args);
+    if (util.eqlIgnoreCase(name, "asinh")) return math_mod.fnAsinh(args);
+    if (util.eqlIgnoreCase(name, "acosh")) return math_mod.fnAcosh(args);
+    if (util.eqlIgnoreCase(name, "atanh")) return math_mod.fnAtanh(args);
+    if (util.eqlIgnoreCase(name, "ceil") or util.eqlIgnoreCase(name, "ceiling")) return math_mod.fnCeil(args);
+    if (util.eqlIgnoreCase(name, "floor")) return math_mod.fnFloor(args);
+    if (util.eqlIgnoreCase(name, "trunc")) return math_mod.fnTrunc(args);
+    if (util.eqlIgnoreCase(name, "sign")) return math_mod.fnSign(args);
+    if (util.eqlIgnoreCase(name, "degrees")) return math_mod.fnDegrees(args);
+    if (util.eqlIgnoreCase(name, "radians")) return math_mod.fnRadians(args);
+    if (util.eqlIgnoreCase(name, "mod")) return math_mod.fnMod(args);
     return Error.UnknownFunction;
 }
 

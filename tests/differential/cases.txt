@@ -1100,3 +1100,80 @@ CREATE TABLE blob1(x); INSERT INTO blob1 VALUES(1); SELECT x FROM blob1
 CREATE TABLE blob2(b BLOB); INSERT INTO blob2 VALUES(x'DEADBEEF'); SELECT hex(b), typeof(b), length(b) FROM blob2
 # WHERE-side blob comparison (advisor verification)
 CREATE TABLE blob3(b BLOB); INSERT INTO blob3 VALUES(x'DEADBEEF'),(x'CAFE'); SELECT hex(b) FROM blob3 WHERE b = x'CAFE'
+
+# Iter29.F — sqlite3 math extension functions. All return REAL on
+# valid input or NULL on NaN/domain-error. exp() overflow → ±Inf
+# passes through (sqlite3 only collapses domain errors). sign() is
+# the only one returning INTEGER (-1/0/1/NULL).
+SELECT pi()
+SELECT sqrt(16)
+SELECT sqrt(0)
+SELECT sqrt(-1)
+# log(x) is base-10, NOT natural log (sqlite3 quirk). ln(x) is natural.
+SELECT log(10)
+SELECT log(100)
+SELECT log(0)
+SELECT log(-1)
+SELECT ln(1)
+SELECT ln(10)
+SELECT log10(100)
+SELECT log2(8)
+# log(b, x) is log_b(x). 1.0 base → NULL.
+SELECT log(2, 8)
+SELECT log(10, 1000)
+SELECT log(1, 5)
+SELECT exp(0)
+SELECT exp(1)
+SELECT exp(1000)
+SELECT exp(-1000)
+SELECT pow(2, 10)
+SELECT pow(0, 0)
+SELECT pow(-1, 0.5)
+SELECT power(2, 3)
+SELECT pow(NULL, 2)
+SELECT pow(2, NULL)
+# Trig — input is radians.
+SELECT sin(0)
+SELECT cos(0)
+SELECT tan(0)
+SELECT sin(pi() / 2)
+SELECT atan2(1, 1)
+SELECT atan2(0, 0)
+SELECT acos(2)
+SELECT asin(2)
+SELECT atan(0)
+# Hyperbolic.
+SELECT sinh(0)
+SELECT cosh(0)
+SELECT tanh(0)
+SELECT acosh(1)
+SELECT asinh(0)
+SELECT atanh(0)
+SELECT acosh(0)
+SELECT atanh(2)
+# Rounding.
+SELECT ceil(1.5)
+SELECT ceiling(-1.5)
+SELECT floor(1.5)
+SELECT floor(-1.5)
+SELECT trunc(1.7)
+SELECT trunc(-1.7)
+# sign(x) — INTEGER -1/0/1/NULL.
+SELECT sign(-5)
+SELECT sign(5)
+SELECT sign(0)
+SELECT sign(0.0)
+SELECT sign(NULL)
+SELECT typeof(sign(5))
+# Conversions.
+SELECT degrees(pi())
+SELECT radians(180)
+# mod — fmod-style.
+SELECT mod(10, 3)
+SELECT mod(-10, 3)
+SELECT mod(10, -3)
+SELECT mod(7.5, 2.5)
+SELECT mod(10, 0)
+# Irrational-result formatter check (advisor)
+SELECT pow(2, 0.5)
+SELECT sqrt(2)
