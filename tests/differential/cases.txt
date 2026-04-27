@@ -1198,3 +1198,15 @@ SELECT typeof(randomblob(16))
 SELECT length(randomblob(0))
 SELECT length(randomblob(-3))
 SELECT length(randomblob(NULL))
+
+# Iter29.H — CLI NUL-truncation. sqlite3 default `list` mode prints
+# TEXT/BLOB values via `printf("%s")` so output stops at the first
+# NUL. Match this byte-equal so direct blob output (zeroblob,
+# embedded-NUL strings, x'00...') compares cleanly.
+SELECT zeroblob(5)
+SELECT zeroblob(0)
+SELECT 'a' || char(0) || 'b'
+SELECT x'00AA'
+SELECT x'AA00BB'
+SELECT 'foo' || char(0) || 'bar'
+SELECT char(0)

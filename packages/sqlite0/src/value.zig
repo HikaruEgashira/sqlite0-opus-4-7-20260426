@@ -7,16 +7,28 @@ pub const Value = union(enum) {
     text: []const u8,
     blob: []const u8,
 
+    /// CLI-equivalent rendering: matches sqlite3's default `list` mode,
+    /// which feeds each column through `utf8_printf("%s", ...)` and so
+    /// stops at the first NUL byte. Truncating here keeps `zeroblob(5)`,
+    /// embedded-NUL TEXT, and `x'00AA'` byte-equal between sqlite0 and
+    /// sqlite3 CLI output. The full bytes are still preserved in the
+    /// stored Value — `length()` / `hex()` queries see the untruncated
+    /// payload, matching sqlite3 exactly.
     pub fn format(self: Value, w: *std.Io.Writer) !void {
         switch (self) {
             .null => try w.writeAll(""),
             .integer => |i| try w.print("{d}", .{i}),
             .real => |f| try formatReal(w, f),
-            .text => |t| try w.writeAll(t),
-            .blob => |b| try w.writeAll(b),
+            .text => |t| try writeUntilNul(w, t),
+            .blob => |b| try writeUntilNul(w, b),
         }
     }
 };
+
+fn writeUntilNul(w: *std.Io.Writer, bytes: []const u8) !void {
+    const end = std.mem.indexOfScalar(u8, bytes, 0) orelse bytes.len;
+    try w.writeAll(bytes[0..end]);
+}
 
 /// SQLite-compatible %g formatting for f64.
 ///
