@@ -298,16 +298,23 @@ fn parseSpec(fmt: []const u8, start: usize) Spec {
             else => break,
         }
     }
-    // Width — `*` defers to next arg, otherwise digits
+    // Width — `*` defers to next arg, otherwise digits. sqlite3 stores
+    // width in C `int` and parses with wraparound semantics; if the wrap
+    // produces a negative value, the later `width > length` comparison
+    // never fires so no padding is applied. Mirror this with `i32 *%`/`+%`
+    // wrap operators and skip the width when the result is non-positive
+    // (avoids gigabyte allocations on `'%2147483648d'` and similar).
     if (p < fmt.len and fmt[p] == '*') {
         s.width_from_arg = true;
         p += 1;
     } else {
+        var width_i32: i32 = 0;
         while (p < fmt.len and fmt[p] >= '0' and fmt[p] <= '9') : (p += 1) {
-            s.width = s.width * 10 + (fmt[p] - '0');
+            width_i32 = width_i32 *% 10 +% @as(i32, fmt[p] - '0');
         }
+        s.width = if (width_i32 > 0) @intCast(width_i32) else 0;
     }
-    // Precision — `.` then `*` or digits
+    // Precision — `.` then `*` or digits. Same i32 wrap as width.
     if (p < fmt.len and fmt[p] == '.') {
         p += 1;
         if (p < fmt.len and fmt[p] == '*') {
@@ -315,11 +322,11 @@ fn parseSpec(fmt: []const u8, start: usize) Spec {
             s.precision = 0; // overwritten by arg consumption
             p += 1;
         } else {
-            var prec: usize = 0;
+            var prec_i32: i32 = 0;
             while (p < fmt.len and fmt[p] >= '0' and fmt[p] <= '9') : (p += 1) {
-                prec = prec * 10 + (fmt[p] - '0');
+                prec_i32 = prec_i32 *% 10 +% @as(i32, fmt[p] - '0');
             }
-            s.precision = prec;
+            s.precision = if (prec_i32 > 0) @intCast(prec_i32) else 0;
         }
     }
     // Length modifier: sqlite3's printf accepts `l` or `ll` (silently

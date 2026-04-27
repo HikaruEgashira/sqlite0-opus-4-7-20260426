@@ -3018,3 +3018,15 @@ SELECT max('a', x'01')
 SELECT length(x'01')
 SELECT hex(x'01')
 SELECT length(char(13))
+
+# printf width/precision i32 wrap (Iter30.Z):
+#  * sqlite3 stores width/precision in C `int`. Parse loop overflows
+#    silently to negative; later `width > length` check then never
+#    fires so no padding is applied. `printf('%2147483648d', 1)` → '1'
+#    (width wraps to INT_MIN, treated as 0).
+#  * Old impl used usize parser which tried to allocate 2GB → OOM.
+#  * Modest widths (≤ ~1B) still allocate and fully pad as sqlite3 does.
+SELECT printf('%2147483648d', 1)
+SELECT length(printf('%99d', 1))
+SELECT length(printf('%9999d', 1))
+SELECT printf('%5d', 1)
