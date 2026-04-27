@@ -35,9 +35,11 @@ pub const engine_dml = @import("engine_dml.zig");
 pub const cursor = @import("cursor.zig");
 pub const pager = @import("pager.zig");
 pub const record = @import("record.zig");
+pub const record_encode = @import("record_encode.zig");
 pub const btree = @import("btree.zig");
 pub const btree_test_util = @import("btree_test_util.zig");
 pub const btree_walk = @import("btree_walk.zig");
+pub const btree_insert = @import("btree_insert.zig");
 pub const btree_cursor = @import("btree_cursor.zig");
 pub const schema = @import("schema.zig");
 

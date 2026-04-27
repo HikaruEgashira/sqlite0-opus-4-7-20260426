@@ -70,7 +70,10 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_insert => {
             const parsed = try stmt_mod.parseInsertStatement(p);
-            try assertWritable(db);
+            // INSERT is the first DDL/DML to gain a file-mode path
+            // (Iter26.A.1) — `executeInsert` itself dispatches on
+            // `db.pager`. CREATE TABLE / DELETE / UPDATE still go
+            // through the read-only guard.
             const rowcount = try engine_dml.executeInsert(db, p.allocator, parsed);
             return .{ .insert = .{ .rowcount = rowcount } };
         },

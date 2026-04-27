@@ -31,7 +31,12 @@ advisor split (Iter26.A は scope が広すぎたため細分化):
 
 - [x] Iter26.guard: file-mode DB に対する DDL/DML を `Error.ReadOnlyDatabase` で reject。Iter25.B.5+C 完了直後の silent in-memory shadow state を防ぐ (registerTable / executeInsert / executeDelete / executeUpdate を `assertWritable(db)` で gate)。SELECT は引き続き許可。Unit test: file-mode DB が 4 種の write すべて拒否し SELECT は通る。
 - [x] Iter26.A.0: `Pager.writePage(page_no, bytes)` 単独 primitive。`std.c.pwrite` + cache write-through (LRU 内なら in-place memcpy + head 昇格、それ以外は head に挿入)。**fsync 無し** — Phase 3c に transaction semantics が無く、durability story は Phase 4 (WAL/ADR-0007) が一括で扱うべき。3 unit tests (close→reopen round-trip / page 0 + wrong-len rejection / cache write-through pointer identity)。差分 787/787 + file-differential 12/12 緑。
-- [ ] Iter26.A.1: insert-into-leaf-with-room (split 無し)。`engine_dml.executeInsert` の `t.root_page != 0` 経路を追加し、leaf cell pointer array を rowid 順に更新、cell content area へ record bytes を書き込み、Pager 経由で page を fsync。fixture は sqlite3-created (CREATE TABLE 永続化は Iter26.A.3 まで未対応)。
+- [x] Iter26.A.1: insert-into-leaf-with-room (split 無し)。3 新規モジュール:
+  - `record_encode.zig`: `serialTypeForValue` (literal 8/9 含む)、`encodeColumnBody`、`encodeRecord` ([]Value → bytes)。decode/encode round-trip for null/int(全 7 型)/real/text/blob 全部 unit test 緑。
+  - `btree_insert.zig`: `insertLeafTableCell(page, header_offset, usable_size, rowid, record_bytes) → ok | page_full`。pure mutation、cell pointer 配列を rowid 順に shift (`std.mem.copyBackwards`)、content area を後ろから縮める、header の cell_count + cell_content_area を更新。duplicate rowid → IoError。overflow > usable-35 → IoError。6 unit tests (empty / out-of-order / append / duplicate / page_full / page 1 offset 100)。
+  - `engine_dml.executeInsert` 内に `executeInsertFile` を追加。`t.root_page != 0` で dispatch、ローカル ArenaAllocator で work buffer + encoded record を管理 (db.execute は per-statement arena が無いため leak 防止に必須)。current max rowid を leaf scan で求めて auto-assign、`Pager.writePage` で 1 回コミット。multi-page B-tree / page split は Error.UnsupportedFeature。
+  - harness 拡張: `run_file.sh` に MUTATE+VERIFY ペアを追加 (sqlite3 で fixture を 2 部複製→sqlite0 と sqlite3 でそれぞれ MUTATE→sqlite3 で VERIFY を 2 部 → diff、加えて sqlite0 側の copy に `PRAGMA integrity_check` を実行)。
+  - 結果: file-differential 17/17 緑 (12 既存 read + 5 INSERT MUTATE/VERIFY)。`PRAGMA integrity_check` 全部 ok = sqlite0 が書いたバイトが sqlite3 から見て構文的に正しい。差分 787/787 緑、unit tests 全緑。
 - [ ] Iter26.A.2: DELETE / UPDATE 用の cell removal / replacement。
 - [ ] Iter26.A.3: CREATE TABLE 永続化 (page allocation: file 拡張 + header offset 28 の dbsize 更新 + sqlite_schema INSERT)。これで pure sqlite0 で fixture 生成 → 別プロセスの sqlite0/sqlite3 で読める。
 - [ ] Iter26.B: page split (leaf overflow → 兄弟 leaf 分裂 + interior 更新)。

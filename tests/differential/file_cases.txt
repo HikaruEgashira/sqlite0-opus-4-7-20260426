@@ -55,3 +55,36 @@ QUERY: SELECT x FROM r ORDER BY x
 # BLOB column.
 SETUP: CREATE TABLE bl(payload BLOB); INSERT INTO bl VALUES (x'deadbeef'), (x'00ff');
 QUERY: SELECT length(payload) FROM bl
+
+# Iter26.A.1 INSERT cases (write path). The harness clones the fixture,
+# runs MUTATE through both engines on independent copies, then runs
+# VERIFY against both and diffs. PRAGMA integrity_check on the
+# sqlite0-mutated copy catches byte-format corruption that VERIFY alone
+# might not surface.
+
+# Single INSERT into an empty file-mode table.
+SETUP: CREATE TABLE t(a, b)
+MUTATE: INSERT INTO t VALUES (1, 'x')
+VERIFY: SELECT * FROM t
+
+# Multi-row INSERT in one statement.
+SETUP: CREATE TABLE t(a, b)
+MUTATE: INSERT INTO t VALUES (1, 'a'), (2, 'b'), (3, 'c')
+VERIFY: SELECT a, b FROM t
+
+# INSERT into a non-empty table — rowids must continue past max.
+SETUP: CREATE TABLE t(a); INSERT INTO t VALUES (10), (20)
+MUTATE: INSERT INTO t VALUES (30), (40)
+VERIFY: SELECT a FROM t
+
+# Mixed-type INSERT (NULL, REAL, TEXT on the same row). BLOB literals
+# (`x'...'` syntax) aren't accepted by the sqlite0 parser yet — that's
+# unrelated to the file-mode write path and tracked separately.
+SETUP: CREATE TABLE m(i, f, t)
+MUTATE: INSERT INTO m VALUES (NULL, 3.14, 'hi')
+VERIFY: SELECT i, f, t FROM m
+
+# Two separate INSERT statements in one sqlite0 invocation.
+SETUP: CREATE TABLE t(x)
+MUTATE: INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)
+VERIFY: SELECT x FROM t
