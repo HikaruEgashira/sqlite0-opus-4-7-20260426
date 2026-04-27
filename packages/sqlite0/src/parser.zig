@@ -286,7 +286,7 @@ pub const Parser = struct {
             .integer => {
                 self.advance();
                 const text = tok.slice(self.src);
-                const n = std.fmt.parseInt(i64, text, 10) catch return Error.InvalidNumber;
+                const n = parseIntegerLiteral(text) catch return Error.InvalidNumber;
                 return ast.makeLiteral(self.allocator, Value{ .integer = n });
             },
             .real => {
@@ -395,6 +395,19 @@ fn hexDigitValue(c: u8) u8 {
     if (c >= '0' and c <= '9') return c - '0';
     if (c >= 'a' and c <= 'f') return c - 'a' + 10;
     return c - 'A' + 10;
+}
+
+/// Parse a `.integer` token's text into i64. The lexer has already
+/// validated the shape, so the only failure path is overflow on a
+/// decimal literal that exceeds i64. Hex literals (`0x` / `0X` prefix)
+/// are read as u64 and bit-cast to i64 — sqlite3 wraps the same way
+/// (`0xFFFFFFFFFFFFFFFF` → -1, `0x8000000000000000` → LLONG_MIN).
+fn parseIntegerLiteral(text: []const u8) !i64 {
+    if (text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
+        const u = try std.fmt.parseInt(u64, text[2..], 16);
+        return @bitCast(u);
+    }
+    return std.fmt.parseInt(i64, text, 10);
 }
 
 test "Parser: parseExpr literal" {

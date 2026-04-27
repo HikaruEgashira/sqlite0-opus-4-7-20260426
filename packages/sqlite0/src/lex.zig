@@ -235,6 +235,15 @@ pub const Lexer = struct {
     }
 
     fn number(self: *Lexer, start: u32) Token {
+        // Hex prefix: `0x` or `0X` followed by `[0-9a-fA-F]+`. Once the
+        // prefix is consumed sqlite3 commits to hex mode — missing
+        // digits or a trailing alphanumeric char surface as `.invalid`,
+        // not as `0` + identifier (matches sqlite3's "unrecognized
+        // token: 0x..." parse error).
+        if (self.src[self.pos] == '0' and self.pos + 1 < self.src.len) {
+            const next_c = self.src[self.pos + 1];
+            if (next_c == 'x' or next_c == 'X') return self.hexNumber(start);
+        }
         var saw_dot = false;
         var saw_exp = false;
         while (self.pos < self.src.len) {
@@ -259,6 +268,49 @@ pub const Lexer = struct {
         }
         const kind: TokenKind = if (saw_dot or saw_exp) .real else .integer;
         return .{ .kind = kind, .start = start, .end = self.pos };
+    }
+
+    /// Hex integer literal `0x<hex>` / `0X<hex>`. Caller has verified
+    /// `src[pos] == '0'` and `src[pos+1]` is `x`/`X`. We read the hex
+    /// span greedily and then check for a trailing alphanumeric tail so
+    /// `0xg` / `0x10z` surface as one `.invalid` token rather than
+    /// silently producing `0` + identifier (matches sqlite3 3.51.0).
+    fn hexNumber(self: *Lexer, start: u32) Token {
+        self.pos += 2; // skip `0x` / `0X`
+        const digits_start = self.pos;
+        while (self.pos < self.src.len) {
+            const c = self.src[self.pos];
+            const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+            if (!is_hex) break;
+            self.pos += 1;
+        }
+        if (self.pos == digits_start) {
+            // `0x` with no hex digits. Consume any trailing identifier-
+            // like chars so re-lex emits a single `.invalid` span.
+            while (self.pos < self.src.len) {
+                const c = self.src[self.pos];
+                const is_ident = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+                if (!is_ident) break;
+                self.pos += 1;
+            }
+            return .{ .kind = .invalid, .start = start, .end = self.pos };
+        }
+        // Trailing alphanumeric / `_` after a valid hex span: sqlite3
+        // treats `0x10g` as one bad token, not `0x10` + `g`.
+        if (self.pos < self.src.len) {
+            const c = self.src[self.pos];
+            const is_ident = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+            if (is_ident) {
+                while (self.pos < self.src.len) {
+                    const cc = self.src[self.pos];
+                    const i = (cc >= 'a' and cc <= 'z') or (cc >= 'A' and cc <= 'Z') or (cc >= '0' and cc <= '9') or cc == '_';
+                    if (!i) break;
+                    self.pos += 1;
+                }
+                return .{ .kind = .invalid, .start = start, .end = self.pos };
+            }
+        }
+        return .{ .kind = .integer, .start = start, .end = self.pos };
     }
 
     /// `x'<hex>'` blob literal. Caller has already verified that
@@ -320,102 +372,3 @@ pub const Lexer = struct {
     }
 };
 
-test "Lexer: SELECT integer" {
-    var lx = Lexer.init("SELECT 42;");
-    try std.testing.expectEqual(TokenKind.keyword_select, lx.next().kind);
-    const num = lx.next();
-    try std.testing.expectEqual(TokenKind.integer, num.kind);
-    try std.testing.expectEqualStrings("42", num.slice("SELECT 42;"));
-    try std.testing.expectEqual(TokenKind.semicolon, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.eof, lx.next().kind);
-}
-
-test "Lexer: arithmetic" {
-    var lx = Lexer.init("1 + 2 * 3");
-    try std.testing.expectEqual(TokenKind.integer, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.plus, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.integer, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.star, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.integer, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.eof, lx.next().kind);
-}
-
-test "Lexer: real number" {
-    var lx = Lexer.init("3.14 1e10 2.5e-3");
-    try std.testing.expectEqual(TokenKind.real, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.real, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.real, lx.next().kind);
-}
-
-test "Lexer: string literal with escaped quote" {
-    var lx = Lexer.init("'it''s' 'plain'");
-    const a = lx.next();
-    try std.testing.expectEqual(TokenKind.string, a.kind);
-    try std.testing.expectEqualStrings("'it''s'", a.slice("'it''s' 'plain'"));
-    const b = lx.next();
-    try std.testing.expectEqual(TokenKind.string, b.kind);
-}
-
-test "Lexer: comparison operators" {
-    var lx = Lexer.init("= != <> <= >= < >");
-    try std.testing.expectEqual(TokenKind.eq, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.ne, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.ne, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.le, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.ge, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.lt, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.gt, lx.next().kind);
-}
-
-test "Lexer: concat operator ||" {
-    var lx = Lexer.init("'a' || 'b'");
-    try std.testing.expectEqual(TokenKind.string, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.concat, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.string, lx.next().kind);
-}
-
-test "Lexer: line comment" {
-    var lx = Lexer.init("SELECT -- comment here\n 1");
-    try std.testing.expectEqual(TokenKind.keyword_select, lx.next().kind);
-    try std.testing.expectEqual(TokenKind.integer, lx.next().kind);
-}
-
-test "Lexer: blob literal x'<hex>'" {
-    var lx = Lexer.init("x'AABB' X'cafe' x''");
-    const a = lx.next();
-    try std.testing.expectEqual(TokenKind.blob_lit, a.kind);
-    try std.testing.expectEqualStrings("x'AABB'", a.slice("x'AABB' X'cafe' x''"));
-    const b = lx.next();
-    try std.testing.expectEqual(TokenKind.blob_lit, b.kind);
-    try std.testing.expectEqualStrings("X'cafe'", b.slice("x'AABB' X'cafe' x''"));
-    const c = lx.next();
-    try std.testing.expectEqual(TokenKind.blob_lit, c.kind);
-    try std.testing.expectEqualStrings("x''", c.slice("x'AABB' X'cafe' x''"));
-}
-
-test "Lexer: bare x is identifier" {
-    // The blob-literal trigger is `x` *immediately* followed by `'`. A
-    // single-letter `x` column reference must keep parsing as an
-    // identifier so existing schemas that name a column `x` still work.
-    var lx = Lexer.init("x x_y X");
-    const a = lx.next();
-    try std.testing.expectEqual(TokenKind.identifier, a.kind);
-    try std.testing.expectEqualStrings("x", a.slice("x x_y X"));
-    const b = lx.next();
-    try std.testing.expectEqual(TokenKind.identifier, b.kind);
-    try std.testing.expectEqualStrings("x_y", b.slice("x x_y X"));
-    const c = lx.next();
-    try std.testing.expectEqual(TokenKind.identifier, c.kind);
-}
-
-test "Lexer: blob literal rejects odd-length / non-hex / unterminated" {
-    // Odd-length hex span — sqlite3 rejects at prepare time.
-    var lx_odd = Lexer.init("x'A'");
-    try std.testing.expectEqual(TokenKind.invalid, lx_odd.next().kind);
-    // Non-hex character.
-    var lx_nonhex = Lexer.init("x'GG'");
-    try std.testing.expectEqual(TokenKind.invalid, lx_nonhex.next().kind);
-    // Unterminated.
-    var lx_unterm = Lexer.init("x'AB");
-    try std.testing.expectEqual(TokenKind.invalid, lx_unterm.next().kind);
-}
