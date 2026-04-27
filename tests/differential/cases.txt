@@ -2952,3 +2952,21 @@ SELECT date('2024-01-31','floor','+1 day')
 SELECT date('2024-01-31','ceiling','-1 day')
 SELECT date(2451545.5,'floor')
 SELECT julianday(2451545.7,'ceiling')
+
+# LIKE `_` / GLOB `?` advance by UTF-8 char (Iter30.W):
+#  * sqlite3 uses SQLITE_SKIP_UTF8 to advance one Unicode character per
+#    `_` (LIKE) or `?` (GLOB), not one byte. Multibyte chars (αβγ, é, 𝕏)
+#    in text are matched as one position.
+#  * Literal pattern bytes still match byte-by-byte (β as 0xCE 0xB2).
+SELECT 'αβγ' LIKE '_β_'
+SELECT 'αβγ' GLOB '?β?'
+SELECT 'αβγδ' LIKE 'α_γ_'
+SELECT 'héllo' LIKE 'h_llo'
+SELECT 'héllo' GLOB 'h?llo'
+SELECT 'α' LIKE '_'
+SELECT 'α' GLOB '?'
+SELECT 'αβ' LIKE '__'
+SELECT 'αβ' GLOB '??'
+SELECT '𝕏Y' LIKE '_Y'
+SELECT '𝕏Y' GLOB '?Y'
+SELECT 'aαb' LIKE '_α_'

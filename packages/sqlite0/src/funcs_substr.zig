@@ -99,7 +99,7 @@ fn utf8CharSubstrSlice(z: []const u8, p_raw: i64, n_raw: i64, has_n: bool) []con
         var z_idx: usize = 0;
         var len: i64 = 0;
         while (z_idx < z.len and z[z_idx] != 0) : (len += 1) {
-            z_idx = skipUtf8Char(z, z_idx);
+            z_idx = util.skipUtf8Char(z, z_idx);
         }
         p1 += len;
         if (p1 < 0) {
@@ -121,19 +121,12 @@ fn utf8CharSubstrSlice(z: []const u8, p_raw: i64, n_raw: i64, has_n: bool) []con
     }
     var i: usize = 0;
     while (i < z.len and z[i] != 0 and p1 > 0) : (p1 -= 1) {
-        i = skipUtf8Char(z, i);
+        i = util.skipUtf8Char(z, i);
     }
     const start = i;
     while (i < z.len and z[i] != 0 and p2 > 0) : (p2 -= 1) {
-        i = skipUtf8Char(z, i);
+        i = util.skipUtf8Char(z, i);
     }
     return z[start..i];
 }
 
-fn skipUtf8Char(z: []const u8, start: usize) usize {
-    var j = start + 1;
-    if (z[start] >= 0xC0) {
-        while (j < z.len and (z[j] & 0xC0) == 0x80) j += 1;
-    }
-    return j;
-}

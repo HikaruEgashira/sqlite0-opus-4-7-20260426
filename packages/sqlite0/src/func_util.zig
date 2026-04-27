@@ -191,3 +191,17 @@ pub fn parseFloatLooseOpt(bytes: []const u8) ?f64 {
 pub fn nibble(n: u8) u8 {
     return if (n < 10) '0' + n else 'A' + (n - 10);
 }
+
+/// SQLITE_SKIP_UTF8: advance one UTF-8 *character* from `start`.
+/// Always advances ≥1 byte; if the lead is a multi-byte UTF-8 lead
+/// (≥0xC0), continuation bytes (0x80-0xBF) are also skipped. Mirrors
+/// `utf8CharCount`'s per-iteration step. Used by LIKE `_` / GLOB `?`
+/// (match.zig) and substr (funcs_substr.zig) to advance by char,
+/// not byte. Caller must ensure `start < z.len`.
+pub fn skipUtf8Char(z: []const u8, start: usize) usize {
+    var j = start + 1;
+    if (z[start] >= 0xC0) {
+        while (j < z.len and (z[j] & 0xC0) == 0x80) j += 1;
+    }
+    return j;
+}

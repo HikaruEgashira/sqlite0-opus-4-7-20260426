@@ -88,8 +88,12 @@ pub fn matchLike(text: []const u8, pattern: []const u8, escape: ?u8) bool {
                 return false;
             },
             '_' => {
+                // sqlite3 `_` matches one UTF-8 character (SQLITE_SKIP_UTF8),
+                // not one byte. `'αβγ' LIKE '_β_'` → 1 because `_` consumes
+                // α (2 bytes) and γ (2 bytes), with the literal `β` bytes
+                // matched in between.
                 if (ti >= text.len) return false;
-                ti += 1;
+                ti = util.skipUtf8Char(text, ti);
                 pi += 1;
             },
             else => {
@@ -140,8 +144,10 @@ pub fn matchGlob(text: []const u8, pattern: []const u8) bool {
                 return false;
             },
             '?' => {
+                // sqlite3 `?` matches one UTF-8 character (SQLITE_SKIP_UTF8),
+                // not one byte — same rule as LIKE `_`.
                 if (ti >= text.len) return false;
-                ti += 1;
+                ti = util.skipUtf8Char(text, ti);
                 pi += 1;
             },
             '[' => {
