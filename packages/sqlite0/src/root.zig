@@ -38,6 +38,7 @@ pub const record = @import("record.zig");
 pub const btree = @import("btree.zig");
 pub const btree_test_util = @import("btree_test_util.zig");
 pub const btree_walk = @import("btree_walk.zig");
+pub const btree_cursor = @import("btree_cursor.zig");
 
 pub const Value = value.Value;
 pub const Result = exec.Result;

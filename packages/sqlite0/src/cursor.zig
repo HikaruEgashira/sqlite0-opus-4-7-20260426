@@ -8,17 +8,32 @@
 //!
 //! Iteration model mirrors SQLite3's VM cursors: open → rewind → loop
 //! { read columns, next } → close. `is_eof()` is true after rewind on an
-//! empty source and after the last `next()` past the final row. `column(idx)`
-//! returns a borrowed Value — the bytes inside TEXT/BLOB belong to the
-//! cursor's backing storage and are valid only until the next `next()` /
-//! `rewind()`. Long-lived consumers (e.g. `dupeRowsToLongLived`) must dupe.
+//! empty source and after the last `next()` past the final row.
+//!
+//! ## Unified Value lifetime contract (Iter25.B.4)
+//!
+//! Every Cursor implementation MUST return Values from `column()` whose
+//! TEXT/BLOB bytes live until the per-statement arena is reset — that is,
+//! they remain valid across any number of `next()` / `rewind()` calls
+//! within a single statement, and across calls to other cursors driven
+//! from the same arena.
+//!
+//! - `TableCursor` satisfies this trivially: TEXT/BLOB borrow from
+//!   `Database.Table.rows`, which outlives every per-statement arena.
+//! - `BtreeCursor` (in `btree_cursor.zig`) satisfies this by duping
+//!   TEXT/BLOB into the arena at decode time. Without that dupe, an
+//!   inner cursor advancing pages could evict the bytes an outer
+//!   correlated-subquery frame is still pointing at — pattern-A makes
+//!   that impossible by construction.
+//!
+//! This is the OuterFrame.current_row contract referenced in ADR-0004
+//! §3 / tasks.md Iter25.B.4: there is no separate "deep-copy at frame
+//! boundary" — the dupe-on-decode already handles it.
 //!
 //! `materializeRows` is the bridge from the per-row cursor model to the
-//! `[][]Value` shape the legacy `cartesianFromSources` / `select.zig` code
-//! still expects. Each row is freshly allocated in `alloc` (the caller's
-//! arena) — Value contents are aliased by reference for in-memory backends
-//! (zero-cost) and will need explicit dupe when Phase 3b's BtreeCursor lands
-//! (page eviction can invalidate the bytes between rows).
+//! `[][]Value` shape the legacy `cartesianFromSources` / `select.zig`
+//! code still expects. Because of the lifetime contract above it can
+//! safely store Values by reference regardless of backend.
 //!
 //! Write-side cursor API (`delete_current`, `update_column_at_current`,
 //! `insert`) is deferred to Iter26.A. The in-memory DML path in
