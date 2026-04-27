@@ -151,6 +151,24 @@ test "fnRound: -2.55 rounds toward zero side to -2.5" {
     try std.testing.expectEqual(@as(f64, -2.5), r.real);
 }
 
+test "sqlite_version: returns target compat version string" {
+    const allocator = std.testing.allocator;
+    const r = try call(allocator, null, "sqlite_version", &.{});
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("3.51.0", r.text);
+}
+
+test "sqlite_compileoption_used: unknown name → 0; NULL → NULL" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "FOO" }};
+    const r1 = try call(allocator, null, "sqlite_compileoption_used", &args);
+    try std.testing.expectEqual(@as(i64, 0), r1.integer);
+
+    var args2 = [_]Value{Value.null};
+    const r2 = try call(allocator, null, "sqlite_compileoption_used", &args2);
+    try std.testing.expectEqual(Value.null, r2);
+}
+
 test "fnRound: 2.355 rounds DOWN to 2.35 via f128 intermediate" {
     // f64 intermediate `(2.355 + 0.005) * 100` rounds back to 2.36 because
     // f64's 52-bit mantissa loses the sub-ulp tail (2.355 is actually

@@ -2496,3 +2496,15 @@ SELECT round(123456789.987654321, 4)
 SELECT round(2.5, 30)
 SELECT round(0.1 + 0.2, 1)
 SELECT round(0.1 + 0.2, 17)
+
+# --- Iter30.E: sqlite_version + sqlite_compileoption_used
+SELECT sqlite_version()
+SELECT typeof(sqlite_version())
+SELECT length(sqlite_version()) > 0
+SELECT sqlite_compileoption_used('FOO')
+SELECT sqlite_compileoption_used('SQLITE_ENABLE_DOES_NOT_EXIST')
+SELECT sqlite_compileoption_used(NULL)
+SELECT typeof(sqlite_compileoption_used('FOO'))
+# sqlite_compileoption_get past end returns NULL.
+SELECT sqlite_compileoption_get(99999)
+SELECT sqlite_compileoption_get(-1)

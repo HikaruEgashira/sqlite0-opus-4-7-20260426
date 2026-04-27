@@ -99,7 +99,41 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "changes")) return fnChanges(db, args);
     if (util.eqlIgnoreCase(name, "total_changes")) return fnTotalChanges(db, args);
     if (util.eqlIgnoreCase(name, "last_insert_rowid")) return fnLastInsertRowid(db, args);
+    if (util.eqlIgnoreCase(name, "sqlite_version")) return fnSqliteVersion(allocator, args);
+    if (util.eqlIgnoreCase(name, "sqlite_compileoption_used")) return fnSqliteCompileoptionUsed(args);
+    if (util.eqlIgnoreCase(name, "sqlite_compileoption_get")) return fnSqliteCompileoptionGet(args);
     return Error.UnknownFunction;
+}
+
+/// `sqlite_version()` — sqlite3 version string. We pin to the version we
+/// target for differential testing parity. Update this constant when
+/// rolling forward to a new sqlite3 release. The value is observable to
+/// applications gating on version (e.g. `iif(sqlite_version() >= '3.42',
+/// ...)`), so it must read true to the feature surface we implement.
+const sqlite_compat_version: []const u8 = "3.51.0";
+
+fn fnSqliteVersion(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 0) return Error.WrongArgumentCount;
+    return Value{ .text = try allocator.dupe(u8, sqlite_compat_version) };
+}
+
+/// `sqlite_compileoption_used(name)` — returns 1 if the build was compiled
+/// with the named SQLITE_ENABLE_*/SQLITE_OMIT_* option, 0 otherwise. We
+/// have no compile-option matrix; return 0 for everything (sqlite3
+/// surface contract: an unknown name is always 0, never an error). NULL
+/// arg propagates to NULL.
+fn fnSqliteCompileoptionUsed(args: []const Value) Error!Value {
+    if (args.len != 1) return Error.WrongArgumentCount;
+    if (args[0] == .null) return Value.null;
+    return Value{ .integer = 0 };
+}
+
+/// `sqlite_compileoption_get(N)` — returns the Nth compile option as TEXT,
+/// or NULL when N is out of range. We have no options to enumerate so any
+/// index returns NULL; sqlite3 returns NULL past its option list too.
+fn fnSqliteCompileoptionGet(args: []const Value) Error!Value {
+    if (args.len != 1) return Error.WrongArgumentCount;
+    return Value.null;
 }
 
 fn fnChanges(db: ?*Database, args: []const Value) Error!Value {
