@@ -168,6 +168,11 @@ fn deriveExprColumnName(
 ) ![]const u8 {
     if (item.alias) |a| return try alloc.dupe(u8, a);
     if (bareColumnRefName(item.expr)) |name| return try alloc.dupe(u8, name);
+    // Prefer the verbatim source text (sqlite3 quirk: `SELECT 1+2` projects
+    // column "1+2"). Falls back to `columnN` only when the source span
+    // wasn't captured — currently that only happens for synthesized items
+    // (no parsing site), but the path stays as a defensive last resort.
+    if (item.source_text) |src| return try alloc.dupe(u8, src);
     return try std.fmt.allocPrint(alloc, "column{d}", .{one_based_idx});
 }
 

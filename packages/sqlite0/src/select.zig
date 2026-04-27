@@ -47,6 +47,13 @@ pub const SelectItem = union(enum) {
     pub const ExprItem = struct {
         expr: *ast.Expr,
         alias: ?[]const u8 = null,
+        /// Verbatim slice of the source text the expression was parsed from
+        /// (after surrounding whitespace is trimmed). Used to synthesize the
+        /// projected column name when no alias is given and the expression
+        /// is not a bare column-ref. Mirrors sqlite3's behavior — it stores
+        /// the SELECT-list source text and reports it as the column name
+        /// (`SELECT 1+2` projects column "1+2"). Borrows from `Parser.src`.
+        source_text: ?[]const u8 = null,
     };
 };
 
@@ -86,9 +93,21 @@ fn parseSelectItem(p: *Parser, items: *std.ArrayList(SelectItem)) !void {
         }
         p.restore(snap);
     }
+    // Capture the source-text span: from the first token of the expression
+    // through to the start of whatever token follows it (typically `,`,
+    // `FROM`, or `AS`). Trim trailing whitespace/comments — the lexer's
+    // skipTrivia would otherwise pull `   ,` into our slice. Done before
+    // parseOptionalAlias so the alias keyword/identifier doesn't leak in.
+    const span_start = p.cur.start;
     const expr = try p.parseExpr();
+    const span_end = p.cur.start;
+    const source_text = std.mem.trimEnd(u8, p.src[span_start..span_end], " \t\n\r");
     const alias = parseOptionalAlias(p);
-    items.appendAssumeCapacity(.{ .expr = .{ .expr = expr, .alias = alias } });
+    items.appendAssumeCapacity(.{ .expr = .{
+        .expr = expr,
+        .alias = alias,
+        .source_text = source_text,
+    } });
 }
 
 /// Recognize `AS <ident>` (mandatory ident after AS) or a bare `<ident>`
