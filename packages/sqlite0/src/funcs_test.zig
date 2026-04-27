@@ -56,6 +56,30 @@ test "funcs: substr negative length" {
     try std.testing.expectEqualStrings("h", r.text);
 }
 
+test "funcs: substr counts UTF-8 chars not bytes" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "Hあhi" }, .{ .integer = 2 }, .{ .integer = 1 } };
+    const r = try call(allocator, null, "substr", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("あ", r.text);
+}
+
+test "funcs: substr BLOB returns BLOB with byte indices" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .blob = "AB" }, .{ .integer = 1 }, .{ .integer = 1 } };
+    const r = try call(allocator, null, "substr", &args);
+    defer allocator.free(r.blob);
+    try std.testing.expectEqualSlices(u8, "A", r.blob);
+}
+
+test "funcs: substr TEXT NUL-truncates length when start is negative" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "A\x00B" }, .{ .integer = -2 }, .{ .integer = 5 } };
+    const r = try call(allocator, null, "substr", &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("A", r.text);
+}
+
 test "funcs: abs integer" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .integer = -7 }};
