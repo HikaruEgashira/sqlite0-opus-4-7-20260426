@@ -42,7 +42,7 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
         else => return Value.null,
     };
     const r = parseAndApplyModifiers(args[1..]) orelse return Value.null;
-    return renderFormat(allocator, fmt, r.dt);
+    return renderFormat(allocator, fmt, r.dt, r.subsec);
 }
 
 /// `date(timestring, [modifier]*)` — sqlite3 shorthand for
@@ -51,21 +51,21 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
 pub fn fnDate(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
     const r = parseAndApplyModifiers(args) orelse return Value.null;
-    return renderFormat(allocator, "%Y-%m-%d", r.dt);
+    return renderFormat(allocator, "%Y-%m-%d", r.dt, r.subsec);
 }
 
 pub fn fnTime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
     const r = parseAndApplyModifiers(args) orelse return Value.null;
     const fmt = if (r.subsec) "%H:%M:%f" else "%H:%M:%S";
-    return renderFormat(allocator, fmt, r.dt);
+    return renderFormat(allocator, fmt, r.dt, r.subsec);
 }
 
 pub fn fnDatetime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len == 0) return Error.WrongArgumentCount;
     const r = parseAndApplyModifiers(args) orelse return Value.null;
     const fmt = if (r.subsec) "%Y-%m-%d %H:%M:%f" else "%Y-%m-%d %H:%M:%S";
-    return renderFormat(allocator, fmt, r.dt);
+    return renderFormat(allocator, fmt, r.dt, r.subsec);
 }
 
 /// `julianday(timestring, [modifier]*)` — sqlite3 returns the
@@ -100,8 +100,11 @@ pub fn fnUnixepoch(allocator: std.mem.Allocator, args: []const Value) Error!Valu
 /// Core formatter — renders an already-parsed `DateTime` against the
 /// given strftime-style `fmt`. Unrecognised %-specifier → NULL (matches
 /// sqlite3's PRINTF_DATEFUNC abort-on-bad-spec rule). Caller owns the
-/// pre-parse step; this fn never re-reads `args`.
-fn renderFormat(allocator: std.mem.Allocator, fmt: []const u8, dt: DateTime) Error!Value {
+/// pre-parse step; this fn never re-reads `args`. `subsec` flips `%s`
+/// into the `seconds.fff` REAL-as-text rendering — a sqlite3 quirk
+/// where the modifier overrides only `%s` (other format specs are
+/// already user-controlled).
+fn renderFormat(allocator: std.mem.Allocator, fmt: []const u8, dt: DateTime, subsec: bool) Error!Value {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -160,7 +163,15 @@ fn renderFormat(allocator: std.mem.Allocator, fmt: []const u8, dt: DateTime) Err
                 try out.append(allocator, ':');
                 try writeZeroPadded(allocator, &out, dt.second, 2);
             },
-            's' => try writeI64(allocator, &out, calendar.unixEpochSeconds(dt)),
+            's' => {
+                if (subsec) {
+                    try writeI64(allocator, &out, calendar.unixEpochSeconds(dt));
+                    try out.append(allocator, '.');
+                    try writeZeroPadded(allocator, &out, dt.millisecond, 3);
+                } else {
+                    try writeI64(allocator, &out, calendar.unixEpochSeconds(dt));
+                }
+            },
             'J' => try writeJulianDay(allocator, &out, dt),
             else => {
                 // Unsupported spec → NULL (sqlite3 behavior).

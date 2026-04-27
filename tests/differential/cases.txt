@@ -2284,6 +2284,10 @@ SELECT date('2024-12-30', 'weekday 0')
 SELECT date('2024-01-01', 'weekday 2', '+1 day')
 SELECT typeof(printf())
 SELECT printf() IS NULL
+SELECT strftime('%s', '2024-01-01 12:34:56', 'subsec')
+SELECT strftime('%s', '2024-01-01 12:34:56.5', 'subsec')
+SELECT strftime('%s', '2024-01-01 12:34:56.789', 'subsec')
+SELECT strftime('%T', '2024-01-01 12:34:56.789', 'subsec')
 
 
 
