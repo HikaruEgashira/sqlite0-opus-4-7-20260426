@@ -30,7 +30,7 @@ ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が 
 advisor split (Iter26.A は scope が広すぎたため細分化):
 
 - [x] Iter26.guard: file-mode DB に対する DDL/DML を `Error.ReadOnlyDatabase` で reject。Iter25.B.5+C 完了直後の silent in-memory shadow state を防ぐ (registerTable / executeInsert / executeDelete / executeUpdate を `assertWritable(db)` で gate)。SELECT は引き続き許可。Unit test: file-mode DB が 4 種の write すべて拒否し SELECT は通る。
-- [ ] Iter26.A.0: `Pager.writePage(page_no, bytes)` 単独 primitive。pwrite + cache 更新 + (要決定) fsync。Pager open → write → close → reopen → getPage で round-trip 検証。
+- [x] Iter26.A.0: `Pager.writePage(page_no, bytes)` 単独 primitive。`std.c.pwrite` + cache write-through (LRU 内なら in-place memcpy + head 昇格、それ以外は head に挿入)。**fsync 無し** — Phase 3c に transaction semantics が無く、durability story は Phase 4 (WAL/ADR-0007) が一括で扱うべき。3 unit tests (close→reopen round-trip / page 0 + wrong-len rejection / cache write-through pointer identity)。差分 787/787 + file-differential 12/12 緑。
 - [ ] Iter26.A.1: insert-into-leaf-with-room (split 無し)。`engine_dml.executeInsert` の `t.root_page != 0` 経路を追加し、leaf cell pointer array を rowid 順に更新、cell content area へ record bytes を書き込み、Pager 経由で page を fsync。fixture は sqlite3-created (CREATE TABLE 永続化は Iter26.A.3 まで未対応)。
 - [ ] Iter26.A.2: DELETE / UPDATE 用の cell removal / replacement。
 - [ ] Iter26.A.3: CREATE TABLE 永続化 (page allocation: file 拡張 + header offset 28 の dbsize 更新 + sqlite_schema INSERT)。これで pure sqlite0 で fixture 生成 → 別プロセスの sqlite0/sqlite3 で読める。

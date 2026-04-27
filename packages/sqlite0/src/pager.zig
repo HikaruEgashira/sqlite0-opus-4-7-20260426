@@ -83,6 +83,62 @@ pub const Pager = struct {
         self.fd = -1;
     }
 
+    /// Write `bytes` (exactly PAGE_SIZE) to page `page_no` via pwrite,
+    /// then update the LRU cache so subsequent `getPage` reads see the
+    /// new contents without an extra disk roundtrip. Iter26.A.0 — the
+    /// raw write primitive that all higher-level B-tree mutation layers
+    /// on top of.
+    ///
+    /// **No fsync** by design: Phase 3c has no transaction semantics
+    /// (rollback/journal are Phase 4 / WAL / ADR-0007). Adding fsync
+    /// here would be cargo durability — a crash between two related
+    /// page writes would still produce a torn B-tree even if both
+    /// individual writes were forced to disk. Phase 4 owns the
+    /// durability story end-to-end. Until then, callers should treat
+    /// writes as in-memory until `close()` returns.
+    ///
+    /// Page 0 is invalid (sqlite3 numbering convention). pwrite to a
+    /// page beyond the current file size implicitly extends the file
+    /// with sparse zero pages — fine for now; Iter26.A.3 will manage
+    /// the explicit page count in the header.
+    pub fn writePage(self: *Pager, page_no: u32, bytes: []const u8) Error!void {
+        if (page_no == 0) return Error.IoError;
+        if (bytes.len != PAGE_SIZE) return Error.IoError;
+
+        const offset: std.c.off_t = @intCast(@as(usize, page_no - 1) * PAGE_SIZE);
+        const n = std.c.pwrite(self.fd, bytes.ptr, PAGE_SIZE, offset);
+        if (n < 0) return Error.IoError;
+        if (n != @as(isize, @intCast(PAGE_SIZE))) return Error.IoError;
+
+        // Cache write-through: if the page is in the LRU, replace its
+        // bytes (same allocation) and promote to head. If not, allocate
+        // a fresh entry and insert at head, evicting the tail if over
+        // capacity. This keeps `getPage` cheap immediately after a
+        // mutation cycle (insert-then-select is the common pattern).
+        for (self.cache.items, 0..) |entry, idx| {
+            if (entry.page_no == page_no) {
+                @memcpy(entry.data, bytes);
+                if (idx != 0) {
+                    const tmp = self.cache.items[idx];
+                    var j: usize = idx;
+                    while (j > 0) : (j -= 1) {
+                        self.cache.items[j] = self.cache.items[j - 1];
+                    }
+                    self.cache.items[0] = tmp;
+                }
+                return;
+            }
+        }
+        const buf = try self.allocator.alloc(u8, PAGE_SIZE);
+        errdefer self.allocator.free(buf);
+        @memcpy(buf, bytes);
+        try self.cache.insert(self.allocator, 0, .{ .page_no = page_no, .data = buf });
+        if (self.cache.items.len > self.cache_capacity) {
+            const evicted = self.cache.pop().?;
+            self.allocator.free(evicted.data);
+        }
+    }
+
     /// Return page `page_no` (1-indexed). On cache hit, the entry moves
     /// to the head. On miss, the page is `pread`'d, inserted at head,
     /// and the LRU tail is evicted if over capacity.
@@ -303,4 +359,84 @@ test "Pager.getPage: LRU promotion on hit" {
     try testing.expectEqual(@as(u32, 1), p.cache.items[0].page_no);
     try testing.expectEqual(@as(u32, 3), p.cache.items[1].page_no);
     try testing.expectEqual(@as(u32, 2), p.cache.items[2].page_no);
+}
+
+test "Pager.writePage: round-trip through close + reopen" {
+    const path = try makeTempPath(testing.allocator, "write");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+
+    // Pre-create a 2-page file (sparse zeros) so page 1 and 2 exist
+    // before we open the Pager (open requires the file to exist).
+    const content = try testing.allocator.alloc(u8, PAGE_SIZE * 2);
+    defer testing.allocator.free(content);
+    @memset(content, 0);
+    try writeFixture(path, content);
+
+    // Construct a non-trivial payload for page 1.
+    const payload = try testing.allocator.alloc(u8, PAGE_SIZE);
+    defer testing.allocator.free(payload);
+    @memset(payload, 0);
+    @memcpy(payload[0..6], "hello!");
+    payload[PAGE_SIZE - 1] = 0xab; // mark the tail too
+
+    {
+        var p = try Pager.open(testing.allocator, path);
+        defer p.close();
+        try p.writePage(1, payload);
+    }
+
+    // Reopen the file; verify the bytes survived the close.
+    var p2 = try Pager.open(testing.allocator, path);
+    defer p2.close();
+    const got = try p2.getPage(1);
+    try testing.expectEqualStrings("hello!", got[0..6]);
+    try testing.expectEqual(@as(u8, 0xab), got[PAGE_SIZE - 1]);
+}
+
+test "Pager.writePage: rejects page 0 and wrong-length buffers" {
+    const path = try makeTempPath(testing.allocator, "rejects");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+    try writeFixture(path, "x");
+
+    var p = try Pager.open(testing.allocator, path);
+    defer p.close();
+
+    const buf = try testing.allocator.alloc(u8, PAGE_SIZE);
+    defer testing.allocator.free(buf);
+    @memset(buf, 0);
+    try testing.expectError(Error.IoError, p.writePage(0, buf));
+
+    const short = try testing.allocator.alloc(u8, 32);
+    defer testing.allocator.free(short);
+    try testing.expectError(Error.IoError, p.writePage(1, short));
+}
+
+test "Pager.writePage: cache write-through reflects in subsequent getPage" {
+    const path = try makeTempPath(testing.allocator, "wt");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+    try writeFixture(path, "init");
+
+    var p = try Pager.open(testing.allocator, path);
+    defer p.close();
+
+    // Prime the cache with the initial bytes.
+    const initial = try p.getPage(1);
+    try testing.expectEqualStrings("init", initial[0..4]);
+
+    // Write new bytes; cache must reflect them WITHOUT another disk
+    // read (the test trusts the write-through path because we haven't
+    // reopened the file).
+    const fresh = try testing.allocator.alloc(u8, PAGE_SIZE);
+    defer testing.allocator.free(fresh);
+    @memset(fresh, 0);
+    @memcpy(fresh[0..5], "fresh");
+    try p.writePage(1, fresh);
+
+    const after = try p.getPage(1);
+    try testing.expectEqualStrings("fresh", after[0..5]);
+    // Pointer identity: same cache slot, in-place memcpy.
+    try testing.expect(initial.ptr == after.ptr);
 }
