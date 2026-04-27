@@ -82,6 +82,11 @@ pub const TokenKind = enum {
     gt,
     ge,
     concat,
+    bit_and,
+    bit_or,
+    bit_not,
+    shift_left,
+    shift_right,
 };
 
 pub const Token = struct {
@@ -139,6 +144,10 @@ pub const Lexer = struct {
                         self.pos += 1;
                         return .{ .kind = .ne, .start = start, .end = self.pos };
                     }
+                    if (next_c == '<') {
+                        self.pos += 1;
+                        return .{ .kind = .shift_left, .start = start, .end = self.pos };
+                    }
                 }
                 return .{ .kind = .lt, .start = start, .end = self.pos };
             },
@@ -149,9 +158,15 @@ pub const Lexer = struct {
                         self.pos += 1;
                         return .{ .kind = .ge, .start = start, .end = self.pos };
                     }
+                    if (next_c == '>') {
+                        self.pos += 1;
+                        return .{ .kind = .shift_right, .start = start, .end = self.pos };
+                    }
                 }
                 return .{ .kind = .gt, .start = start, .end = self.pos };
             },
+            '&' => return self.single(.bit_and),
+            '~' => return self.single(.bit_not),
             '!' => {
                 self.pos += 1;
                 if (self.peek()) |next_c| {
@@ -170,7 +185,7 @@ pub const Lexer = struct {
                         return .{ .kind = .concat, .start = start, .end = self.pos };
                     }
                 }
-                return .{ .kind = .invalid, .start = start, .end = self.pos };
+                return .{ .kind = .bit_or, .start = start, .end = self.pos };
             },
             '\'' => return self.string(start),
             '0'...'9' => return self.number(start),

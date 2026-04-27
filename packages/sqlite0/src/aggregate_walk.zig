@@ -65,6 +65,7 @@ fn exprHasAggregate(expr: *const ast.Expr) bool {
         .binary_arith => |b| exprHasAggregate(b.left) or exprHasAggregate(b.right),
         .binary_concat => |b| exprHasAggregate(b.left) or exprHasAggregate(b.right),
         .unary_negate => |inner| exprHasAggregate(inner),
+        .unary_bit_not => |inner| exprHasAggregate(inner),
         .compare => |c| exprHasAggregate(c.left) or exprHasAggregate(c.right),
         .eq_check => |e| exprHasAggregate(e.left) or exprHasAggregate(e.right),
         .is_check => |e| exprHasAggregate(e.left) or exprHasAggregate(e.right),
@@ -137,6 +138,7 @@ fn collectInExpr(
             try collectInExpr(allocator, b.right, out);
         },
         .unary_negate => |inner| try collectInExpr(allocator, inner, out),
+        .unary_bit_not => |inner| try collectInExpr(allocator, inner, out),
         .compare => |c| {
             try collectInExpr(allocator, c.left, out);
             try collectInExpr(allocator, c.right, out);

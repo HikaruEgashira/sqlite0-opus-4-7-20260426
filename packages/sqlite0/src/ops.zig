@@ -138,6 +138,81 @@ fn coerceBytesToNumeric(bytes: []const u8) Value {
     return Value{ .integer = 0 };
 }
 
+/// `~x` — coerce to i64 then bitwise NOT. NULL propagates as NULL.
+/// REAL truncates toward zero (sqlite3: `~3.7 = -4`, `~(-3.7) = 2`),
+/// TEXT/BLOB parses leniently and defaults to 0 (`~'foo' = -1`).
+pub fn bitNotValue(v: Value) Value {
+    if (v == .null) return Value.null;
+    return Value{ .integer = ~coerceToI64(v) };
+}
+
+pub const BitOp = enum { bit_and, bit_or, shift_left, shift_right };
+
+/// `&`, `|`, `<<`, `>>` — coerce both operands to i64 then operate.
+/// NULL on either side → NULL. Shift semantics match sqlite3 3.51.0:
+///   - `x << n` with `n < 0` is `x >> -n`; with `n >= 64` it is 0.
+///   - `x >> n` with `n < 0` is `x << -n`; with `n >= 64` it sign-
+///     extends (= -1 for negative `x`, 0 otherwise).
+///   - Left shift uses unsigned wrap so `1 << 63` = `-9223372036854775808`.
+pub fn applyBitwise(op: BitOp, lhs: Value, rhs: Value) Value {
+    if (lhs == .null or rhs == .null) return Value.null;
+    const a = coerceToI64(lhs);
+    const b = coerceToI64(rhs);
+    return switch (op) {
+        .bit_and => Value{ .integer = a & b },
+        .bit_or => Value{ .integer = a | b },
+        .shift_left => Value{ .integer = applyShift(a, b, .left) },
+        .shift_right => Value{ .integer = applyShift(a, b, .right) },
+    };
+}
+
+const ShiftDirection = enum { left, right };
+
+fn applyShift(value: i64, count: i64, dir: ShiftDirection) i64 {
+    var amount = count;
+    var direction = dir;
+    if (amount < 0) {
+        // i64.min has no positive counterpart — clamp to "saturated".
+        if (amount == std.math.minInt(i64)) {
+            return saturatedShift(value, direction);
+        }
+        amount = -amount;
+        direction = if (direction == .left) .right else .left;
+    }
+    if (amount >= 64) return saturatedShift(value, direction);
+    return switch (direction) {
+        .left => @bitCast(@as(u64, @bitCast(value)) << @intCast(amount)),
+        .right => value >> @intCast(amount),
+    };
+}
+
+/// Shift amount equals or exceeds 64 — sqlite3's saturated forms:
+/// left shift always yields 0; right shift sign-extends (= -1 for
+/// negative inputs, 0 otherwise).
+fn saturatedShift(value: i64, dir: ShiftDirection) i64 {
+    return switch (dir) {
+        .left => 0,
+        .right => if (value < 0) @as(i64, -1) else 0,
+    };
+}
+
+fn coerceToI64(v: Value) i64 {
+    return switch (v) {
+        .integer => |i| i,
+        // lossyCast clamps non-finite f64 to match sqlite3: +Inf → LLONG_MAX,
+        // -Inf → LLONG_MIN, NaN → 0. Plain @intFromFloat is UB on non-finite.
+        .real => |f| std.math.lossyCast(i64, f),
+        .text, .blob => |bytes| parseLenientI64(bytes),
+        .null => 0,
+    };
+}
+
+fn parseLenientI64(bytes: []const u8) i64 {
+    if (std.fmt.parseInt(i64, bytes, 10)) |i| return i else |_| {}
+    if (std.fmt.parseFloat(f64, bytes)) |f| return std.math.lossyCast(i64, f) else |_| {}
+    return 0;
+}
+
 pub fn boolValue(b: bool) Value {
     return Value{ .integer = if (b) 1 else 0 };
 }

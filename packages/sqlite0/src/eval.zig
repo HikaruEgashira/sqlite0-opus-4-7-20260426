@@ -93,6 +93,7 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .binary_arith => |b| try evalBinaryArith(ctx, b),
         .binary_concat => |b| try evalBinaryConcat(ctx, b),
         .unary_negate => |operand| try evalUnaryNegate(ctx, operand),
+        .unary_bit_not => |operand| try evalUnaryBitNot(ctx, operand),
         .compare => |c| try evalCompare(ctx, c),
         .eq_check => |e| try evalEqCheck(ctx, e),
         .is_check => |e| try evalIsCheck(ctx, e),
@@ -122,16 +123,36 @@ fn evalBinaryArith(ctx: EvalContext, b: Expr.BinaryArith) Error!Value {
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, b.right);
     defer ops.freeValue(ctx.allocator, right);
-    const tok_op: lex.TokenKind = switch (b.op) {
-        .add => .plus,
-        .sub => .minus,
-        .mul => .star,
-        .div => .slash,
-        .mod => .percent,
+    // Bitwise operators take a separate ops dispatch — they coerce
+    // operands to i64 (REAL truncates) rather than promoting to
+    // numeric affinity, so bundling them through `applyArith` would
+    // mean re-encoding the same coercion through TokenKind.
+    const out = switch (b.op) {
+        .bit_and, .bit_or, .shift_left, .shift_right => ops.applyBitwise(bitOp(b.op), left, right),
+        else => blk: {
+            const tok_op: lex.TokenKind = switch (b.op) {
+                .add => .plus,
+                .sub => .minus,
+                .mul => .star,
+                .div => .slash,
+                .mod => .percent,
+                else => unreachable,
+            };
+            break :blk try ops.applyArith(tok_op, left, right);
+        },
     };
-    const out = try ops.applyArith(tok_op, left, right);
     ops.freeValue(ctx.allocator, left);
     return out;
+}
+
+fn bitOp(op: ast.BinaryOp) ops.BitOp {
+    return switch (op) {
+        .bit_and => .bit_and,
+        .bit_or => .bit_or,
+        .shift_left => .shift_left,
+        .shift_right => .shift_right,
+        else => unreachable,
+    };
 }
 
 fn evalBinaryConcat(ctx: EvalContext, b: Expr.BinaryConcat) Error!Value {
@@ -148,6 +169,12 @@ fn evalUnaryNegate(ctx: EvalContext, operand: *Expr) Error!Value {
     const inner = try evalExpr(ctx, operand);
     defer ops.freeValue(ctx.allocator, inner);
     return ops.negateValue(inner);
+}
+
+fn evalUnaryBitNot(ctx: EvalContext, operand: *Expr) Error!Value {
+    const inner = try evalExpr(ctx, operand);
+    defer ops.freeValue(ctx.allocator, inner);
+    return ops.bitNotValue(inner);
 }
 
 fn evalCompare(ctx: EvalContext, c: Expr.Compare) Error!Value {

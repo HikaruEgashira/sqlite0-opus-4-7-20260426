@@ -1210,3 +1210,46 @@ SELECT x'00AA'
 SELECT x'AA00BB'
 SELECT 'foo' || char(0) || 'bar'
 SELECT char(0)
+
+# Iter29.J — bitwise operators &, |, <<, >>, ~. SQLite quirks:
+#  - Coerce to i64 first (REAL truncates toward zero, TEXT lenient parse).
+#  - NULL on either side -> NULL.
+#  - Shift by negative amount flips direction (8 >> -2 == 8 << 2).
+#  - Shift by >=64: left -> 0; right -> sign-extend (-1 if negative).
+#  - Left shift uses unsigned wrap (1 << 63 == -9223372036854775808).
+#  - Precedence: bitwise sits between + - and < <= >.
+SELECT 1 << 2
+SELECT 8 >> 1
+SELECT 5 & 3
+SELECT 5 | 3
+SELECT ~0
+SELECT ~3
+SELECT ~3.7
+SELECT ~'foo'
+SELECT ~NULL
+SELECT 1 << 64
+SELECT 1 << 63
+SELECT 8 >> 64
+SELECT -1 >> 1
+SELECT -1 >> 64
+SELECT -1 << 1
+SELECT 1 << -1
+SELECT 8 >> -2
+SELECT 5 & 3.7
+SELECT '5' & 3
+SELECT NULL & 3
+SELECT 5 & NULL
+SELECT 9223372036854775807 << 1
+SELECT 1 << 100
+SELECT 1 + 2 << 1
+SELECT 4 << 1 + 1
+SELECT 4 & 7 = 4
+SELECT (4 & 7) = 4
+SELECT typeof(5 & 3)
+SELECT typeof(~5)
+SELECT (1e308*10) & 5
+SELECT (1e308*10) | 0
+SELECT ~(1e308*10)
+SELECT (-1e308*10) & -1
+SELECT (1.0/0.0) & 5
+CREATE TABLE bits(x); INSERT INTO bits VALUES(5),(7),(12); SELECT x FROM bits WHERE x & 1 ORDER BY x

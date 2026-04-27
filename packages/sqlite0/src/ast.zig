@@ -19,7 +19,7 @@ const stmt = @import("stmt.zig");
 
 const Value = value_mod.Value;
 
-pub const BinaryOp = enum { add, sub, mul, div, mod };
+pub const BinaryOp = enum { add, sub, mul, div, mod, bit_and, bit_or, shift_left, shift_right };
 pub const CompareOp = enum { lt, le, gt, ge };
 pub const EqOp = enum { eq, ne };
 pub const LikeOp = enum { like, glob };
@@ -35,6 +35,9 @@ pub const Expr = union(enum) {
     binary_arith: BinaryArith,
     binary_concat: BinaryConcat,
     unary_negate: *Expr,
+    /// Unary bitwise NOT (`~x`). sqlite3 coerces operands to INTEGER
+    /// first (`~3.7` → `-4`, NULL → NULL).
+    unary_bit_not: *Expr,
     compare: Compare,
     eq_check: EqCheck,
     is_check: IsCheck,
@@ -127,6 +130,7 @@ pub const Expr = union(enum) {
                 b.right.deinit(allocator);
             },
             .unary_negate => |inner| inner.deinit(allocator),
+            .unary_bit_not => |inner| inner.deinit(allocator),
             .compare => |c| {
                 c.left.deinit(allocator);
                 c.right.deinit(allocator);
@@ -223,6 +227,12 @@ pub fn makeBinaryConcat(allocator: std.mem.Allocator, left: *Expr, right: *Expr)
 pub fn makeUnaryNegate(allocator: std.mem.Allocator, operand: *Expr) !*Expr {
     const node = try allocator.create(Expr);
     node.* = .{ .unary_negate = operand };
+    return node;
+}
+
+pub fn makeUnaryBitNot(allocator: std.mem.Allocator, operand: *Expr) !*Expr {
+    const node = try allocator.create(Expr);
+    node.* = .{ .unary_bit_not = operand };
     return node;
 }
 

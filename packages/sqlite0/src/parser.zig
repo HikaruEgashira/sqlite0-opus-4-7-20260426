@@ -174,7 +174,7 @@ pub const Parser = struct {
     }
 
     pub fn parseComparison(self: *Parser) Error!*ast.Expr {
-        var left = try self.parseAddSub();
+        var left = try self.parseBitwise();
         errdefer left.deinit(self.allocator);
         while (self.cur.kind == .lt or self.cur.kind == .le or self.cur.kind == .gt or self.cur.kind == .ge) {
             const op: ast.CompareOp = switch (self.cur.kind) {
@@ -185,9 +185,31 @@ pub const Parser = struct {
                 else => unreachable,
             };
             self.advance();
-            const right = try self.parseAddSub();
+            const right = try self.parseBitwise();
             errdefer right.deinit(self.allocator);
             left = try ast.makeCompare(self.allocator, op, left, right);
+        }
+        return left;
+    }
+
+    /// Bitwise operators `&`, `|`, `<<`, `>>` — left-associative, all at
+    /// one precedence level (sqlite3 docs § Operator Precedence).
+    /// Higher-binding than `<` etc., lower-binding than `+` / `-`.
+    pub fn parseBitwise(self: *Parser) Error!*ast.Expr {
+        var left = try self.parseAddSub();
+        errdefer left.deinit(self.allocator);
+        while (true) {
+            const op: ast.BinaryOp = switch (self.cur.kind) {
+                .bit_and => .bit_and,
+                .bit_or => .bit_or,
+                .shift_left => .shift_left,
+                .shift_right => .shift_right,
+                else => break,
+            };
+            self.advance();
+            const right = try self.parseAddSub();
+            errdefer right.deinit(self.allocator);
+            left = try ast.makeBinaryArith(self.allocator, op, left, right);
         }
         return left;
     }
@@ -248,6 +270,12 @@ pub const Parser = struct {
         if (self.cur.kind == .plus) {
             self.advance();
             return self.parseUnary();
+        }
+        if (self.cur.kind == .bit_not) {
+            self.advance();
+            const inner = try self.parseUnary();
+            errdefer inner.deinit(self.allocator);
+            return ast.makeUnaryBitNot(self.allocator, inner);
         }
         return self.parsePrimary();
     }
