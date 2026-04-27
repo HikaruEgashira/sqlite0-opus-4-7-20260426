@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const value = @import("value.zig");
 pub const lex = @import("lex.zig");
+pub const lex_keyword = @import("lex_keyword.zig");
 pub const ops = @import("ops.zig");
 pub const match = @import("match.zig");
 pub const func_util = @import("func_util.zig");

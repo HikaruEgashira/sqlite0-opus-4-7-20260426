@@ -1,4 +1,5 @@
 const std = @import("std");
+const lex_keyword = @import("lex_keyword.zig");
 
 pub const TokenKind = enum {
     eof,
@@ -314,79 +315,10 @@ pub const Lexer = struct {
             }
         }
         const text = self.src[start..self.pos];
-        const kind = keywordKind(text) orelse TokenKind.identifier;
+        const kind = lex_keyword.keywordKind(text) orelse TokenKind.identifier;
         return .{ .kind = kind, .start = start, .end = self.pos };
     }
 };
-
-fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| {
-        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
-    }
-    return true;
-}
-
-fn keywordKind(text: []const u8) ?TokenKind {
-    if (eqlIgnoreCase(text, "select")) return .keyword_select;
-    if (eqlIgnoreCase(text, "from")) return .keyword_from;
-    if (eqlIgnoreCase(text, "where")) return .keyword_where;
-    if (eqlIgnoreCase(text, "null")) return .keyword_null;
-    if (eqlIgnoreCase(text, "true")) return .keyword_true;
-    if (eqlIgnoreCase(text, "false")) return .keyword_false;
-    if (eqlIgnoreCase(text, "and")) return .keyword_and;
-    if (eqlIgnoreCase(text, "or")) return .keyword_or;
-    if (eqlIgnoreCase(text, "not")) return .keyword_not;
-    if (eqlIgnoreCase(text, "is")) return .keyword_is;
-    if (eqlIgnoreCase(text, "between")) return .keyword_between;
-    if (eqlIgnoreCase(text, "in")) return .keyword_in;
-    if (eqlIgnoreCase(text, "distinct")) return .keyword_distinct;
-    if (eqlIgnoreCase(text, "case")) return .keyword_case;
-    if (eqlIgnoreCase(text, "when")) return .keyword_when;
-    if (eqlIgnoreCase(text, "then")) return .keyword_then;
-    if (eqlIgnoreCase(text, "else")) return .keyword_else;
-    if (eqlIgnoreCase(text, "end")) return .keyword_end;
-    if (eqlIgnoreCase(text, "values")) return .keyword_values;
-    if (eqlIgnoreCase(text, "as")) return .keyword_as;
-    if (eqlIgnoreCase(text, "create")) return .keyword_create;
-    if (eqlIgnoreCase(text, "table")) return .keyword_table;
-    if (eqlIgnoreCase(text, "insert")) return .keyword_insert;
-    if (eqlIgnoreCase(text, "into")) return .keyword_into;
-    if (eqlIgnoreCase(text, "like")) return .keyword_like;
-    if (eqlIgnoreCase(text, "glob")) return .keyword_glob;
-    if (eqlIgnoreCase(text, "escape")) return .keyword_escape;
-    if (eqlIgnoreCase(text, "order")) return .keyword_order;
-    if (eqlIgnoreCase(text, "by")) return .keyword_by;
-    if (eqlIgnoreCase(text, "asc")) return .keyword_asc;
-    if (eqlIgnoreCase(text, "desc")) return .keyword_desc;
-    if (eqlIgnoreCase(text, "limit")) return .keyword_limit;
-    if (eqlIgnoreCase(text, "offset")) return .keyword_offset;
-    if (eqlIgnoreCase(text, "delete")) return .keyword_delete;
-    if (eqlIgnoreCase(text, "update")) return .keyword_update;
-    if (eqlIgnoreCase(text, "set")) return .keyword_set;
-    if (eqlIgnoreCase(text, "group")) return .keyword_group;
-    if (eqlIgnoreCase(text, "having")) return .keyword_having;
-    if (eqlIgnoreCase(text, "join")) return .keyword_join;
-    if (eqlIgnoreCase(text, "inner")) return .keyword_inner;
-    if (eqlIgnoreCase(text, "cross")) return .keyword_cross;
-    if (eqlIgnoreCase(text, "left")) return .keyword_left;
-    if (eqlIgnoreCase(text, "outer")) return .keyword_outer;
-    if (eqlIgnoreCase(text, "on")) return .keyword_on;
-    if (eqlIgnoreCase(text, "union")) return .keyword_union;
-    if (eqlIgnoreCase(text, "all")) return .keyword_all;
-    if (eqlIgnoreCase(text, "intersect")) return .keyword_intersect;
-    if (eqlIgnoreCase(text, "except")) return .keyword_except;
-    if (eqlIgnoreCase(text, "exists")) return .keyword_exists;
-    if (eqlIgnoreCase(text, "cast")) return .keyword_cast;
-    if (eqlIgnoreCase(text, "pragma")) return .keyword_pragma;
-    if (eqlIgnoreCase(text, "begin")) return .keyword_begin;
-    if (eqlIgnoreCase(text, "commit")) return .keyword_commit;
-    if (eqlIgnoreCase(text, "rollback")) return .keyword_rollback;
-    if (eqlIgnoreCase(text, "savepoint")) return .keyword_savepoint;
-    if (eqlIgnoreCase(text, "release")) return .keyword_release;
-    if (eqlIgnoreCase(text, "to")) return .keyword_to;
-    return null;
-}
 
 test "Lexer: SELECT integer" {
     var lx = Lexer.init("SELECT 42;");
