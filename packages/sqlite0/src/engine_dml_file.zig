@@ -113,29 +113,47 @@ fn modifyAllLeaves(db: *Database, t: *Table, table_name: []const u8, op: ModifyO
 }
 
 /// Resolve `root_page` to the list of every leaf page that holds the
-/// table's rows. Depth-0 (leaf root) → `[root]`; depth-1 (interior
-/// root) → all `left_child` pointers + `right_child`. Deeper trees
-/// return `Error.UnsupportedFeature` (B.3 scope).
+/// table's rows. Recursive, supporting any depth produced by Iter26.B.3:
+/// depth-0 (leaf root) → `[root]`; deeper trees descend each interior
+/// child left-to-right (cells then right_child) and recurse.
+///
+/// Interior cells are duped from the page bytes before any recursive
+/// `pager.getPage` because the LRU may evict the original page slice
+/// out from under us.
 fn collectLeafPages(a: std.mem.Allocator, pager: *pager_mod.Pager, root_page: u32) ![]u32 {
-    const root = try pager.getPage(root_page);
-    const header_offset = btree.pageHeaderOffset(root_page);
-    const header = try btree.parsePageHeader(root, header_offset);
+    var result: std.ArrayList(u32) = .empty;
+    try collectLeafPagesRecursive(a, pager, root_page, &result);
+    return result.toOwnedSlice(a);
+}
 
-    return switch (header.page_type) {
-        .leaf_table => blk: {
-            const result = try a.alloc(u32, 1);
-            result[0] = root_page;
-            break :blk result;
+fn collectLeafPagesRecursive(
+    a: std.mem.Allocator,
+    pager: *pager_mod.Pager,
+    page_no: u32,
+    result: *std.ArrayList(u32),
+) !void {
+    const page = try pager.getPage(page_no);
+    const header_offset = btree.pageHeaderOffset(page_no);
+    const header = try btree.parsePageHeader(page, header_offset);
+
+    switch (header.page_type) {
+        .leaf_table => try result.append(a, page_no),
+        .interior_table => {
+            const info = try btree.parseInteriorTablePage(a, page, header_offset);
+            // Snapshot child pointers — the recursive `getPage` calls
+            // below may evict `page`, invalidating `info.cells`'s
+            // backing slice.
+            const left_children = try a.alloc(u32, info.cells.len);
+            for (left_children, info.cells) |*dst, src| dst.* = src.left_child;
+            const right_child = info.right_child;
+
+            for (left_children) |child| {
+                try collectLeafPagesRecursive(a, pager, child, result);
+            }
+            try collectLeafPagesRecursive(a, pager, right_child, result);
         },
-        .interior_table => blk: {
-            const interior = try btree.parseInteriorTablePage(a, root, header_offset);
-            const result = try a.alloc(u32, interior.cells.len + 1);
-            for (interior.cells, 0..) |c, i| result[i] = c.left_child;
-            result[interior.cells.len] = interior.right_child;
-            break :blk result;
-        },
-        else => Error.UnsupportedFeature,
-    };
+        else => return Error.UnsupportedFeature,
+    }
 }
 
 fn modifyOneLeaf(
