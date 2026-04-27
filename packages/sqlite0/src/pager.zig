@@ -40,6 +40,10 @@ pub const CachedPage = struct {
 pub const Pager = struct {
     allocator: std.mem.Allocator,
     fd: std.c.fd_t,
+    /// Path captured at `open()` so checkpoint can reopen the WAL
+    /// sidecar fresh (`<path>-wal`). Owned heap allocation; freed in
+    /// `close()`. Empty for the in-memory test path.
+    path: []const u8 = &.{},
     cache: std.ArrayList(CachedPage) = .empty,
     /// Maximum cache size. Hardcoded for Iter25.A — Phase 4 will surface
     /// a tunable when WAL needs a bigger working set.
@@ -82,9 +86,15 @@ pub const Pager = struct {
             return Error.IoError;
         }
 
+        const path_owned = allocator.dupe(u8, file_path) catch {
+            _ = std.c.flock(fd, std.posix.LOCK.UN);
+            _ = std.c.close(fd);
+            return Error.IoError;
+        };
         return .{
             .allocator = allocator,
             .fd = fd,
+            .path = path_owned,
         };
     }
 
@@ -98,6 +108,10 @@ pub const Pager = struct {
         _ = std.c.flock(self.fd, std.posix.LOCK.UN);
         _ = std.c.close(self.fd);
         self.fd = -1;
+        if (self.path.len > 0) {
+            self.allocator.free(self.path);
+            self.path = &.{};
+        }
     }
 
     /// Re-export of `pager_wal.attachWal` so existing callers

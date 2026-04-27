@@ -40,10 +40,20 @@ run_query_case() {
   local wal_setup="$3"
   total=$((total + 1))
 
-  local fixture="${WORK_DIR}/case-${total}.db"
-  rm -f "$fixture" "${fixture}-journal" "${fixture}-wal" "${fixture}-shm"
+  # Two fixtures so sqlite3 (expected) and sqlite0 (actual) each see
+  # the same starting state. Pre-Iter27.C this used a single fixture
+  # because every QUERY was a pure SELECT; PRAGMA wal_checkpoint
+  # broke that assumption — the expected pass mutates the WAL out
+  # from under the actual pass. Cloning is cheap and removes the
+  # implicit "QUERY must be read-only" rule.
+  local fixture_a="${WORK_DIR}/case-${total}-a.db"
+  local fixture_b="${WORK_DIR}/case-${total}-b.db"
+  rm -f "$fixture_a" "$fixture_b" \
+        "${fixture_a}-journal" "${fixture_b}-journal" \
+        "${fixture_a}-wal" "${fixture_b}-wal" \
+        "${fixture_a}-shm" "${fixture_b}-shm"
 
-  if ! sqlite3 "$fixture" "$setup" 2>/dev/null; then
+  if ! sqlite3 "$fixture_a" "$setup" 2>/dev/null; then
     fail=$((fail + 1))
     fails+=("SETUP failed (case $total): $setup")
     return
@@ -55,16 +65,19 @@ run_query_case() {
   # Without no_ckpt_on_close, sqlite3 truncates -wal to 0 bytes on
   # close and there's nothing for sqlite0 to recover.
   if [[ -n "$wal_setup" ]]; then
-    if ! sqlite3 -cmd '.dbconfig no_ckpt_on_close on' "$fixture" "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; $wal_setup" >/dev/null 2>&1; then
+    if ! sqlite3 -cmd '.dbconfig no_ckpt_on_close on' "$fixture_a" "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; $wal_setup" >/dev/null 2>&1; then
       fail=$((fail + 1))
       fails+=("WAL_SETUP failed (case $total): $wal_setup")
       return
     fi
   fi
+  cp "$fixture_a" "$fixture_b"
+  if [[ -f "${fixture_a}-wal" ]]; then cp "${fixture_a}-wal" "${fixture_b}-wal"; fi
+  if [[ -f "${fixture_a}-shm" ]]; then cp "${fixture_a}-shm" "${fixture_b}-shm"; fi
 
   local expected actual
-  expected="$(sqlite3 "$fixture" "$query" 2>&1)" || expected="<error>"
-  actual="$("$SQLITE0" -file "$fixture" -c "$query" 2>&1)" || actual="<error>"
+  expected="$(sqlite3 "$fixture_b" "$query" 2>&1)" || expected="<error>"
+  actual="$("$SQLITE0" -file "$fixture_a" -c "$query" 2>&1)" || actual="<error>"
 
   if [[ "$expected" == "$actual" ]]; then
     pass=$((pass + 1))

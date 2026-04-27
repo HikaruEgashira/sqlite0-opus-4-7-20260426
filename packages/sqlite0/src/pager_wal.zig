@@ -42,6 +42,7 @@
 
 const std = @import("std");
 const ops = @import("ops.zig");
+const wal = @import("wal.zig");
 const wal_recovery = @import("wal_recovery.zig");
 const wal_writer = @import("wal_writer.zig");
 const pager_mod = @import("pager.zig");
@@ -192,6 +193,113 @@ pub fn commit(self: *pager_mod.Pager, dbsize: u32) Error!void {
     if (dbsize > state.wal_dbsize) state.wal_dbsize = dbsize;
 
     discardStaged(self);
+}
+
+/// Checkpoint mode mirroring sqlite3's `PRAGMA wal_checkpoint(MODE)`.
+/// We collapse RESTART/FULL into TRUNCATE for our single-connection
+/// model — they only differ when concurrent readers might hold a
+/// snapshot, which our exclusive flock rules out. PASSIVE backfills
+/// without resetting the WAL file; TRUNCATE backfills and resets.
+pub const CheckpointMode = enum { passive, truncate };
+
+/// Three-tuple sqlite3 returns from `PRAGMA wal_checkpoint`.
+///   - `busy`: 0 success, 1 lock contention (we never report 1)
+///   - `log`: total frames in the WAL file post-call
+///   - `ckpt`: frames backfilled into the main file
+/// On a non-WAL database sqlite3 returns `0|-1|-1`; we mirror that.
+pub const CheckpointResult = struct {
+    busy: i64,
+    log: i64,
+    ckpt: i64,
+};
+
+/// Iter27.C — single-process checkpoint.
+///
+/// Walks `WalState.index` in arbitrary order, reads each indexed
+/// frame's payload from the WAL fd, and pwrites it to the main file
+/// at `(page_no - 1) * PAGE_SIZE`. After all frames are flushed and
+/// fsynced, the main file is truncated to `wal_dbsize` pages.
+///
+/// For `.truncate`, additionally tears down the WAL writer + state
+/// and recreates a fresh WAL (`O_TRUNC` via `wal_writer.create`)
+/// with `checkpoint_seq + 1` — sqlite3 uses this counter to
+/// distinguish reset chains; matching the bump keeps the on-disk
+/// format interoperable.
+///
+/// `.passive` leaves the WAL file untouched after backfill so
+/// existing readers (if any — there aren't, given our flock) keep
+/// observing the same byte stream. The bytes are byte-identical to
+/// the freshly-pwritten main file, so the cache stays correct
+/// without invalidation either way.
+///
+/// Pre-conditions:
+///   - No staged frames (mid-tx checkpoint would lose the batch)
+///
+/// Returns sqlite3-shape `CheckpointResult` so the PRAGMA wrapper
+/// can emit `busy|log|ckpt` directly.
+pub fn checkpoint(self: *pager_mod.Pager, mode: CheckpointMode) Error!CheckpointResult {
+    if (self.wal == null or self.wal_writer == null) {
+        return .{ .busy = 0, .log = -1, .ckpt = -1 };
+    }
+    if (self.staged_frames.items.len > 0) return Error.IoError;
+
+    const state = &self.wal.?;
+    const writer = &self.wal_writer.?;
+
+    // Physical frame count: (next_frame_offset - header) / FRAME_SIZE.
+    // Counts every appended frame regardless of commit status — sqlite3
+    // reports the same. Our defer-all-pwrites model means uncommitted
+    // frames don't exist between transactions, so this also equals the
+    // committed-frame count in the steady state.
+    const log_frames: i64 = @intCast((writer.next_frame_offset - wal.HEADER_SIZE) / wal.FRAME_SIZE);
+
+    var page_buf: [pager_mod.PAGE_SIZE]u8 = undefined;
+    var it = state.index.iterator();
+    while (it.next()) |entry| {
+        const page_no = entry.key_ptr.*;
+        const frame_off = entry.value_ptr.*;
+        const payload_off: std.c.off_t = @intCast(frame_off + wal.FRAME_HEADER_SIZE);
+        const r = std.c.pread(writer.fd, &page_buf, pager_mod.PAGE_SIZE, payload_off);
+        if (r != @as(isize, @intCast(pager_mod.PAGE_SIZE))) return Error.IoError;
+        const main_off: std.c.off_t = @intCast((@as(u64, page_no) - 1) * pager_mod.PAGE_SIZE);
+        const w = std.c.pwrite(self.fd, &page_buf, pager_mod.PAGE_SIZE, main_off);
+        if (w != @as(isize, @intCast(pager_mod.PAGE_SIZE))) return Error.IoError;
+    }
+
+    // Shrink main when the WAL recorded a smaller dbsize (DELETE /
+    // DROP TABLE released tail pages).
+    if (state.wal_dbsize > 0) {
+        const new_main_size: std.c.off_t = @intCast(@as(u64, state.wal_dbsize) * pager_mod.PAGE_SIZE);
+        if (std.c.ftruncate(self.fd, new_main_size) != 0) return Error.IoError;
+    }
+
+    if (std.c.fsync(self.fd) != 0) return Error.IoError;
+
+    if (mode == .passive) {
+        // PASSIVE: WAL stays intact, readers (us) keep the same view.
+        // sqlite3 reports log_size = log_frames, ckpt = log_frames in
+        // the no-contention case.
+        return .{ .busy = 0, .log = log_frames, .ckpt = log_frames };
+    }
+
+    // TRUNCATE path: bump checkpoint_seq, recreate -wal.
+    var seq_buf: [4]u8 = undefined;
+    const sr = std.c.pread(writer.fd, &seq_buf, 4, 12);
+    if (sr != 4) return Error.IoError;
+    const new_seq = wal.readU32BE(&seq_buf) +% 1;
+
+    writer.close();
+    self.wal_writer = null;
+    state.deinit();
+    self.wal = null;
+
+    var new_writer = try wal_writer.create(self.allocator, self.path, new_seq);
+    errdefer new_writer.close();
+    self.wal_writer = new_writer;
+    if (try wal_recovery.openIfPresent(self.allocator, self.path)) |new_state| {
+        self.wal = new_state;
+    }
+    return .{ .busy = 0, .log = 0, .ckpt = 0 };
 }
 
 /// Drop any uncommitted staged frames and free their snapshots.

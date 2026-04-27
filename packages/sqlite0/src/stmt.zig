@@ -476,3 +476,11 @@ fn parseInsertColumnList(p: *Parser) ![][]const u8 {
     }
     return names.toOwnedSlice(p.allocator);
 }
+
+// ── PRAGMA ──────────────────────────────────────────────────────────────────
+// Implementation lives in stmt_pragma.zig; re-exported here for parity
+// with the CREATE TABLE / INSERT split-out pattern.
+
+const stmt_pragma = @import("stmt_pragma.zig");
+pub const ParsedPragma = stmt_pragma.ParsedPragma;
+pub const parsePragmaStatement = stmt_pragma.parsePragmaStatement;

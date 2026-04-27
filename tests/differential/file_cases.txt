@@ -507,3 +507,44 @@ WAL_SETUP: SELECT 1;
 MUTATE: INSERT INTO u VALUES (1, 'first');
 MUTATE2: INSERT INTO u VALUES (2, 'second'); INSERT INTO u VALUES (3, 'third');
 VERIFY: SELECT a, b FROM u ORDER BY a
+
+# Iter27.C — `PRAGMA wal_checkpoint` returns three integers
+# `(busy, log_pages, ckpt_pages)`. Empty/uninitialised WAL on a
+# delete-mode DB → `0|-1|-1`. Active WAL → `0|N|N` where N is the
+# physical frame count. TRUNCATE form resets the WAL → `0|0|0`.
+SETUP: CREATE TABLE t(n INTEGER);
+QUERY: PRAGMA wal_checkpoint
+
+# Active WAL with one INSERT — PASSIVE leaves the file alone, returns
+# 0|1|1.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1);
+QUERY: PRAGMA wal_checkpoint
+
+# Multiple frames + PASSIVE: returns 0|2|2.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);
+QUERY: PRAGMA wal_checkpoint(PASSIVE)
+
+# TRUNCATE on a populated WAL: returns 0|0|0 (file shrunk back to
+# header). The post-state -wal sidecar is just 32 bytes.
+SETUP: CREATE TABLE t(n INTEGER);
+WAL_SETUP: INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);
+QUERY: PRAGMA wal_checkpoint(TRUNCATE)
+
+# Post-checkpoint readability — the discriminating test the advisor
+# flagged. PRAGMA reset state must leave the database queryable in
+# the same process: cache entries match the freshly-truncated main
+# file, WalState reset to empty, future reads pull from main. A bug
+# in cache invalidation, ftruncate sizing, or the new-WAL re-attach
+# would surface here as missing rows or stale bytes.
+SETUP: CREATE TABLE t(n);
+WAL_SETUP: INSERT INTO t VALUES (1), (2);
+QUERY: PRAGMA wal_checkpoint(TRUNCATE); SELECT n FROM t ORDER BY n
+
+# Same shape with PASSIVE — WAL stays intact, post-checkpoint reads
+# go through the unchanged WAL index. Catches PASSIVE-specific
+# regressions (e.g. accidentally clearing state.index).
+SETUP: CREATE TABLE t(n);
+WAL_SETUP: INSERT INTO t VALUES (1), (2);
+QUERY: PRAGMA wal_checkpoint(PASSIVE); SELECT n FROM t ORDER BY n
