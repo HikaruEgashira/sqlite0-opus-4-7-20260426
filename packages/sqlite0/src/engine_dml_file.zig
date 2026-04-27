@@ -32,35 +32,37 @@ const Database = database.Database;
 const Table = database.Table;
 const Error = ops.Error;
 
-/// File-mode DELETE (Iter26.A.2.a / .B.2.b): walk every leaf page of
-/// the table, decode each row, evaluate the WHERE predicate, then
-/// rebuild each leaf in place from the survivors.
+/// File-mode DELETE (Iter26.A.2.a / .B.2.b / .B.3.d): walk every leaf
+/// page of the table at any depth, decode each row, evaluate the
+/// WHERE predicate, then rebuild each leaf in place from the
+/// survivors.
 ///
 /// Restrictions:
-///   - depth-1 max (leaf root or interior root → leaves). Recursive
-///     interior trees are Iter26.B.3 scope.
-///   - empty leaves left in place: sqlite3 traversal tolerates them
-///     and `PRAGMA integrity_check` accepts them, so the harness
-///     stays "ok" even when DELETE wipes a leaf clean. Reclaiming
-///     the now-empty page (re-balancing the B-tree) is a future
-///     iteration.
+///   - empty leaves are left in place. sqlite3 only tolerates an
+///     empty leaf when its parent is the **root** (the spec calls
+///     this out: "only possible for a root page of a table that
+///     contains no rows"). At depth ≥ 2 sqlite3 raises
+///     `SQLITE_CORRUPT` if it descends into a leaf with cell_count=0.
+///     Callers that DELETE/UPDATE on a depth ≥ 2 tree must avoid
+///     wiping any single leaf clean — proper underfull rebalance
+///     (analogous to sqlite3's `balance_quick`) is a future iteration.
 pub fn executeDeleteFile(db: *Database, t: *Table, parsed: stmt_dml.ParsedDelete) !u64 {
     const op: ModifyOp = .{ .delete = .{ .where = parsed.where } };
     return modifyAllLeaves(db, t, parsed.table, op);
 }
 
-/// File-mode UPDATE (Iter26.A.2.b / .B.2.b): same per-leaf shape as
-/// DELETE — walk leaves, decode + evaluate + re-encode matched rows,
-/// rebuild each leaf. Stricter all-or-nothing than the in-memory
-/// path (per-row commit isn't possible without a freeblock chain).
+/// File-mode UPDATE (Iter26.A.2.b / .B.2.b / .B.3.d): same per-leaf
+/// shape as DELETE — walk leaves at any depth, decode + evaluate +
+/// re-encode matched rows, rebuild each leaf. Stricter all-or-nothing
+/// than the in-memory path (per-row commit isn't possible without a
+/// freeblock chain).
 ///
 /// Restrictions: same as DELETE plus
-///   - new record bytes must fit (`≤ usable_size − 35` each); larger
-///     records return `Error.IoError` from rebuildLeafTablePage.
 ///   - per-leaf size growth that would force a leaf split is not
 ///     handled — `rebuildLeafTablePage` returns IoError when the new
 ///     cell content exceeds the usable area. UPDATE-driven splits
-///     are out of B.2.b scope.
+///     are deferred (would need to integrate with the spine walker
+///     in `engine_dml_insert_file`).
 pub fn executeUpdateFile(
     db: *Database,
     t: *Table,
