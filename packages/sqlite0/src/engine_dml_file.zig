@@ -32,32 +32,35 @@ const Database = database.Database;
 const Table = database.Table;
 const Error = ops.Error;
 
-/// File-mode DELETE (Iter26.A.2.a / .B.2.b / .B.3.d): walk every leaf
-/// page of the table at any depth, decode each row, evaluate the
-/// WHERE predicate, then rebuild each leaf in place from the
-/// survivors.
+/// File-mode DELETE (Iter26.A.2.a / .B.2.b / .B.3.d / .B.3.f): walk
+/// every leaf page of the table at any depth, decode each row,
+/// evaluate the WHERE predicate, then rebuild each leaf in place from
+/// the survivors.
 ///
 /// Restrictions:
-///   - empty leaves are left in place. sqlite3 only tolerates an
-///     empty leaf when its parent is the **root** (the spec calls
-///     this out: "only possible for a root page of a table that
-///     contains no rows"). At depth ≥ 2 sqlite3 raises
-///     `SQLITE_CORRUPT` if it descends into a leaf with cell_count=0.
-///     Callers that DELETE/UPDATE on a depth ≥ 2 tree must avoid
-///     wiping any single leaf clean — proper underfull rebalance
-///     (analogous to sqlite3's `balance_quick`) is a future iteration.
+///   - empty leaves are rejected at depth ≥ 2. sqlite3 only tolerates
+///     an empty leaf when its parent is the **root** ("only possible
+///     for a root page of a table that contains no rows"); at deeper
+///     depths sqlite3 raises `SQLITE_CORRUPT` reading the file. Until
+///     proper underfull rebalance (analogous to sqlite3's
+///     `balance_quick`) lands, a DELETE that would empty any single
+///     leaf returns `Error.UnsupportedFeature` BEFORE writing — the
+///     on-disk file is left intact rather than silently corrupted.
 pub fn executeDeleteFile(db: *Database, t: *Table, parsed: stmt_dml.ParsedDelete) !u64 {
     const op: ModifyOp = .{ .delete = .{ .where = parsed.where } };
     return modifyAllLeaves(db, t, parsed.table, op);
 }
 
-/// File-mode UPDATE (Iter26.A.2.b / .B.2.b / .B.3.d): same per-leaf
-/// shape as DELETE — walk leaves at any depth, decode + evaluate +
-/// re-encode matched rows, rebuild each leaf. Stricter all-or-nothing
-/// than the in-memory path (per-row commit isn't possible without a
-/// freeblock chain).
+/// File-mode UPDATE (Iter26.A.2.b / .B.2.b / .B.3.d / .B.3.f): same
+/// per-leaf shape as DELETE — walk leaves at any depth, decode +
+/// evaluate + re-encode matched rows, rebuild each leaf. Stricter
+/// all-or-nothing than the in-memory path (per-row commit isn't
+/// possible without a freeblock chain).
 ///
-/// Restrictions: same as DELETE plus
+/// Restrictions:
+///   - same empty-leaf-at-depth-≥-2 rejection as DELETE (UPDATE never
+///     drops cells, so this only trips when a future code path adds
+///     conditional-delete semantics).
 ///   - per-leaf size growth that would force a leaf split is not
 ///     handled — `rebuildLeafTablePage` returns IoError when the new
 ///     cell content exceeds the usable area. UPDATE-driven splits
@@ -104,15 +107,25 @@ fn modifyAllLeaves(db: *Database, t: *Table, table_name: []const u8, op: ModifyO
     const dml_qualifiers = try a.alloc([]const u8, t.columns.len);
     for (dml_qualifiers) |*q| q.* = table_name;
 
-    const leaf_pages = try collectLeafPages(a, pager, t.root_page);
+    const leaves = try collectLeafPages(a, pager, t.root_page);
 
     var total: u64 = 0;
-    for (leaf_pages) |page_no| {
+    for (leaves.pages) |page_no| {
         const header_offset = btree.pageHeaderOffset(page_no);
-        total += try modifyOneLeaf(a, db, pager, t, op, dml_qualifiers, page_no, header_offset, usable_size);
+        total += try modifyOneLeaf(a, db, pager, t, op, dml_qualifiers, page_no, header_offset, usable_size, leaves.tree_is_deep);
     }
     return total;
 }
+
+/// Result of leaf collection. `tree_is_deep` is set when at least one
+/// leaf sits below an interior page that is NOT the root — i.e. the
+/// tree has ≥ 3 levels (root → interior → leaf). The flag drives the
+/// fail-loud guard in `modifyOneLeaf`: empty leaves are spec-legal at
+/// depth-1 (root is the parent) but corrupt the file at depth ≥ 2.
+const LeafCollection = struct {
+    pages: []u32,
+    tree_is_deep: bool,
+};
 
 /// Resolve `root_page` to the list of every leaf page that holds the
 /// table's rows. Recursive, supporting any depth produced by Iter26.B.3:
@@ -122,24 +135,33 @@ fn modifyAllLeaves(db: *Database, t: *Table, table_name: []const u8, op: ModifyO
 /// Interior cells are duped from the page bytes before any recursive
 /// `pager.getPage` because the LRU may evict the original page slice
 /// out from under us.
-fn collectLeafPages(a: std.mem.Allocator, pager: *pager_mod.Pager, root_page: u32) ![]u32 {
-    var result: std.ArrayList(u32) = .empty;
-    try collectLeafPagesRecursive(a, pager, root_page, &result);
-    return result.toOwnedSlice(a);
+fn collectLeafPages(a: std.mem.Allocator, pager: *pager_mod.Pager, root_page: u32) !LeafCollection {
+    var pages: std.ArrayList(u32) = .empty;
+    var tree_is_deep = false;
+    try collectLeafPagesRecursive(a, pager, root_page, 0, &pages, &tree_is_deep);
+    return .{
+        .pages = try pages.toOwnedSlice(a),
+        .tree_is_deep = tree_is_deep,
+    };
 }
 
 fn collectLeafPagesRecursive(
     a: std.mem.Allocator,
     pager: *pager_mod.Pager,
     page_no: u32,
-    result: *std.ArrayList(u32),
+    depth_from_root: u32,
+    pages: *std.ArrayList(u32),
+    tree_is_deep: *bool,
 ) !void {
     const page = try pager.getPage(page_no);
     const header_offset = btree.pageHeaderOffset(page_no);
     const header = try btree.parsePageHeader(page, header_offset);
 
     switch (header.page_type) {
-        .leaf_table => try result.append(a, page_no),
+        .leaf_table => {
+            try pages.append(a, page_no);
+            if (depth_from_root >= 2) tree_is_deep.* = true;
+        },
         .interior_table => {
             const info = try btree.parseInteriorTablePage(a, page, header_offset);
             // Snapshot child pointers — the recursive `getPage` calls
@@ -150,9 +172,9 @@ fn collectLeafPagesRecursive(
             const right_child = info.right_child;
 
             for (left_children) |child| {
-                try collectLeafPagesRecursive(a, pager, child, result);
+                try collectLeafPagesRecursive(a, pager, child, depth_from_root + 1, pages, tree_is_deep);
             }
-            try collectLeafPagesRecursive(a, pager, right_child, result);
+            try collectLeafPagesRecursive(a, pager, right_child, depth_from_root + 1, pages, tree_is_deep);
         },
         else => return Error.UnsupportedFeature,
     }
@@ -168,6 +190,7 @@ fn modifyOneLeaf(
     page_no: u32,
     header_offset: usize,
     usable_size: usize,
+    tree_is_deep: bool,
 ) !u64 {
     const original = try pager.getPage(page_no);
     const work = try a.alloc(u8, original.len);
@@ -259,6 +282,14 @@ fn modifyOneLeaf(
             },
         }
     }
+
+    // Fail-loud guard (Iter26.B.3.f): emptying a leaf at depth ≥ 2
+    // produces a sqlite3-malformed file (spec only allows empty leaves
+    // when the parent is the root). Refuse BEFORE any write so the
+    // on-disk file stays intact. Proper underfull rebalance is a
+    // future iteration; until then this surfaces the gap explicitly
+    // rather than silently corrupting.
+    if (tree_is_deep and rebuilt.items.len == 0) return Error.UnsupportedFeature;
 
     try btree_insert.rebuildLeafTablePage(work, header_offset, usable_size, rebuilt.items);
     try pager.writePage(page_no, work);
