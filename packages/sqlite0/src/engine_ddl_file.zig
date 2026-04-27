@@ -34,6 +34,17 @@ pub const Error = ops.Error;
 pub fn executeCreateTableFile(db: *database.Database, parsed: stmt_mod.ParsedCreateTable) !void {
     const pager = if (db.pager) |*pp| pp else return Error.IoError;
 
+    // Pre-check: reject invalid CREATE TABLE BEFORE any pager mutation.
+    // Without this, allocate/writePage/appendSchemaRow run to completion
+    // and only step 4 (`registerTable`) catches the conflict — at which
+    // point page 1 already has a second sqlite_schema entry, which
+    // sqlite3 then refuses to open with "malformed database schema".
+    // Covers all three of registerTable's pre-mutation invariants:
+    //   - duplicate table name (e.g. `CREATE TABLE sqlite_schema(x);`)
+    //   - duplicate column name (e.g. `CREATE TABLE u(a, A);`)
+    //   - multiple INTEGER PRIMARY KEY columns
+    try db.validateNewTable(parsed);
+
     // Step 1: allocate the root page for the new table.
     const root_page = try pager.allocatePage();
 

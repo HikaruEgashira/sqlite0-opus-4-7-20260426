@@ -706,3 +706,41 @@ SETUP: CREATE TABLE t(n INTEGER);
 WAL_SETUP: SELECT 1;
 MUTATE: BEGIN; SAVEPOINT s1; RELEASE s1; INSERT INTO t VALUES (1); COMMIT;
 VERIFY: SELECT n FROM t
+
+# Iter29.A — sqlite_schema queryable. The synthetic registration in
+# `schema.loadFromPager` aliases page 1's sqlite_schema btree so
+# `SELECT ... FROM sqlite_schema` routes through BtreeCursor at
+# root_page=1. Returns the same 5 columns sqlite3 exposes: type,
+# name, tbl_name, rootpage, sql.
+SETUP: CREATE TABLE alpha(a, b); CREATE TABLE beta(x INTEGER PRIMARY KEY, y);
+QUERY: SELECT type, name FROM sqlite_schema ORDER BY name
+
+# sqlite_master alias (the legacy name; sqlite3 still accepts both).
+SETUP: CREATE TABLE alpha(a, b); CREATE TABLE beta(x);
+QUERY: SELECT name FROM sqlite_master WHERE type='table' ORDER BY name
+
+# SELECT * on sqlite_schema — exposes all 5 columns including the raw
+# CREATE TABLE source text in the sql column. Discriminating: byte-
+# identical sql strings only land if our schema scanner preserved the
+# original source through the page 1 record (i.e. no CREATE statement
+# normalisation happened on the way in).
+SETUP: CREATE TABLE alpha(a, b);
+QUERY: SELECT * FROM sqlite_schema
+
+# WHERE filter against type column.
+SETUP: CREATE TABLE alpha(a); CREATE TABLE beta(b);
+QUERY: SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name
+
+# count(*) on sqlite_schema — table count.
+SETUP: CREATE TABLE alpha(a); CREATE TABLE beta(b); CREATE TABLE gamma(c);
+QUERY: SELECT count(*) FROM sqlite_schema
+
+# WAL-mode sqlite_schema query. Verifies that the synthetic
+# registration in `schema.loadFromPager` works regardless of journal
+# mode — page 1's btree is read through BtreeCursor either way, and
+# WAL frames for newer schema rows must surface in the cursor too.
+# Discriminates: any code that special-cased rollback-mode at the
+# scanner layer would diverge here.
+SETUP: CREATE TABLE alpha(a, b);
+WAL_SETUP: CREATE TABLE delta(d INTEGER PRIMARY KEY, e);
+QUERY: SELECT type, name FROM sqlite_schema ORDER BY name

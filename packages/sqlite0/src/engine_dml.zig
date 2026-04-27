@@ -38,6 +38,7 @@ const Error = ops.Error;
 /// failures leave the table unchanged (all-or-nothing — ADR-0003 §1).
 pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedDelete) !u64 {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
+    if (t.is_system) return Error.UnsupportedFeature; // Iter29.A
     // File-mode tables (root_page != 0) take the Pager + rebuild-page
     // path. The fork lives here so engine.dispatchOne stays oblivious
     // to backend choice — same shape as executeInsert.
@@ -108,6 +109,7 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
 /// matching sqlite3's per-row UPDATE behavior, not per-statement).
 pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedUpdate) !u64 {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
+    if (t.is_system) return Error.UnsupportedFeature; // Iter29.A
 
     // Resolve column indices once (validation precedes mutation per ADR-0003).
     const indices = try arena.alloc(usize, parsed.assignments.len);
@@ -176,6 +178,10 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
 /// rows are appended (validation precedes mutation).
 pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.ParsedInsert) !u64 {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
+    // Iter29.A — sqlite_schema / sqlite_master are engine-managed.
+    // Direct SQL mutation would corrupt page 1 (silent corruption);
+    // sqlite3 rejects with "table sqlite_master may not be modified".
+    if (t.is_system) return Error.UnsupportedFeature;
 
     const source_rows: [][]Value = switch (parsed.source) {
         .values => |rows| rows,

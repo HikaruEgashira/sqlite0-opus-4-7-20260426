@@ -55,6 +55,13 @@ pub fn validateFileHeader(page1: []const u8) Error!void {
 ///
 /// Skips type='index'/'view'/'trigger' silently. Iter25 doesn't support
 /// indexes; views/triggers are deferred indefinitely.
+///
+/// Iter29.A: after the walker, register synthetic `sqlite_schema` /
+/// `sqlite_master` aliases that point to root_page=1 with the canonical
+/// 5-column layout. This makes `SELECT * FROM sqlite_schema` route
+/// through the existing BtreeCursor read path — `.tables` / `.schema`
+/// then reduce to SQL aliases (sqlite3 CLI itself uses sqlite_schema
+/// internally for both).
 pub fn loadFromPager(db: *database.Database, p: *pager_mod.Pager) Error!void {
     // Pre-flight: confirm this is a sqlite3 file at all.
     const page1 = try p.getPage(1);
@@ -86,6 +93,32 @@ pub fn loadFromPager(db: *database.Database, p: *pager_mod.Pager) Error!void {
             try registerCell(db, a, full);
         }
     }
+
+    try registerSyntheticSchemaTable(db, "sqlite_schema");
+    try registerSyntheticSchemaTable(db, "sqlite_master");
+}
+
+/// Iter29.A — register a synthetic table that aliases page 1's
+/// sqlite_schema btree, exposing the 5 canonical columns. Read paths
+/// (`engine_from.resolveSource`) will pick `BtreeCursor` because
+/// `root_page == 1`. DML routes through `engine_dml_*_file` which
+/// reject root_page=1 mutation (sqlite_schema is owned by the engine,
+/// not the SQL surface — sqlite3 also forbids direct INSERT/UPDATE/
+/// DELETE).
+fn registerSyntheticSchemaTable(db: *database.Database, name: []const u8) Error!void {
+    const lower = try database.lowerCaseDupe(db.allocator, name);
+    errdefer db.allocator.free(lower);
+    const col_names = [_][]const u8{ "type", "name", "tbl_name", "rootpage", "sql" };
+    const cols = try db.allocator.alloc([]const u8, col_names.len);
+    var produced: usize = 0;
+    errdefer {
+        for (cols[0..produced]) |c| db.allocator.free(c);
+        db.allocator.free(cols);
+    }
+    while (produced < col_names.len) : (produced += 1) {
+        cols[produced] = try db.allocator.dupe(u8, col_names[produced]);
+    }
+    try db.tables.put(db.allocator, lower, .{ .columns = cols, .root_page = 1, .is_system = true });
 }
 
 fn registerCell(
@@ -362,7 +395,11 @@ test "loadFromPager: skips type='index' rows" {
 
     try testing.expect(db.tables.getPtr("u") != null);
     try testing.expect(db.tables.getPtr("i") == null); // index skipped
-    try testing.expectEqual(@as(usize, 1), db.tables.count());
+    // 1 user table + 2 synthetic schema aliases (sqlite_schema, sqlite_master)
+    // registered by Iter29.A.
+    try testing.expectEqual(@as(usize, 3), db.tables.count());
+    try testing.expect(db.tables.getPtr("sqlite_schema") != null);
+    try testing.expect(db.tables.getPtr("sqlite_master") != null);
 }
 
 test "loadFromPager: rejects non-sqlite3 file" {

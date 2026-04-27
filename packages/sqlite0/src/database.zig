@@ -74,6 +74,13 @@ pub const Table = struct {
     /// At most one IPK per table — sqlite3 enforces this at parse time;
     /// `registerTable` mirrors the rule with `Error.SyntaxError`.
     ipk_column: ?usize = null,
+    /// Iter29.A — true for engine-managed tables that the SQL surface
+    /// must NOT mutate via INSERT/UPDATE/DELETE. Currently set on the
+    /// synthetic `sqlite_schema` / `sqlite_master` aliases registered
+    /// against root_page=1; without the flag a user `INSERT INTO
+    /// sqlite_schema` would silently corrupt page 1 (sqlite3 rejects
+    /// with "table sqlite_master may not be modified" — we mirror).
+    is_system: bool = false,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         for (self.rows.items) |row| {
@@ -242,6 +249,54 @@ pub const Database = struct {
         }
 
         try self.tables.put(self.allocator, key, .{ .columns = cols, .ipk_column = ipk });
+    }
+
+    /// Run `registerTable`'s pre-mutation invariants (table-name conflict,
+    /// duplicate column names, multiple INTEGER PRIMARY KEY) WITHOUT
+    /// allocating anything that escapes the function. Used by
+    /// `engine_ddl_file.executeCreateTableFile` to reject invalid CREATE
+    /// TABLE statements BEFORE any pager mutation runs — the on-disk DDL
+    /// path otherwise allocates a root page, writes its header, and
+    /// appends a sqlite_schema row before reaching `registerTable`,
+    /// leaving page 1 with an orphan schema entry that sqlite3 then
+    /// refuses to open ("malformed database schema"). Mirrors the same
+    /// errors `registerTable` would return on the same inputs.
+    pub fn validateNewTable(self: *Database, parsed: stmt_mod.ParsedCreateTable) Error!void {
+        const key = try lowerCaseDupe(self.allocator, parsed.name);
+        defer self.allocator.free(key);
+        if (self.tables.contains(key)) return Error.TableAlreadyExists;
+
+        // Multi-IPK check first — pure scan, no allocations to unwind on
+        // the failure path.
+        var ipk_count: usize = 0;
+        for (parsed.columns) |c| {
+            if (c.is_ipk) {
+                ipk_count += 1;
+                if (ipk_count > 1) return Error.SyntaxError;
+            }
+        }
+
+        // Duplicate-column-name check — needs case-insensitive
+        // comparison so allocate a lowered copy per column. The defer
+        // frees only fully-stored slots (produced exclusive); on
+        // mid-iteration reject we free the just-allocated `lcol`
+        // explicitly before returning.
+        var lowered = try self.allocator.alloc([]u8, parsed.columns.len);
+        var produced: usize = 0;
+        defer {
+            for (lowered[0..produced]) |l| self.allocator.free(l);
+            self.allocator.free(lowered);
+        }
+        while (produced < parsed.columns.len) : (produced += 1) {
+            const lcol = try lowerCaseDupe(self.allocator, parsed.columns[produced].name);
+            for (lowered[0..produced]) |existing| {
+                if (std.mem.eql(u8, existing, lcol)) {
+                    self.allocator.free(lcol);
+                    return Error.DuplicateColumnName;
+                }
+            }
+            lowered[produced] = lcol;
+        }
     }
 
     /// Execute `sql` (one or more `;`-separated statements) against `self`.
