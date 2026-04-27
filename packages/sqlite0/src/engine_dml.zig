@@ -25,6 +25,7 @@ const database = @import("database.zig");
 const engine = @import("engine.zig");
 const func_util = @import("func_util.zig");
 const engine_dml_file = @import("engine_dml_file.zig");
+const engine_dml_insert_file = @import("engine_dml_insert_file.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -192,7 +193,7 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     // append behaviour. The dispatch lives here so the caller-side
     // (engine.dispatchOne) doesn't need to know about the backend.
     if (t.root_page != 0) {
-        return engine_dml_file.executeInsertFile(db, t, target_indices, source_rows);
+        return engine_dml_insert_file.executeInsertFile(db, t, target_indices, source_rows);
     }
 
     try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);

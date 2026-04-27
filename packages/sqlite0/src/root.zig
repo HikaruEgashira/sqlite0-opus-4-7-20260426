@@ -33,6 +33,7 @@ pub const engine_from = @import("engine_from.zig");
 pub const engine_setop = @import("engine_setop.zig");
 pub const engine_dml = @import("engine_dml.zig");
 pub const engine_dml_file = @import("engine_dml_file.zig");
+pub const engine_dml_insert_file = @import("engine_dml_insert_file.zig");
 pub const engine_ddl_file = @import("engine_ddl_file.zig");
 pub const cursor = @import("cursor.zig");
 pub const pager = @import("pager.zig");
