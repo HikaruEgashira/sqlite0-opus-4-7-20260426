@@ -30,7 +30,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter22.C: `IN (SELECT ...)` / `EXISTS (SELECT ...)` (空→ left 無視 0 / NULL 三値論理 / EXISTS は column-count 無視; `applyIn` の empty 早期 0 化は既存 `NULL IN ()` バグの修正も兼ねる)
 - [x] Iter22.D: correlated subqueries (`EvalContext.outer_frames` を 14 EvalContext サイトに通す + DML EvalContext に `column_qualifiers = [table_name]` を植える + `eval_column.evalColumnRef` が innermost-out フォールバック; correlated `EXISTS` / `IN (SELECT)` / scalar in SELECT-list を sqlite3 互換で実装。FROM-clause subquery の correlation は対象外)
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
-- [ ] strftime の `'+N days'` 等の date math modifier
+- [x] strftime の `'+N days'` 等の date math modifier (`±N <unit>` の seconds/minutes/hours/days/months/years; `start of day/month/year`; chain対応; sign 任意; sqlite3互換: `+0.5 month`=15日, `+0.1 year`=36.5日, `+1 month` から日 overflow は JD 経由で renormalise)
 - [x] strftime の `%s` (Unix epoch) / `%J` (Julian day) (純粋に DateTime→数値; `{d}` shortest-unique decimal が sqlite3 `%.16g` と一致)
 - [x] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t` → SyntaxError; multi-star は許容; `validateStarExpansion` を `executeOneSelect` に組込み)
 - [x] Iter20 拡張: setop chain での ORDER BY <name> 対応 (leftmost branch の projection を case-insensitive で解決; 任意 expr / 修飾名 / 不明な name は SyntaxError; `column1` 合成名は依然 sqlite3 と差異あり)

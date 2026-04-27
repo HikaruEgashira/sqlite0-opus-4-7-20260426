@@ -1,12 +1,12 @@
-//! `strftime(fmt, datestr, ...)` — sqlite3-compatible date/time formatter
-//! (subset).
+//! `strftime(fmt, datestr, [modifier]*)` — sqlite3-compatible date/time
+//! formatter (subset).
 //!
-//! Scope of this module: parse a date string, validate, then format. The
-//! special time-string `'now'` and modifiers like `'+N days'` need access to
-//! the current wall-clock time, which Zig 0.16.0 routes through `std.Io`.
-//! Threading `std.Io` through the function dispatch ABI is a separate
-//! refactor; until then `'now'` returns NULL (mirroring how sqlite3 returns
-//! NULL for invalid time strings).
+//! Scope of this module: parse a date string, apply zero or more modifiers,
+//! then format. The special time-string `'now'` needs access to the current
+//! wall-clock time, which Zig 0.16.0 routes through `std.Io`. Threading
+//! `std.Io` through the function dispatch ABI is a separate refactor; until
+//! then `'now'` returns NULL (mirroring how sqlite3 returns NULL for
+//! invalid time strings).
 //!
 //! Supported format specifiers: %Y %m %d %H %M %S %j %w %s %J %%.
 //! Encountering an unsupported spec letter returns NULL — that's what
@@ -20,8 +20,18 @@
 //!   `YYYY-MM-DD HH:MM:SS`
 //!   `YYYY-MM-DDTHH:MM:SS`
 //!
-//! Invalid dates (out-of-range month/day, malformed input) return NULL —
-//! sqlite3 also returns NULL (rendered as empty in the CLI).
+//! Modifiers (per-arg, applied left-to-right):
+//!   `'±N <unit>'` where unit ∈ {seconds, minutes, hours, days, months, years}
+//!   `'start of day'` / `'start of month'` / `'start of year'`
+//!   N may be fractional (`'+1.5 days'`); singular/plural unit forms accepted.
+//!   day/hour/minute/second deltas update the Julian-day float directly so
+//!   overflow propagates (e.g. `+90 minutes` from 12:00 → 13:30, `+25 hours`
+//!   crosses midnight). month/year deltas adjust the year/month fields then
+//!   round-trip through Julian day, so day overflow renormalises the way
+//!   sqlite3 does (`'2024-01-31' + 1 month` → `'2024-03-02'`).
+//!
+//! Invalid dates, unknown/malformed modifiers, NULL input → NULL (sqlite3
+//! parity, rendered as empty in the CLI).
 
 const std = @import("std");
 const util = @import("func_util.zig");
@@ -32,10 +42,6 @@ const Error = util.Error;
 
 pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     if (args.len < 2) return Error.WrongArgumentCount;
-    // Modifiers (args[2..]) are not implemented yet; treat presence of any
-    // modifier as "unsupported" → NULL (sqlite3 returns NULL for many invalid
-    // modifier combinations).
-    if (args.len > 2) return Value.null;
 
     const fmt = switch (args[0]) {
         .null => return Value.null,
@@ -50,7 +56,16 @@ pub fn fnStrftime(allocator: std.mem.Allocator, args: []const Value) Error!Value
         else => return Value.null,
     };
 
-    const dt = parseDateTime(datestr) orelse return Value.null;
+    var dt = parseDateTime(datestr) orelse return Value.null;
+    for (args[2..]) |mod_arg| {
+        const mod_str = switch (mod_arg) {
+            .null => return Value.null,
+            .text => |t| t,
+            .blob => |b| b,
+            else => return Value.null,
+        };
+        dt = applyModifier(dt, mod_str) orelse return Value.null;
+    }
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -205,6 +220,211 @@ fn writeI64(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: i64) !
     var buf: [32]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
     try out.appendSlice(allocator, s);
+}
+
+/// Apply one modifier to `dt`. Returns null on parse failure, unknown
+/// modifier, or post-application out-of-range date — the caller propagates
+/// that as NULL (sqlite3 parity). sqlite3 is whitespace-strict: leading or
+/// trailing space on the modifier string fails to parse.
+fn applyModifier(dt: DateTime, mod: []const u8) ?DateTime {
+    if (mod.len == 0) return null;
+
+    if (matchPrefixIgnoreCase(mod, "start of ")) |rest| {
+        return applyStartOf(dt, rest);
+    }
+
+    return applyDelta(dt, mod);
+}
+
+fn applyStartOf(dt: DateTime, scope: []const u8) ?DateTime {
+    if (eqlIgnoreCase(scope, "day")) {
+        return DateTime{ .year = dt.year, .month = dt.month, .day = dt.day };
+    }
+    if (eqlIgnoreCase(scope, "month")) {
+        return DateTime{ .year = dt.year, .month = dt.month, .day = 1 };
+    }
+    if (eqlIgnoreCase(scope, "year")) {
+        return DateTime{ .year = dt.year, .month = 1, .day = 1 };
+    }
+    return null;
+}
+
+fn applyDelta(dt: DateTime, mod: []const u8) ?DateTime {
+    // Expect `<sign>?<number> <unit>`. Sign is optional (default positive,
+    // matching sqlite3: `'1 day'` works the same as `'+1 day'`). Internal
+    // multi-space between number and unit is tolerated, but leading or
+    // trailing whitespace fails — sqlite3 rejects ` +1 day` and `+1 day `.
+    var idx: usize = 0;
+    var sign: f64 = 1.0;
+    if (mod[0] == '+') {
+        idx = 1;
+    } else if (mod[0] == '-') {
+        sign = -1.0;
+        idx = 1;
+    }
+    const num_start = idx;
+    while (idx < mod.len and mod[idx] != ' ') : (idx += 1) {
+        const c = mod[idx];
+        if (!((c >= '0' and c <= '9') or c == '.')) return null;
+    }
+    const num_str = mod[num_start..idx];
+    if (num_str.len == 0) return null;
+    if (idx >= mod.len) return null; // missing unit
+    // Skip the separator space(s); reject any trailing space after the unit.
+    while (idx < mod.len and mod[idx] == ' ') : (idx += 1) {}
+    const unit = mod[idx..];
+    if (unit.len == 0) return null;
+    if (unit[unit.len - 1] == ' ') return null;
+    const magnitude = std.fmt.parseFloat(f64, num_str) catch return null;
+    const delta = sign * magnitude;
+
+    // Days/hours/minutes/seconds modify the JD float directly so overflow
+    // crosses date boundaries naturally. Months/years adjust year/month
+    // fields then round-trip through JD to renormalise day overflow
+    // (`'2024-01-31' + 1 month'` → `'2024-03-02'`, matching sqlite3).
+    const day_offset_opt: ?f64 = switch (unitClass(unit)) {
+        .second => delta / 86400.0,
+        .minute => delta / 1440.0,
+        .hour => delta / 24.0,
+        .day => delta,
+        .month, .year, .unknown => null,
+    };
+    if (day_offset_opt) |off| {
+        const jd = dateTimeToJulianFloat(dt) + off;
+        return julianFloatToDateTime(jd);
+    }
+
+    const u = unitClass(unit);
+    if (u == .unknown) return null;
+
+    // Month/year deltas split into an integer field bump (calendar-aware) and
+    // a fractional days carry (sqlite3 quirk: `+0.5 month` = +15 days, not
+    // "half a calendar month"; `+0.1 year` = +36.5 days). Trunc toward zero
+    // keeps the negative case symmetric (`-1.5 month` = -1 month - 15 days).
+    const trunc_part = @trunc(delta);
+    const frac_part = delta - trunc_part;
+    const int_delta: i32 = @intFromFloat(trunc_part);
+    var year: i32 = dt.year;
+    var month: i32 = dt.month;
+    var frac_days: f64 = 0;
+    switch (u) {
+        .month => {
+            month += int_delta;
+            frac_days = frac_part * 30.0;
+        },
+        .year => {
+            year += int_delta;
+            frac_days = frac_part * 365.0;
+        },
+        else => unreachable,
+    }
+    // Normalise month into 1..=12 and carry into year.
+    while (month > 12) : (month -= 12) year += 1;
+    while (month < 1) : (month += 12) year -= 1;
+    if (year < 0 or year > 9999) return null;
+    // Round-trip through JD so day-overflow (Feb 30 → Mar 1/2) renormalises,
+    // then layer the fractional-month/year days carry on top.
+    const adjusted = DateTime{
+        .year = @intCast(year),
+        .month = @intCast(month),
+        .day = dt.day,
+        .hour = dt.hour,
+        .minute = dt.minute,
+        .second = dt.second,
+    };
+    const jd = dateTimeToJulianFloat(adjusted) + frac_days;
+    return julianFloatToDateTime(jd);
+}
+
+const UnitClass = enum { second, minute, hour, day, month, year, unknown };
+
+fn unitClass(unit: []const u8) UnitClass {
+    if (eqlIgnoreCase(unit, "second") or eqlIgnoreCase(unit, "seconds")) return .second;
+    if (eqlIgnoreCase(unit, "minute") or eqlIgnoreCase(unit, "minutes")) return .minute;
+    if (eqlIgnoreCase(unit, "hour") or eqlIgnoreCase(unit, "hours")) return .hour;
+    if (eqlIgnoreCase(unit, "day") or eqlIgnoreCase(unit, "days")) return .day;
+    if (eqlIgnoreCase(unit, "month") or eqlIgnoreCase(unit, "months")) return .month;
+    if (eqlIgnoreCase(unit, "year") or eqlIgnoreCase(unit, "years")) return .year;
+    return .unknown;
+}
+
+fn matchPrefixIgnoreCase(s: []const u8, prefix: []const u8) ?[]const u8 {
+    if (s.len < prefix.len) return null;
+    if (!eqlIgnoreCase(s[0..prefix.len], prefix)) return null;
+    return s[prefix.len..];
+}
+
+fn eqlIgnoreCase(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |ca, cb| {
+        if (std.ascii.toLower(ca) != std.ascii.toLower(cb)) return false;
+    }
+    return true;
+}
+
+/// Continuous Julian day (with fractional time-of-day) for `dt`. Mid-day UTC
+/// of JDN N is N exactly; midnight is N - 0.5.
+fn dateTimeToJulianFloat(dt: DateTime) f64 {
+    const jdn = julianDayNumber(dt.year, dt.month, dt.day);
+    const tod_sec: i64 = @as(i64, dt.hour) * 3600 + @as(i64, dt.minute) * 60 + dt.second;
+    return @as(f64, @floatFromInt(jdn)) - 0.5 + @as(f64, @floatFromInt(tod_sec)) / 86400.0;
+}
+
+/// Inverse of `dateTimeToJulianFloat`. Returns null if the resulting year
+/// falls outside the 0..=9999 representable range.
+fn julianFloatToDateTime(jd: f64) ?DateTime {
+    // Convert JD (noon-aligned) → JDN-aligned days starting at midnight.
+    const adj = jd + 0.5;
+    var jdn_floor: i64 = @intFromFloat(@floor(adj));
+    const day_frac = adj - @as(f64, @floatFromInt(jdn_floor));
+    // Round seconds with a half-up rule. If we land exactly on 86400, push
+    // the date forward and reset seconds to 0 — keeps `'+24 hours'` from
+    // producing `24:00:00`.
+    var total_sec: i64 = @intFromFloat(@round(day_frac * 86400.0));
+    if (total_sec >= 86400) {
+        total_sec -= 86400;
+        jdn_floor += 1;
+    } else if (total_sec < 0) {
+        total_sec += 86400;
+        jdn_floor -= 1;
+    }
+    const ymd = jdnToYmd(jdn_floor) orelse return null;
+
+    const hour: i64 = @divTrunc(total_sec, 3600);
+    const minute: i64 = @divTrunc(@mod(total_sec, 3600), 60);
+    const second: i64 = @mod(total_sec, 60);
+
+    return DateTime{
+        .year = ymd.year,
+        .month = ymd.month,
+        .day = ymd.day,
+        .hour = @intCast(hour),
+        .minute = @intCast(minute),
+        .second = @intCast(second),
+    };
+}
+
+const Ymd = struct { year: u16, month: u8, day: u8 };
+
+/// Inverse of `julianDayNumber`. Wikipedia "Calendar date from Julian Day
+/// Number" — exact for any JDN ≥ 0 in the proleptic Gregorian calendar.
+/// Returns null when the recovered year doesn't fit our u16 0..=9999 window.
+fn jdnToYmd(jdn: i64) ?Ymd {
+    const a: i64 = jdn + 32044;
+    const b: i64 = @divTrunc(4 * a + 3, 146097);
+    const c: i64 = a - @divTrunc(146097 * b, 4);
+    const d: i64 = @divTrunc(4 * c + 3, 1461);
+    const e: i64 = c - @divTrunc(1461 * d, 4);
+    const m: i64 = @divTrunc(5 * e + 2, 153);
+
+    const day: i64 = e - @divTrunc(153 * m + 2, 5) + 1;
+    const month: i64 = m + 3 - 12 * @divTrunc(m, 10);
+    const year: i64 = 100 * b + d - 4800 + @divTrunc(m, 10);
+
+    if (year < 0 or year > 9999) return null;
+    if (month < 1 or month > 12) return null;
+    if (day < 1 or day > 31) return null;
+    return Ymd{ .year = @intCast(year), .month = @intCast(month), .day = @intCast(day) };
 }
 
 fn writeZeroPadded(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: u16, width: u8) !void {

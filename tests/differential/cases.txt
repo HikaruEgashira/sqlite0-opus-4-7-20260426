@@ -901,3 +901,44 @@ CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT 1 FROM a19d t, a19d t
 CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT *, * FROM a19d
 # accepted: distinct qualifiers via aliases on same table
 CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT * FROM a19d a, a19d b
+# strftime modifiers (Iter9.D): date math + start-of
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+5 days')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '-5 days')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 12:00:00', '+90 minutes')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 month')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 year')
+SELECT strftime('%Y-%m-%d', '2024-01-15', 'start of month')
+SELECT strftime('%Y-%m-%d', '2024-01-15', 'start of year')
+SELECT strftime('%H:%M:%S', '2024-01-15 12:34:56', 'start of day')
+# day overflow renormalises (Feb is 29 in 2024 → adding 31 days flows into Mar)
+SELECT strftime('%Y-%m-%d', '2024-01-31', '+1 month')
+# chained modifiers (left-to-right)
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 days', '-2 days')
+SELECT strftime('%Y-%m-%d', '2024-01-31', '+1 month', '-1 day')
+# leap-year flow on `+1 year` from Feb 29
+SELECT strftime('%Y-%m-%d', '2024-02-29', '+1 year')
+# midnight crossing on hour/minute deltas
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 23:30:00', '+60 minutes')
+SELECT strftime('%H:%M:%S', '2024-01-15', '+12 hours')
+# fractional day
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1.5 days')
+# year boundary
+SELECT strftime('%Y-%m-%d', '2024-12-31', '+1 day')
+# unknown / NULL / no-sign / surrounding-space modifier semantics
+SELECT strftime('%Y-%m-%d', '2024-01-15', 'invalid modifier')
+SELECT strftime('%Y-%m-%d', '2024-01-15', NULL)
+SELECT strftime('%Y-%m-%d', NULL, '+1 day')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '1 day')
+SELECT strftime('%Y-%m-%d', '2024-01-15', ' +1 day')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 day ')
+# multi-space between number and unit is OK
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1  day')
+# fractional month/year: integer part bumps the field, residue × 30 (or 365) days carries
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+0.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '+1.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '-0.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '-1.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-01 00:00:00', '+0.1 year')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-03-15 00:00:00', '-0.1 year')
+# tiny fractional month → minutes/hours offset
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '+0.001 month')
