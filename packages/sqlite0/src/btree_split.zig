@@ -77,6 +77,27 @@ pub fn splitLeafCells(cells: []const btree_insert.RebuildCell) Error!SplitResult
     };
 }
 
+pub const InteriorFitClass = enum { fits, needs_split };
+
+/// Predicate over a candidate list of interior cells. `fits` means
+/// `writeInteriorTablePage` will succeed at the given header offset and
+/// usable size; `needs_split` means the cell content + pointer array
+/// would not fit. Used by `splitRightmostLeaf` to pre-check the parent
+/// root before committing the child writes — a parent that wouldn't fit
+/// requires recursive interior split (Iter26.B.3).
+pub fn classifyForInterior(
+    cells: []const InteriorCell,
+    header_offset: usize,
+    usable_size: usize,
+) InteriorFitClass {
+    var total: usize = header_offset + 12 + cells.len * 2;
+    for (cells) |c| {
+        total += 4 + record_encode.varintLen(@as(u64, @bitCast(c.key)));
+        if (total > usable_size) return .needs_split;
+    }
+    return .fits;
+}
+
 pub const FitClass = enum { fits, needs_split, oversize_record };
 
 /// Predicate over a candidate list of leaf cells. `fits` means
@@ -218,6 +239,97 @@ pub fn balanceDeeperRoot(
     try pager.writePage(root_page_no, root_buf);
 }
 
+/// Split the rightmost leaf of an interior root (Iter26.B.2). The
+/// monotonic-INSERT path always grows into the rightmost leaf, so this
+/// is the only split shape the B.2 differential surface exercises.
+///
+/// Inputs:
+///   - `root_page_no`: interior root (page 1 rejected — see B.1 doc).
+///   - `old_right_child`: the leaf that currently sits in the parent's
+///     `right_child` slot and is overflowing.
+///   - `parent_cells`: existing interior cells of the parent (sub-slice
+///     borrow OK; copied into the new parent before any pager mutation).
+///   - `all_combined`: rowid-sorted list of every cell that should live
+///     across the two new leaves (= existing right_child cells + new
+///     INSERT rows merged by the caller).
+///
+/// Sequence (parent-last invariant matches B.1):
+///   1. allocate L_new, R_new (bumps page 1 dbsize twice).
+///   2. classifyForInterior on the proposed new parent → if needs_split,
+///      bail with `Error.UnsupportedFeature` (Iter26.B.3 scope). The two
+///      newly-allocated pages stay zeroed and orphaned in this branch;
+///      acceptable for the same reason B.1 accepts orphans.
+///   3. write children: L_new, then R_new.
+///   4. write parent_root LAST (now pointing at L_new + R_new).
+///   5. freePage(old_right_child) — the OLD leaf is now unreachable from
+///      the parent and must enter the freelist or `PRAGMA
+///      integrity_check` would flag it as "never used".
+pub fn splitRightmostLeaf(
+    pager: *pager_mod.Pager,
+    root_page_no: u32,
+    old_right_child: u32,
+    parent_cells: []const InteriorCell,
+    all_combined: []const btree_insert.RebuildCell,
+) Error!void {
+    if (root_page_no == 1) return Error.UnsupportedFeature;
+    if (all_combined.len < 2) return Error.IoError;
+
+    const usable_size = try pager.usableSize();
+    const split = try splitLeafCells(all_combined);
+
+    const allocator = pager.allocator;
+
+    // Allocate the two new leaves up front so we know their page numbers
+    // when we build the new parent. allocatePage's own page-1 mutation
+    // is independent of the parent root we're about to rewrite.
+    const left_page_no = try pager.allocatePage();
+    const right_page_no = try pager.allocatePage();
+
+    // Compose the new parent's interior cell list = old cells +
+    // (left=L_new, key=divider). right_child becomes R_new.
+    const new_parent_cells = try allocator.alloc(InteriorCell, parent_cells.len + 1);
+    defer allocator.free(new_parent_cells);
+    @memcpy(new_parent_cells[0..parent_cells.len], parent_cells);
+    new_parent_cells[parent_cells.len] = .{
+        .left_child = left_page_no,
+        .key = split.divider_key,
+    };
+
+    // Pre-check parent fit. root_page_no != 1 (rejected above) so
+    // header_offset = 0. If the new interior cell would push the parent
+    // past usable_size, this is recursive-interior-split territory
+    // (B.3); fail fast and let the caller surface UnsupportedFeature.
+    if (classifyForInterior(new_parent_cells, 0, usable_size) != .fits) {
+        return Error.UnsupportedFeature;
+    }
+
+    // Build leaf bodies in scratch buffers; rebuildLeafTablePage may
+    // still reject if a single record is oversize, in which case the
+    // newly-allocated pages stay orphaned (acceptable per module doc).
+    const left_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(left_buf);
+    @memset(left_buf, 0);
+    try btree_insert.rebuildLeafTablePage(left_buf, 0, usable_size, split.left);
+
+    const right_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(right_buf);
+    @memset(right_buf, 0);
+    try btree_insert.rebuildLeafTablePage(right_buf, 0, usable_size, split.right);
+
+    try pager.writePage(left_page_no, left_buf);
+    try pager.writePage(right_page_no, right_buf);
+
+    const root_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(root_buf);
+    @memset(root_buf, 0);
+    try writeInteriorTablePage(root_buf, 0, usable_size, new_parent_cells, right_page_no);
+    try pager.writePage(root_page_no, root_buf);
+
+    // OLD right child is now unreachable from the parent — reclaim it
+    // through the freelist so integrity_check stays "ok".
+    try pager.freePage(old_right_child);
+}
+
 // -- tests --
 
 const testing = std.testing;
@@ -297,6 +409,24 @@ test "writeInteriorTablePage: round-trip via parseInteriorTablePage" {
     try testing.expectEqual(@as(i64, 100), info.cells[0].key);
     try testing.expectEqual(@as(u32, 7), info.cells[1].left_child);
     try testing.expectEqual(@as(i64, 200), info.cells[1].key);
+}
+
+test "classifyForInterior: small cell list fits" {
+    const cells = [_]InteriorCell{
+        .{ .left_child = 2, .key = 100 },
+        .{ .left_child = 3, .key = 200 },
+    };
+    try testing.expectEqual(InteriorFitClass.fits, classifyForInterior(&cells, 0, 4096));
+}
+
+test "classifyForInterior: huge cell list needs_split" {
+    var arr: std.ArrayList(InteriorCell) = .empty;
+    defer arr.deinit(testing.allocator);
+    var i: i64 = 1;
+    while (i <= 1000) : (i += 1) {
+        try arr.append(testing.allocator, .{ .left_child = @intCast(i + 1), .key = i * 1000 });
+    }
+    try testing.expectEqual(InteriorFitClass.needs_split, classifyForInterior(arr.items, 0, 4084));
 }
 
 test "writeInteriorTablePage: empty cells with only right_child" {

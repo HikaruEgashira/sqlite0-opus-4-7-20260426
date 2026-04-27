@@ -148,3 +148,79 @@ test "Pager.allocatePage: rejects file with zero in-header dbsize (malformed)" {
     defer p.close();
     try testing.expectError(Error.IoError, p.allocatePage());
 }
+
+test "Pager.freePage: empty freelist promotes page to new trunk" {
+    const path = try makeTempPath("free-empty");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+
+    // Build a 3-page file. Page 1 dbsize=3, freelist trunk=0, count=0.
+    const initial = try testing.allocator.alloc(u8, PAGE_SIZE * 3);
+    defer testing.allocator.free(initial);
+    @memset(initial, 0);
+    initial[31] = 3;
+    try writeFixture(path, initial);
+
+    var p = try Pager.open(testing.allocator, path);
+    defer p.close();
+
+    try p.freePage(3);
+
+    const page1 = try p.getPage(1);
+    // freelist trunk = 3
+    try testing.expectEqual(@as(u8, 0), page1[32]);
+    try testing.expectEqual(@as(u8, 0), page1[33]);
+    try testing.expectEqual(@as(u8, 0), page1[34]);
+    try testing.expectEqual(@as(u8, 3), page1[35]);
+    // freelist count = 1
+    try testing.expectEqual(@as(u8, 1), page1[39]);
+
+    // Page 3 zero-filled (next_trunk=0, leaf_count=0).
+    const page3 = try p.getPage(3);
+    try testing.expectEqual(@as(u8, 0), page3[0]);
+    try testing.expectEqual(@as(u8, 0), page3[7]);
+}
+
+test "Pager.freePage: appends leaf to existing trunk" {
+    const path = try makeTempPath("free-append");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+
+    const initial = try testing.allocator.alloc(u8, PAGE_SIZE * 4);
+    defer testing.allocator.free(initial);
+    @memset(initial, 0);
+    initial[31] = 4; // dbsize = 4
+    try writeFixture(path, initial);
+
+    var p = try Pager.open(testing.allocator, path);
+    defer p.close();
+
+    try p.freePage(3); // page 3 becomes trunk
+    try p.freePage(4); // page 4 appended to trunk's leaf array
+
+    const page1 = try p.getPage(1);
+    try testing.expectEqual(@as(u8, 3), page1[35]); // trunk still page 3
+    try testing.expectEqual(@as(u8, 2), page1[39]); // count = 2
+
+    const trunk = try p.getPage(3);
+    try testing.expectEqual(@as(u8, 0), trunk[0]); // next_trunk = 0
+    try testing.expectEqual(@as(u8, 1), trunk[7]); // leaf_count = 1
+    try testing.expectEqual(@as(u8, 4), trunk[11]); // first leaf entry = 4
+}
+
+test "Pager.freePage: rejects page 0 and 1" {
+    const path = try makeTempPath("free-bad");
+    defer testing.allocator.free(path);
+    defer unlinkPath(path);
+
+    const initial = try testing.allocator.alloc(u8, PAGE_SIZE);
+    defer testing.allocator.free(initial);
+    @memset(initial, 0);
+    initial[31] = 1;
+    try writeFixture(path, initial);
+
+    var p = try Pager.open(testing.allocator, path);
+    defer p.close();
+    try testing.expectError(Error.IoError, p.freePage(0));
+    try testing.expectError(Error.IoError, p.freePage(1));
+}

@@ -154,6 +154,107 @@ pub const Pager = struct {
         return new_page;
     }
 
+    /// Add `page_no` to the freelist (Iter26.B.2). The freelist lives in
+    /// page-1 bytes [32..36] (first trunk page no, u32 BE) and [36..40]
+    /// (total freelist count). Each trunk page is laid out as
+    ///   [0..4]  next_trunk_page_no (u32 BE; 0 = last)
+    ///   [4..8]  leaf_count          (u32 BE)
+    ///   [8..]   leaf_count × u32 BE leaf page numbers
+    ///
+    /// Two cases:
+    ///   - empty freelist (cur_trunk == 0): zero-fill `page_no` as the
+    ///     new (and only) trunk, then bump page-1 trunk + count.
+    ///   - non-empty freelist: append `page_no` as a leaf entry on the
+    ///     current trunk and bump page-1 count.
+    ///
+    /// Returns `Error.UnsupportedFeature` when the current trunk's leaf
+    /// array is full — chaining a second trunk is Iter26.B.3 scope. The
+    /// limit is `(usable_size − 8) / 4` ≈ 1019 leaves on a 4096-page
+    /// fixture with 12 reserved bytes (4084 usable). Far beyond what the
+    /// B.2 differential cases exercise.
+    ///
+    /// Write order matches `allocatePage`: trunk first, page 1 LAST. A
+    /// crash between writes leaves either the trunk untouched (page 1
+    /// header unchanged → integrity_check warns about a now-orphan page,
+    /// matching B.1's accepted crash window) or both updated.
+    pub fn freePage(self: *Pager, page_no: u32) Error!void {
+        if (page_no <= 1) return Error.IoError;
+
+        const usable = try self.usableSize();
+        const max_leaves: usize = (usable - 8) / 4;
+
+        const page1 = try self.getPage(1);
+        if (page1.len < 40) return Error.IoError;
+        const cur_trunk: u32 = (@as(u32, page1[32]) << 24) |
+            (@as(u32, page1[33]) << 16) |
+            (@as(u32, page1[34]) << 8) |
+            @as(u32, page1[35]);
+        const cur_count: u32 = (@as(u32, page1[36]) << 24) |
+            (@as(u32, page1[37]) << 16) |
+            (@as(u32, page1[38]) << 8) |
+            @as(u32, page1[39]);
+
+        const updated_p1 = try self.allocator.alloc(u8, PAGE_SIZE);
+        defer self.allocator.free(updated_p1);
+
+        if (cur_trunk == 0) {
+            // Promote `page_no` to a fresh trunk: zero-fill so the leaf
+            // count and next-trunk fields read as 0.
+            const new_trunk = try self.allocator.alloc(u8, PAGE_SIZE);
+            defer self.allocator.free(new_trunk);
+            @memset(new_trunk, 0);
+            try self.writePage(page_no, new_trunk);
+
+            const page1_now = try self.getPage(1);
+            @memcpy(updated_p1, page1_now);
+            updated_p1[32] = @intCast((page_no >> 24) & 0xff);
+            updated_p1[33] = @intCast((page_no >> 16) & 0xff);
+            updated_p1[34] = @intCast((page_no >> 8) & 0xff);
+            updated_p1[35] = @intCast(page_no & 0xff);
+            const new_count: u32 = cur_count + 1;
+            updated_p1[36] = @intCast((new_count >> 24) & 0xff);
+            updated_p1[37] = @intCast((new_count >> 16) & 0xff);
+            updated_p1[38] = @intCast((new_count >> 8) & 0xff);
+            updated_p1[39] = @intCast(new_count & 0xff);
+            try self.writePage(1, updated_p1);
+            return;
+        }
+
+        // Append-to-trunk path. Snapshot the trunk, validate room, write
+        // the appended copy, then bump page-1 count.
+        const trunk_orig = try self.getPage(cur_trunk);
+        const trunk_buf = try self.allocator.alloc(u8, PAGE_SIZE);
+        defer self.allocator.free(trunk_buf);
+        @memcpy(trunk_buf, trunk_orig);
+
+        const leaf_count: u32 = (@as(u32, trunk_buf[4]) << 24) |
+            (@as(u32, trunk_buf[5]) << 16) |
+            (@as(u32, trunk_buf[6]) << 8) |
+            @as(u32, trunk_buf[7]);
+        if (@as(usize, leaf_count) >= max_leaves) return Error.UnsupportedFeature;
+
+        const slot: usize = 8 + @as(usize, leaf_count) * 4;
+        trunk_buf[slot] = @intCast((page_no >> 24) & 0xff);
+        trunk_buf[slot + 1] = @intCast((page_no >> 16) & 0xff);
+        trunk_buf[slot + 2] = @intCast((page_no >> 8) & 0xff);
+        trunk_buf[slot + 3] = @intCast(page_no & 0xff);
+        const new_leaf_count: u32 = leaf_count + 1;
+        trunk_buf[4] = @intCast((new_leaf_count >> 24) & 0xff);
+        trunk_buf[5] = @intCast((new_leaf_count >> 16) & 0xff);
+        trunk_buf[6] = @intCast((new_leaf_count >> 8) & 0xff);
+        trunk_buf[7] = @intCast(new_leaf_count & 0xff);
+        try self.writePage(cur_trunk, trunk_buf);
+
+        const page1_now = try self.getPage(1);
+        @memcpy(updated_p1, page1_now);
+        const new_count: u32 = cur_count + 1;
+        updated_p1[36] = @intCast((new_count >> 24) & 0xff);
+        updated_p1[37] = @intCast((new_count >> 16) & 0xff);
+        updated_p1[38] = @intCast((new_count >> 8) & 0xff);
+        updated_p1[39] = @intCast(new_count & 0xff);
+        try self.writePage(1, updated_p1);
+    }
+
     /// Write `bytes` (exactly PAGE_SIZE) to page `page_no` via pwrite,
     /// then update the LRU cache so subsequent `getPage` reads see the
     /// new contents without an extra disk roundtrip. Iter26.A.0 — the
