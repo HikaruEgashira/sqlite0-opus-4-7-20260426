@@ -398,3 +398,23 @@ QUERY: SELECT count(*), min(n), max(n) FROM t
 SETUP: CREATE TABLE t(n); INSERT INTO t VALUES (1);
 WAL_SETUP: INSERT INTO t VALUES (2); BEGIN; INSERT INTO t VALUES (999);
 QUERY: SELECT n FROM t ORDER BY n
+
+# Iter27.B.3 — sqlite0 mutates a WAL fixture. SETUP makes the table,
+# WAL_SETUP populates one row inside WAL, MUTATE inserts a second row
+# THROUGH sqlite0 (which appends a WAL frame + commit + fsync via the
+# new write path), VERIFY checks both engines see both rows. Also
+# closes the round-trip (sqlite0 reads back its own WAL writes) and
+# runs PRAGMA integrity_check on the sqlite0-mutated copy. This is
+# the discriminating test the advisor singled out: failure modes
+# are interpretable.
+SETUP: CREATE TABLE t(x INTEGER);
+WAL_SETUP: INSERT INTO t VALUES(1);
+MUTATE: INSERT INTO t VALUES(2);
+VERIFY: SELECT * FROM t ORDER BY x
+
+# Same as above but multiple rows + UPDATE — exercises restage of the
+# same page across multiple writeFrame calls within one statement.
+SETUP: CREATE TABLE t(n INTEGER, s TEXT);
+WAL_SETUP: INSERT INTO t VALUES(1, 'one');
+MUTATE: INSERT INTO t VALUES(2, 'two'); INSERT INTO t VALUES(3, 'three'); UPDATE t SET s = upper(s);
+VERIFY: SELECT n, s FROM t ORDER BY n

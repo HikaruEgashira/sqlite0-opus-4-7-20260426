@@ -23,6 +23,8 @@
 const std = @import("std");
 const ops = @import("ops.zig");
 const wal_recovery = @import("wal_recovery.zig");
+const wal_writer_mod = @import("wal_writer.zig");
+const pager_wal = @import("pager_wal.zig");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const Error = ops.Error;
@@ -30,7 +32,7 @@ pub const Error = ops.Error;
 /// Per-page cache entry. `data` is one `PAGE_SIZE` byte buffer owned by
 /// the Pager allocator. The order of `cache.items` encodes LRU: index 0
 /// is most-recently-used; the tail is the eviction victim.
-const CachedPage = struct {
+pub const CachedPage = struct {
     page_no: u32,
     data: []u8,
 };
@@ -42,10 +44,19 @@ pub const Pager = struct {
     /// Maximum cache size. Hardcoded for Iter25.A — Phase 4 will surface
     /// a tunable when WAL needs a bigger working set.
     cache_capacity: usize = 16,
-    /// Iter27.A — populated by `attachWal` for WAL-mode databases. When
-    /// set, `getPage` consults it before pread'ing the main file. Owns
-    /// the `<dbname>-wal` fd and is torn down by `close()`.
+    /// Iter27.A — populated by `pager_wal.attachWal` for WAL-mode
+    /// databases. When set, `getPage` consults it before pread'ing the
+    /// main file. Owns the `<dbname>-wal` fd and is torn down by
+    /// `close()`.
     wal: ?wal_recovery.WalState = null,
+    /// Iter27.B.2 — populated by `pager_wal.attachWriter`. Owns its own
+    /// RDWR fd to the same `<dbname>-wal`. `pager_wal.writeFrame` /
+    /// `commit` route through it.
+    wal_writer: ?wal_writer_mod.WalWriter = null,
+    /// Iter27.B.3 — pages staged by `writeFrame` and pending a `commit`
+    /// flush. Empty between transactions. Each entry owns its `data`
+    /// snapshot until `commit` (or `discardStaged`) frees it.
+    staged_frames: std.ArrayList(pager_wal.StagedFrame) = .empty,
 
     /// Open `file_path` read-write and acquire an exclusive non-blocking
     /// flock. The Pager owns the fd until `close()`.
@@ -78,8 +89,7 @@ pub const Pager = struct {
     }
 
     pub fn close(self: *Pager) void {
-        if (self.wal) |*w| w.deinit();
-        self.wal = null;
+        pager_wal.detach(self);
         for (self.cache.items) |entry| self.allocator.free(entry.data);
         self.cache.deinit(self.allocator);
         // Best-effort lock release — close() always drops it anyway, but
@@ -90,28 +100,34 @@ pub const Pager = struct {
         self.fd = -1;
     }
 
-    /// Iter27.A — hand the Pager an open WAL state. The Pager takes
-    /// ownership; teardown happens in `close()`. Idempotent rejection
-    /// of double-attach is intentional: WAL recovery should run exactly
-    /// once at open time, and a second attach would silently leak the
-    /// previous state's fd.
+    /// Re-export of `pager_wal.attachWal` so existing callers
+    /// (`Database.openFile`) don't need to import the helper module.
     pub fn attachWal(self: *Pager, state: wal_recovery.WalState) Error!void {
-        if (self.wal != null) return Error.IoError;
-        self.wal = state;
-        // Drop any cached page that the WAL now overrides. After the
-        // schema scan ran without WAL knowledge, page 1 in particular
-        // could be stale. For Iter27.A's open-time attach the cache is
-        // typically empty here, but defensive eviction keeps the
-        // invariant simple: "WAL takes precedence, full stop".
-        var i: usize = 0;
-        while (i < self.cache.items.len) {
-            if (self.wal.?.lookupPagePayload(self.cache.items[i].page_no) != null) {
-                const evicted = self.cache.orderedRemove(i);
-                self.allocator.free(evicted.data);
-            } else {
-                i += 1;
-            }
-        }
+        return pager_wal.attachWal(self, state);
+    }
+
+    /// Iter27.B.3 — close the current statement-level transaction.
+    /// In WAL mode, flushes any pages staged by `writePage` as one
+    /// commit-frame batch (with `commit_size` derived from the staged
+    /// page-1's in-header dbsize), then fsyncs and promotes them into
+    /// `WalState.index`. No-op when no WAL writer is attached or no
+    /// pages have been staged (= read-only statement).
+    pub fn commit(self: *Pager) Error!void {
+        if (self.wal_writer == null) return;
+        if (self.staged_frames.items.len == 0) return;
+
+        // dbsize lives in page-1 bytes [28..31]. Look up page 1 — if
+        // the current tx mutated it, the cache has the staged copy
+        // (write-through). Otherwise getPage falls back to the main
+        // file / WAL chain.
+        const page1 = try self.getPage(1);
+        if (page1.len < 32) return Error.IoError;
+        const dbsize: u32 = (@as(u32, page1[28]) << 24) |
+            (@as(u32, page1[29]) << 16) |
+            (@as(u32, page1[30]) << 8) |
+            @as(u32, page1[31]);
+        if (dbsize == 0) return Error.IoError;
+        return pager_wal.commit(self, dbsize);
     }
 
     /// Bytes reserved at the end of every page by the database header
@@ -307,6 +323,12 @@ pub const Pager = struct {
     pub fn writePage(self: *Pager, page_no: u32, bytes: []const u8) Error!void {
         if (page_no == 0) return Error.IoError;
         if (bytes.len != PAGE_SIZE) return Error.IoError;
+
+        // Iter27.B.3 — when a WAL writer is attached, route writes
+        // into the WAL stage instead of the main file. `commit` (called
+        // at statement boundary) flushes them as a single transaction.
+        // Main file stays untouched until checkpoint (Iter27.C).
+        if (self.wal_writer != null) return pager_wal.writeFrame(self, page_no, bytes);
 
         const offset: std.c.off_t = @intCast(@as(usize, page_no - 1) * PAGE_SIZE);
         const n = std.c.pwrite(self.fd, bytes.ptr, PAGE_SIZE, offset);

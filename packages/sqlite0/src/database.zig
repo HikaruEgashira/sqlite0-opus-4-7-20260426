@@ -126,14 +126,9 @@ pub const Database = struct {
         if (db.journal_mode == .delete_legacy) {
             try journal.maybeRunRecovery(&db.pager.?, path);
         } else if (db.journal_mode == .wal) {
-            // Iter27.A — read-side WAL. Scan the `<path>-wal` sidecar
-            // (if any) and attach the resulting index to the Pager so
-            // subsequent getPage calls (including the schema scan
-            // below) see WAL-resident page versions.
-            const wal_recovery = @import("wal_recovery.zig");
-            if (try wal_recovery.openIfPresent(allocator, path)) |state| {
-                try db.pager.?.attachWal(state);
-            }
+            // Iter27.A read-side scan + Iter27.B.2 writer attach. See
+            // `pager_wal.openWal` for the create-vs-inherit branch.
+            try @import("pager_wal.zig").openWal(&db.pager.?, path);
         }
 
         const schema = @import("schema.zig");
@@ -207,6 +202,11 @@ pub const Database = struct {
             }
             const sr = try engine.dispatchOne(self, &p);
             try statements.append(self.allocator, sr);
+            // Iter27.B.3 — implicit per-statement commit boundary.
+            // SELECTs queue no frames so this is a no-op for them.
+            // Future BEGIN/COMMIT (Iter27.E) will introduce explicit
+            // multi-statement transactions and gate this hook.
+            if (self.pager) |*pg| try pg.commit();
             if (p.cur.kind == .semicolon) p.advance();
         }
         return .{

@@ -46,6 +46,7 @@ pub const engine_dml_insert_file = @import("engine_dml_insert_file.zig");
 pub const engine_ddl_file = @import("engine_ddl_file.zig");
 pub const cursor = @import("cursor.zig");
 pub const pager = @import("pager.zig");
+pub const pager_wal = @import("pager_wal.zig");
 pub const pager_read_test = @import("pager_read_test.zig");
 pub const pager_write_test = @import("pager_write_test.zig");
 pub const record = @import("record.zig");
