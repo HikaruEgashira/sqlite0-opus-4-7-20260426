@@ -5,22 +5,31 @@ const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 const parser_predicate = @import("parser_predicate.zig");
+const database = @import("database.zig");
 
 const Token = lex.Token;
 const TokenKind = lex.TokenKind;
 const Value = value_mod.Value;
 const Error = ops.Error;
+const Database = database.Database;
 
 /// Recursive-descent SQL expression parser. Per ADR-0002 (Iter8.A → C) the
 /// entire expression grammar is now AST-driven: every `parse*` method
 /// returns `*ast.Expr`. The previous eager-evaluation paths are gone, and
 /// `eval.evalExpr` is the sole consumer that lowers an AST to a `Value`.
 /// Statement-level dispatch lives in `stmt.zig`.
+///
+/// `db` is the (optional) live `Database` for parser-time evaluation paths
+/// that need state access — currently only `VALUES` tuples, which sqlite3
+/// accepts subqueries inside (`INSERT INTO t VALUES ((SELECT ...))`). It's
+/// set in `engine.dispatchOne` for the duration of one statement; the
+/// REPL/CLI `Parser.init` leaves it null (those callers don't reach VALUES).
 pub const Parser = struct {
     src: []const u8,
     lx: lex.Lexer,
     cur: Token,
     allocator: std.mem.Allocator,
+    db: ?*Database = null,
 
     pub fn init(allocator: std.mem.Allocator, src: []const u8) Parser {
         var lxr = lex.Lexer.init(src);

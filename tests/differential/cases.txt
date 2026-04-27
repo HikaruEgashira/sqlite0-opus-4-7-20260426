@@ -942,3 +942,13 @@ SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-01 00:00:00', '+0.1 year')
 SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-03-15 00:00:00', '-0.1 year')
 # tiny fractional month → minutes/hours offset
 SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '+0.001 month')
+# Iter22.E: subqueries inside VALUES tuples (INSERT and top-level)
+CREATE TABLE t22e_t(x); CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(42); INSERT INTO t22e_t VALUES ((SELECT y FROM t22e_u)); SELECT * FROM t22e_t
+CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(42); VALUES ((SELECT y FROM t22e_u))
+# subquery as part of an arithmetic expression in a VALUES tuple
+CREATE TABLE t22e_t(x); CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(10); INSERT INTO t22e_t VALUES ((SELECT y FROM t22e_u) + 5); SELECT * FROM t22e_t
+# multiple aggregate subqueries in one tuple, plus multi-tuple INSERT
+CREATE TABLE t22e_t(x,y); CREATE TABLE t22e_u(z); INSERT INTO t22e_u VALUES(1),(2),(3); INSERT INTO t22e_t VALUES ((SELECT min(z) FROM t22e_u), (SELECT max(z) FROM t22e_u)); SELECT * FROM t22e_t
+CREATE TABLE t22e_t(x); CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(1),(2); INSERT INTO t22e_t VALUES ((SELECT count(*) FROM t22e_u)),((SELECT sum(y) FROM t22e_u)); SELECT x FROM t22e_t ORDER BY x
+# mixed literal + subquery in one tuple (top-level VALUES)
+CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(7); VALUES (1, (SELECT y FROM t22e_u))

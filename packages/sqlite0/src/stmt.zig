@@ -335,7 +335,7 @@ fn parseValuesTuple(p: *Parser) ![]Value {
     const asts = try parseExpressionAsts(p);
     defer freeAsts(p.allocator, asts);
     try p.expect(.rparen);
-    return evaluateRow(p.allocator, asts, &.{}, &.{});
+    return evaluateRow(p.allocator, asts, &.{}, &.{}, p.db);
 }
 
 /// Parse a comma-separated expression list as ASTs (no evaluation).
@@ -356,12 +356,15 @@ fn parseExpressionAsts(p: *Parser) ![]*ast.Expr {
 }
 
 /// Evaluate `asts` with the given `current_row` and `columns` to produce a
-/// single result row. On failure all already-evaluated Values are freed.
+/// single result row. `db` is forwarded to the EvalContext so subqueries
+/// inside the expressions (`VALUES ((SELECT ...))`, sqlite3 quirk) can
+/// resolve. On failure all already-evaluated Values are freed.
 fn evaluateRow(
     allocator: std.mem.Allocator,
     asts: []const *ast.Expr,
     current_row: []const Value,
     columns: []const []const u8,
+    db: ?*@import("database.zig").Database,
 ) Error![]Value {
     const row = try allocator.alloc(Value, asts.len);
     var produced: usize = 0;
@@ -373,6 +376,7 @@ fn evaluateRow(
         .allocator = allocator,
         .current_row = current_row,
         .columns = columns,
+        .db = db,
     };
     for (asts) |expr| {
         row[produced] = try eval.evalExpr(ctx, expr);

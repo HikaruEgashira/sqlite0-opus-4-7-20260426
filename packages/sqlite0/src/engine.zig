@@ -43,6 +43,13 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     p.allocator = arena_alloc;
     defer p.allocator = saved;
 
+    // VALUES tuples evaluate eagerly during parsing; expose `db` so
+    // `(SELECT ...)` inside a tuple can resolve. Restored on exit so other
+    // entry points (REPL between dispatches) don't see a stale pointer.
+    const saved_db = p.db;
+    p.db = db;
+    defer p.db = saved_db;
+
     switch (p.cur.kind) {
         .keyword_select => {
             const parsed = try stmt_mod.parseSelectStatement(p);
