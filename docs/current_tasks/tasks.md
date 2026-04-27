@@ -83,6 +83,16 @@ advisor split (Iter26.A は scope が広すぎたため細分化):
   - [x] Iter26.C.3: DELETE/UPDATE chain free + reallocate。`modifyOneLeaf` で cell ごとに `assemblePayload` で full payload を組み立てて WHERE 評価。survivor は元の `overflow_head` + `payload_len` を持って rebuild に渡し、chain page の参照を維持。matched DELETE は chain head を `chains_to_free` に積む。matched UPDATE は old chain を `chains_to_free` に積み、new record が oversize なら新規 chain を allocate。`pager.writePage(leaf)` 後に `freeOverflowChain` を実行 (leaf rebuild commit 前に freelist に入れない invariant)。差分テスト 3 件追加 (DELETE oversize / UPDATE shrink / UPDATE grow)、49/49 緑。`btree_overflow.zig` 263 行、`engine_dml_file.zig` 281 行 (500 行 discipline 内)。
 - [ ] Iter26.refactor: Cursor write-side API (`delete_current` / `update_column_at_current` / `insert`) — file-mode write が落ち着いてから in-memory DML 経路も Cursor 経由に統一 (元 Iter24.B 由来)。
 
+### Phase 4: Transaction + WAL (ADR-0007)
+
+- [x] Iter27.0.a: journal-mode-on-open detect。`Database.openFile` で page-1 header bytes 18/19 を読み `JournalMode {delete_legacy, wal}` を `db.journal_mode` に保持。`(1,1)` か `(2,2)` 以外と write_format != read_format は `Error.IoError`。**purely additive** — 既存 file-differential 53 cases は 1 件も変化なし (= まだ write 経路を gate しない、Iter27.B で行う)。`database.zig` が 491 → 573 行になったため 3 unit tests を `database_journal_mode_test.zig` に分離 (final: 489 / 91 行)。差分 787/787 + file-differential 53/53 + unit tests 全緑。
+- [ ] Iter27.0.b: hot-journal recovery。`<dbname>-journal` を openFile で検出し、(a) header magic + page count valid なら main file rollback → journal 削除、(b) corrupt なら hot journal として削除。差分 fixture: `BEGIN; INSERT; (kill)` で hot journal を残し、sqlite0 で開いて recovery。
+- [ ] Iter27.A: WAL read-side。`wal.zig` (frame parser + checksum) + `wal_recovery.zig` (open scan)。Pager.getPage が WAL index を先に lookup。
+- [ ] Iter27.B: WAL write-side + DELETE-mode write gate (= `Error.ReadOnlyDatabase` for `delete_legacy`)。新規 DB を WAL mode で作成。
+- [ ] Iter27.C: Checkpoint (`PRAGMA wal_checkpoint(PASSIVE)` + close-on-checkpoint + cache invalidation)。
+- [ ] Iter27.D: Recovery hardening (partial frame / checksum mismatch / WAL header 破損)。
+- [ ] Iter27.E: BEGIN/COMMIT/ROLLBACK + `PRAGMA journal_mode` (read-only)。
+
 ### 残課題 (低優先, Phase 2 由来)
 
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要; Cursor 抽象を入れるタイミングで一緒に対応するか別 ADR か Iter25 着手前に判断)

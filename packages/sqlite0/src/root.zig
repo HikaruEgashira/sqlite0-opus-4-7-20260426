@@ -28,6 +28,7 @@ pub const aggregate_state = @import("aggregate_state.zig");
 pub const aggregate_walk = @import("aggregate_walk.zig");
 pub const exec = @import("exec.zig");
 pub const database = @import("database.zig");
+pub const database_journal_mode_test = @import("database_journal_mode_test.zig");
 pub const engine = @import("engine.zig");
 pub const engine_from = @import("engine_from.zig");
 pub const engine_setop = @import("engine_setop.zig");
