@@ -190,11 +190,21 @@ fn writeFloatBody(
 }
 
 fn coerceToFloat(v: Value) f64 {
-    return switch (v) {
+    // sqlite3 quirk: TEXT/BLOB→REAL coercion uses `sqlite3AtoF`-style
+    // *prefix* parse (same atof logic CAST AS REAL uses). `'1.5abc'`
+    // parses as 1.5 instead of erroring or returning 0; `parseFloatLoose`
+    // mirrors the rule. The .real path forwards as-is so signed zero
+    // propagates here — the caller (writeFloat / writeExp / writeGeneral)
+    // is the right place to normalise -0.0 → 0.0 to match sqlite3's
+    // `realvalue<0.0` test (-0.0 compares equal to 0.0, so sqlite3 never
+    // sets a `-` sign for negative zero).
+    var f: f64 = switch (v) {
         .null => 0,
         .integer => |i| @floatFromInt(i),
         .real => |r| r,
-        .text => |t| std.fmt.parseFloat(f64, t) catch 0,
-        .blob => |b| std.fmt.parseFloat(f64, b) catch 0,
+        .text => |t| util.parseFloatLoose(t),
+        .blob => |b| util.parseFloatLoose(b),
     };
+    if (f == 0) f = 0; // collapse -0.0 → +0.0 (sqlite3 etFLOAT parity)
+    return f;
 }

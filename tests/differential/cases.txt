@@ -2508,3 +2508,18 @@ SELECT typeof(sqlite_compileoption_used('FOO'))
 # sqlite_compileoption_get past end returns NULL.
 SELECT sqlite_compileoption_get(99999)
 SELECT sqlite_compileoption_get(-1)
+
+# --- Iter30.F: printf float normalize -0.0 + TEXT prefix parse
+# sqlite3's `realvalue < 0.0` test fails on -0.0 (IEEE -0 == 0), so
+# negative zero never picks up a `-` sign; we collapse to +0.
+SELECT printf('%f', -0.0)
+SELECT printf('%.0f', -0.0)
+SELECT printf('%g', -0.0)
+SELECT printf('%e', -0.0)
+SELECT printf('%+f', -0.0)
+SELECT printf('%+e', -0.0)
+# TEXT→REAL coercion uses `sqlite3AtoF`-style prefix parse for printf.
+SELECT printf('%f', '1.5abc')
+SELECT printf('%f', '  1.5  ')
+SELECT printf('%g', '1.5e2abc')
+SELECT printf('%.2f', '12.3xyz')
