@@ -43,6 +43,7 @@ pub const btree = @import("btree.zig");
 pub const btree_test_util = @import("btree_test_util.zig");
 pub const btree_walk = @import("btree_walk.zig");
 pub const btree_insert = @import("btree_insert.zig");
+pub const btree_split = @import("btree_split.zig");
 pub const btree_cursor = @import("btree_cursor.zig");
 pub const schema = @import("schema.zig");
 pub const test_db_util = @import("test_db_util.zig");

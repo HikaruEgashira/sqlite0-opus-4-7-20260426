@@ -64,10 +64,17 @@ run_query_case() {
 # sqlite3 mutates B → run VERIFY against both → diff outputs.
 # Also runs `PRAGMA integrity_check` on A (the sqlite0-mutated copy)
 # to catch byte-format corruption that VERIFY alone might not surface.
+# When `skip_rt` is "0", additionally re-runs VERIFY through sqlite0 on
+# fixture A to close the round-trip (sqlite0 must re-read its own
+# writes). Set SKIP_RT: 1 in a case to opt out — needed when VERIFY
+# uses queries sqlite0 doesn't yet support (e.g. `sqlite_schema` reads,
+# which Iter26.A.3 cases rely on but the engine doesn't expose as a
+# user table).
 run_mutate_case() {
   local setup="$1"
   local mutate="$2"
   local verify="$3"
+  local skip_rt="$4"
   total=$((total + 1))
 
   local fixture_a="${WORK_DIR}/case-${total}-a.db"
@@ -86,18 +93,30 @@ run_mutate_case() {
     fail=$((fail + 1)); fails+=("Case $total (MUTATE) sqlite3 failed: $mutate"); return
   fi
 
-  local actual expected
+  local actual expected sqlite0_roundtrip
   actual="$(sqlite3 "$fixture_a" "$verify" 2>&1)" || actual="<verify-error>"
   expected="$(sqlite3 "$fixture_b" "$verify" 2>&1)" || expected="<verify-error>"
+  # Read-back through sqlite0 closes the round-trip: sqlite0 must be
+  # able to read the bytes it just wrote. Iter26.B.1 (balance-deeper)
+  # is the first iteration that makes this non-trivial — earlier
+  # iterations only mutated single-leaf-root tables that any reader
+  # could already handle. Skipped only for cases whose VERIFY uses
+  # `sqlite_schema` directly, which sqlite0 doesn't yet expose as a
+  # queryable user table.
+  if [[ "$skip_rt" != "1" ]]; then
+    sqlite0_roundtrip="$("$SQLITE0" -file "$fixture_a" -c "$verify" 2>&1)" || sqlite0_roundtrip="<sqlite0-verify-error>"
+  else
+    sqlite0_roundtrip="$expected"
+  fi
 
   local integrity
   integrity="$(sqlite3 "$fixture_a" 'PRAGMA integrity_check' 2>&1)" || integrity="<integrity-error>"
 
-  if [[ "$expected" == "$actual" && "$integrity" == "ok" ]]; then
+  if [[ "$expected" == "$actual" && "$integrity" == "ok" && "$expected" == "$sqlite0_roundtrip" ]]; then
     pass=$((pass + 1))
   else
     fail=$((fail + 1))
-    fails+=("Case $total (MUTATE)"$'\n'"  SETUP:     $setup"$'\n'"  MUTATE:    $mutate"$'\n'"  VERIFY:    $verify"$'\n'"  expected:  $expected"$'\n'"  actual:    $actual"$'\n'"  integrity: $integrity")
+    fails+=("Case $total (MUTATE)"$'\n'"  SETUP:     $setup"$'\n'"  MUTATE:    $mutate"$'\n'"  VERIFY:    $verify"$'\n'"  expected:  $expected"$'\n'"  actual:    $actual"$'\n'"  sqlite0_rt: $sqlite0_roundtrip"$'\n'"  integrity: $integrity")
   fi
 }
 
@@ -105,25 +124,27 @@ setup=""
 query=""
 mutate=""
 verify=""
+skip_rt="0"
 flush_case() {
   if [[ -n "$setup" ]]; then
     if [[ -n "$query" ]]; then
       run_query_case "$setup" "$query"
     elif [[ -n "$mutate" && -n "$verify" ]]; then
-      run_mutate_case "$setup" "$mutate" "$verify"
+      run_mutate_case "$setup" "$mutate" "$verify" "$skip_rt"
     fi
   fi
-  setup=""; query=""; mutate=""; verify=""
+  setup=""; query=""; mutate=""; verify=""; skip_rt="0"
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   case "$line" in
     '#'*) continue ;;
     '') flush_case ;;
-    'SETUP: '*)  setup="${line#SETUP: }" ;;
-    'QUERY: '*)  query="${line#QUERY: }" ;;
-    'MUTATE: '*) mutate="${line#MUTATE: }" ;;
-    'VERIFY: '*) verify="${line#VERIFY: }" ;;
+    'SETUP: '*)   setup="${line#SETUP: }" ;;
+    'QUERY: '*)   query="${line#QUERY: }" ;;
+    'MUTATE: '*)  mutate="${line#MUTATE: }" ;;
+    'VERIFY: '*)  verify="${line#VERIFY: }" ;;
+    'SKIP_RT: '*) skip_rt="${line#SKIP_RT: }" ;;
     *)
       echo "error: unrecognised line in $CASES: $line" >&2
       exit 2

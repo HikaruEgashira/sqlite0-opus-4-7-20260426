@@ -24,6 +24,7 @@ const eval = @import("eval.zig");
 const database = @import("database.zig");
 const btree = @import("btree.zig");
 const btree_insert = @import("btree_insert.zig");
+const btree_split = @import("btree_split.zig");
 const record = @import("record.zig");
 const record_encode = @import("record_encode.zig");
 const pager_mod = @import("pager.zig");
@@ -33,19 +34,20 @@ const Database = database.Database;
 const Table = database.Table;
 const Error = ops.Error;
 
-/// File-mode INSERT (Iter26.A.1): build a working copy of the table's
-/// root page, insert each new row's cell into it via
-/// `btree_insert.insertLeafTableCell`, then commit the whole batch with
-/// one `Pager.writePage`.
+/// File-mode INSERT (Iter26.A.1 / .B.1): merge new rows into the
+/// existing rowid-sorted cell list, then either rebuild the root leaf
+/// in place (single-page case) or balance-deeper into a new interior
+/// root with two leaf children (Iter26.B.1).
 ///
-/// Restrictions for Iter26.A.1:
-///   - root page must be a leaf-table (multi-page B-trees → split path
-///     not yet implemented; returns `Error.UnsupportedFeature`).
-///   - no per-page split (single-page tables only); `.page_full`
-///     returns `Error.UnsupportedFeature` so the user knows the limit.
+/// Restrictions:
+///   - root page must currently be a leaf-table. Multi-page B-trees
+///     (interior root) need non-root leaf split, which is Iter26.B.2.
 ///   - rowid auto-assigned as `max(existing_rowids) + 1` (or 1 if the
 ///     leaf is empty). Explicit rowid via INTEGER PRIMARY KEY alias is
 ///     a future iteration.
+///   - records exceeding `usable_size − 35` need an overflow chain
+///     (Iter26.C); rejected with `Error.UnsupportedFeature` here so the
+///     user sees the limit instead of a cryptic IoError.
 pub fn executeInsertFile(
     db: *Database,
     t: *Table,
@@ -72,39 +74,47 @@ pub fn executeInsertFile(
     const header = try btree.parsePageHeader(work, header_offset);
     if (header.page_type != .leaf_table) return Error.UnsupportedFeature;
 
-    // Find current max rowid by parsing existing cells. Linear scan is
-    // fine for Iter26.A.1's small fixtures.
+    // Parse existing cells and dupe their record bytes into the scratch
+    // arena: `work` will be overwritten by the rebuild / balance-deeper
+    // path, and the source slices borrow from it.
+    const existing = try btree.parseLeafTablePage(a, work, header_offset, usable_size);
+    var combined: std.ArrayList(btree_insert.RebuildCell) = .empty;
     var max_rowid: i64 = 0;
-    {
-        const cells = try btree.parseLeafTablePage(a, work, header_offset, usable_size);
-        for (cells) |c| {
-            if (c.rowid > max_rowid) max_rowid = c.rowid;
-        }
+    for (existing) |c| {
+        const dup = try a.dupe(u8, c.record_bytes);
+        try combined.append(a, .{ .rowid = c.rowid, .record_bytes = dup });
+        if (c.rowid > max_rowid) max_rowid = c.rowid;
     }
 
+    // Encode each new row, assign monotonically-increasing rowid, append
+    // (still sorted because rowid > all existing).
     var inserted: u64 = 0;
     for (source_rows) |row| {
         const new_values = try a.alloc(Value, t.columns.len);
         for (new_values, 0..) |*slot, k| {
             slot.* = if (target_indices[k]) |src_idx| row[src_idx] else Value.null;
         }
-
         const rec = try record_encode.encodeRecord(a, new_values);
         max_rowid += 1;
-        const outcome = try btree_insert.insertLeafTableCell(
-            work,
-            header_offset,
-            usable_size,
-            max_rowid,
-            rec,
-        );
-        switch (outcome) {
-            .ok => inserted += 1,
-            .page_full => return Error.UnsupportedFeature, // Iter26.B
-        }
+        try combined.append(a, .{ .rowid = max_rowid, .record_bytes = rec });
+        inserted += 1;
     }
 
-    try pager.writePage(t.root_page, work);
+    switch (btree_split.classifyForLeaf(combined.items, header_offset, usable_size)) {
+        .fits => {
+            try btree_insert.rebuildLeafTablePage(work, header_offset, usable_size, combined.items);
+            try pager.writePage(t.root_page, work);
+        },
+        .needs_split => {
+            // Iter26.B.1: balance-deeper. Page 1 (sqlite_schema) growth
+            // is forbidden through this path — it would require splicing
+            // the 100-byte file header into the new interior root and
+            // race with allocatePage's own page-1 mutations.
+            if (header_offset != 0) return Error.UnsupportedFeature;
+            try btree_split.balanceDeeperRoot(pager, t.root_page, combined.items);
+        },
+        .oversize_record => return Error.UnsupportedFeature, // Iter26.C
+    }
     return inserted;
 }
 
