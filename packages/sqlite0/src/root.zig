@@ -30,6 +30,7 @@ pub const aggregate_walk = @import("aggregate_walk.zig");
 pub const exec = @import("exec.zig");
 pub const database = @import("database.zig");
 pub const database_journal_mode_test = @import("database_journal_mode_test.zig");
+pub const database_execute_test = @import("database_execute_test.zig");
 pub const journal = @import("journal.zig");
 pub const journal_test = @import("journal_test.zig");
 pub const wal = @import("wal.zig");
