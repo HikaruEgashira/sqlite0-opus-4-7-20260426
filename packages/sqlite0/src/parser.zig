@@ -263,6 +263,29 @@ pub const Parser = struct {
     fn parseUnary(self: *Parser) Error!*ast.Expr {
         if (self.cur.kind == .minus) {
             self.advance();
+            // i64.min materialization: `-9223372036854775808` is exactly
+            // LLONG_MIN, but the positive form `9223372036854775808`
+            // overflows i64. Sign-fold here so the resulting literal
+            // stays INTEGER (sqlite3 3.51 confirmed). Hex literals are
+            // intentionally not sign-folded — `-0x8000000000000000`
+            // hits sqlite3's "hex literal too big" error which we don't
+            // mimic; the standard unary-negate path falls back to REAL
+            // promotion via Iter29.N's `negateValue` LLONG_MIN branch.
+            if (self.cur.kind == .integer) {
+                const itext = self.cur.slice(self.src);
+                const is_hex = itext.len > 2 and itext[0] == '0' and (itext[1] == 'x' or itext[1] == 'X');
+                if (!is_hex) {
+                    if (parseNegatedDecimalI64(itext)) |neg_i| {
+                        self.advance();
+                        return ast.makeLiteral(self.allocator, Value{ .integer = neg_i });
+                    } else |_| {
+                        // Operand exceeds LLONG_MIN — fall through. The
+                        // positive literal will be parsed as REAL by
+                        // `parseIntegerLiteralAsValue`, then negated at
+                        // eval time (REAL → REAL).
+                    }
+                }
+            }
             const inner = try self.parseUnary();
             errdefer inner.deinit(self.allocator);
             return ast.makeUnaryNegate(self.allocator, inner);
@@ -286,8 +309,8 @@ pub const Parser = struct {
             .integer => {
                 self.advance();
                 const text = tok.slice(self.src);
-                const n = parseIntegerLiteral(text) catch return Error.InvalidNumber;
-                return ast.makeLiteral(self.allocator, Value{ .integer = n });
+                const v = parseIntegerLiteralAsValue(self.allocator, text) catch return Error.InvalidNumber;
+                return ast.makeLiteral(self.allocator, v);
             },
             .real => {
                 self.advance();
@@ -397,19 +420,38 @@ fn hexDigitValue(c: u8) u8 {
     return c - 'A' + 10;
 }
 
-/// Parse a `.integer` token's text into i64. The lexer has already
-/// validated the shape, so the only failure path is overflow on a
-/// decimal literal that exceeds i64. Hex literals (`0x` / `0X` prefix)
-/// are read as u64 and bit-cast to i64 — sqlite3 wraps the same way
-/// (`0xFFFFFFFFFFFFFFFF` → -1, `0x8000000000000000` → LLONG_MIN).
-/// `std.fmt.parseInt` accepts embedded `_` as a digit separator
-/// natively, matching sqlite3's `1_000_000` / `0xff_ff` shapes.
-fn parseIntegerLiteral(text: []const u8) !i64 {
+/// Parse a `.integer` token's text into a `Value`. Hex literals
+/// (`0x`/`0X` prefix) are read as u64 and bit-cast to i64 — sqlite3
+/// wraps the same way (`0xFFFFFFFFFFFFFFFF` → -1, `0x8000000000000000`
+/// → LLONG_MIN). Decimal literals fit as i64 when in range; otherwise
+/// they fall back to REAL (sqlite3 quirk: `9223372036854775808` →
+/// `9.22337203685478e+18`). `std.fmt.parseInt` accepts embedded `_` as
+/// a digit separator natively; the REAL fallback delegates to
+/// `parseRealLiteral` which strips them before calling parseFloat.
+fn parseIntegerLiteralAsValue(allocator: std.mem.Allocator, text: []const u8) !Value {
     if (text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
         const u = try std.fmt.parseInt(u64, text[2..], 16);
-        return @bitCast(u);
+        return Value{ .integer = @bitCast(u) };
     }
-    return std.fmt.parseInt(i64, text, 10);
+    if (std.fmt.parseInt(i64, text, 10)) |i| {
+        return Value{ .integer = i };
+    } else |err| switch (err) {
+        error.Overflow => return Value{ .real = try parseRealLiteral(allocator, text) },
+        else => return err,
+    }
+}
+
+/// Returns `-<text>` parsed as i64 if the operand fits as a signed
+/// negative i64 (i.e., the u64 magnitude ≤ 2^63). The boundary case
+/// `2^63` maps to LLONG_MIN, the only i64 value whose positive form
+/// overflows. Caller must not pass hex-prefixed text — sqlite3's
+/// `-0x...` form is handled differently (see `parseUnary`).
+fn parseNegatedDecimalI64(text: []const u8) !i64 {
+    const u = try std.fmt.parseInt(u64, text, 10);
+    const llong_min_mag: u64 = @as(u64, 1) << 63;
+    if (u > llong_min_mag) return error.Overflow;
+    if (u == llong_min_mag) return std.math.minInt(i64);
+    return -@as(i64, @intCast(u));
 }
 
 /// Parse a `.real` token's text into f64. `std.fmt.parseFloat` does not
