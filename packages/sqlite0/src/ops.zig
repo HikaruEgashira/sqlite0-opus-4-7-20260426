@@ -298,15 +298,16 @@ fn coerceToI64(v: Value) i64 {
         // lossyCast clamps non-finite f64 to match sqlite3: +Inf → LLONG_MAX,
         // -Inf → LLONG_MIN, NaN → 0. Plain @intFromFloat is UB on non-finite.
         .real => |f| std.math.lossyCast(i64, f),
-        .text, .blob => |bytes| parseLenientI64(bytes),
+        // sqlite3 `sqlite3VdbeIntValue` for TEXT/BLOB uses lenient
+        // `sqlite3AtoF`-prefix (whitespace strip, no hex) — `'1abc'`→1,
+        // `'0x10'`→0, `' 1 '`→1, `'abc'`→0. Reuse coerceBytesToNumeric.
+        .text, .blob => |bytes| switch (coerceBytesToNumeric(bytes)) {
+            .integer => |i| i,
+            .real => |f| std.math.lossyCast(i64, f),
+            else => 0,
+        },
         .null => 0,
     };
-}
-
-fn parseLenientI64(bytes: []const u8) i64 {
-    if (std.fmt.parseInt(i64, bytes, 10)) |i| return i else |_| {}
-    if (std.fmt.parseFloat(f64, bytes)) |f| return std.math.lossyCast(i64, f) else |_| {}
-    return 0;
 }
 
 pub fn boolValue(b: bool) Value {
@@ -327,10 +328,13 @@ pub fn truthy(v: Value) ?bool {
 }
 
 fn coerceTextToBool(bytes: []const u8) bool {
-    if (std.fmt.parseFloat(f64, bytes)) |f| {
-        return f != 0;
-    } else |_| {}
-    return false;
+    // Same lenient `sqlite3AtoF`-prefix path as `coerceToI64` for TEXT —
+    // `'1abc'`→true, `'0x10'`→false (stops at 'x'), `'abc'`→false.
+    return switch (coerceBytesToNumeric(bytes)) {
+        .integer => |i| i != 0,
+        .real => |f| f != 0,
+        else => false,
+    };
 }
 
 pub fn logicalNot(v: Value) Value {

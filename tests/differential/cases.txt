@@ -2870,3 +2870,33 @@ SELECT printf('%lll')
 SELECT printf('a%5')
 SELECT printf('a%5dc%5', 1)
 SELECT printf('a%db%', 0)
+
+# TEXT→bool / TEXT→i64 lenient prefix parse (Iter30.S):
+#  * sqlite3 routes truthy on TEXT through sqlite3AtoF-prefix (longest
+#    valid numeric prefix; whitespace strip; no hex). `'1abc'` → 1 → true,
+#    `'0x10'` → 0 (stops at 'x') → false, `' 1 '` → 1 → true.
+#  * Same lenient prefix used by sqlite3VdbeIntValue for bitwise ops:
+#    `'1abc' & 1` → 1, `~'1abc'` → -2, `'0x10' & 0x10` → 0.
+#  * `'abc'` (no digit prefix) → 0 / false in both contexts.
+SELECT iif('1abc','y','n')
+SELECT iif(' 1 ','y','n')
+SELECT iif('1ex','y','n')
+SELECT iif('0x10','y','n')
+SELECT iif('abc','y','n')
+SELECT iif('-0','y','n')
+SELECT iif('0.0','y','n')
+SELECT '1abc' AND 1
+SELECT 'abc' AND 1
+SELECT NOT '1abc'
+SELECT NOT 'abc'
+SELECT CASE WHEN '1abc' THEN 'y' ELSE 'n' END
+SELECT '1abc' & 1
+SELECT '1abc' | 0
+SELECT ~'1abc'
+SELECT '1abc' << 1
+SELECT '1abc' >> 0
+SELECT ' 1 ' & 1
+SELECT '0x10' & 0x10
+SELECT '1ex' & 1
+SELECT '1.5xyz' & 1
+SELECT 'abc' & 1
