@@ -32,7 +32,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
 - [ ] strftime の `'+N days'` 等の date math modifier
 - [x] strftime の `%s` (Unix epoch) / `%J` (Julian day) (純粋に DateTime→数値; `{d}` shortest-unique decimal が sqlite3 `%.16g` と一致)
-- [ ] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t`)
+- [x] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t` → SyntaxError; multi-star は許容; `validateStarExpansion` を `executeOneSelect` に組込み)
 - [x] Iter20 拡張: setop chain での ORDER BY <name> 対応 (leftmost branch の projection を case-insensitive で解決; 任意 expr / 修飾名 / 不明な name は SyntaxError; `column1` 合成名は依然 sqlite3 と差異あり)
 - [ ] Iter21 拡張: 任意 expression 列の合成名は現在 `columnN` を使用 (sqlite3 はソーステキストを使用); 仕様乖離あり、`alias` または bare ref で命名するワークアラウンド要
 - [ ] Iter22 拡張: `INSERT INTO t VALUES ((SELECT ...))` (parser-time VALUES に Database を渡す要)

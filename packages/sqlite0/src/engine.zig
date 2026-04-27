@@ -256,6 +256,7 @@ fn executeOneSelect(
     }
 
     const cart = try engine_from.cartesianFromSources(db, alloc, ps.from, outer_frames);
+    try validateStarExpansion(ps.items, cart.columns, cart.qualifiers);
     if (wants_grouping) {
         const inputs = try alloc.alloc([]const Value, cart.rows.len);
         for (cart.rows, inputs) |src, *slot| slot.* = src;
@@ -264,6 +265,49 @@ fn executeOneSelect(
     const rows_const = try alloc.alloc([]const Value, cart.rows.len);
     for (cart.rows, rows_const) |src, *slot| slot.* = src;
     return select_mod.executeWithFrom(alloc, db, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp, outer_frames);
+}
+
+/// Detect ambiguous star expansion across the FROM cartesian. For each `*`
+/// or `t.*` item in the SELECT list, walk the columns the star would expand
+/// to and reject if any (qualifier, column-name) pair appears twice
+/// (case-insensitive on both axes). Mirrors sqlite3's prepare-time check —
+/// `SELECT * FROM a t, a t` errors with "ambiguous column name: t.x", but
+/// `SELECT *, *` does not (multi-star duplicates are allowed; only
+/// within-star duplicates are flagged).
+///
+/// Pure-expression projections skip the cost (no allocation, just an early
+/// return on the items-have-no-star fast path).
+fn validateStarExpansion(
+    items: []const select_mod.SelectItem,
+    columns: []const []const u8,
+    qualifiers: []const []const u8,
+) Error!void {
+    if (!select_mod.containsStar(items)) return;
+    std.debug.assert(columns.len == qualifiers.len);
+    for (items) |item| switch (item) {
+        .expr => continue,
+        .star => |q| {
+            for (columns, qualifiers, 0..) |col_a, qual_a, i| {
+                if (q) |want| {
+                    if (!func_util.eqlIgnoreCase(want, qual_a)) continue;
+                }
+                var j: usize = i + 1;
+                while (j < columns.len) : (j += 1) {
+                    const qual_b = qualifiers[j];
+                    if (q) |want| {
+                        if (!func_util.eqlIgnoreCase(want, qual_b)) continue;
+                    }
+                    if (!func_util.eqlIgnoreCase(qual_a, qual_b)) continue;
+                    if (!func_util.eqlIgnoreCase(col_a, columns[j])) continue;
+                    // sqlite3: "ambiguous column name: <qualifier>.<col>".
+                    // We surface the same condition as `SyntaxError` to match
+                    // the convention `eval_column.evalColumnRef` already uses
+                    // for ambiguous frame-local refs.
+                    return Error.SyntaxError;
+                }
+            }
+        },
+    };
 }
 
 /// PostProcess for one branch of a setop chain: keep the per-branch DISTINCT

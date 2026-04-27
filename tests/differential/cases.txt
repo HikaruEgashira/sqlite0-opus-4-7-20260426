@@ -880,3 +880,24 @@ SELECT 1 AS x UNION SELECT 2 ORDER BY abs(x)
 SELECT 1 AS x UNION SELECT 2 ORDER BY z
 # qualified name in chain ORDER BY → both engines reject (no source scope)
 SELECT 1 AS x UNION SELECT 2 ORDER BY t.x
+# Iter19.D: ambiguous SELECT * across duplicate-alias FROM
+# duplicate alias on same table → ambiguous expansion
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT * FROM a19d t, a19d t
+# duplicate qualifier across two tables sharing a column name
+CREATE TABLE a19d(x); CREATE TABLE b19d(x); SELECT * FROM a19d t, b19d t
+# bare-name conflict (no explicit alias → table name acts as qualifier)
+CREATE TABLE a19d(x); SELECT * FROM a19d, a19d
+# t.* picks just the qualifier-matched columns; same condition applies
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT t.* FROM a19d t, a19d t
+# subquery alias collision via FROM
+CREATE TABLE a19d(x); SELECT * FROM (SELECT 1 AS y) t, (SELECT 2 AS y) t
+# case-insensitive match on qualifier
+CREATE TABLE a19d(x); SELECT * FROM a19d T, a19d t
+# accepted: distinct column names share a qualifier (sqlite3 OK)
+CREATE TABLE a19d(x); CREATE TABLE b19d(y); INSERT INTO a19d VALUES(1); INSERT INTO b19d VALUES(2); SELECT * FROM a19d t, b19d t
+# accepted: same table without star
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT 1 FROM a19d t, a19d t
+# accepted: SELECT *, * (cross-star duplicates allowed by sqlite3)
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT *, * FROM a19d
+# accepted: distinct qualifiers via aliases on same table
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT * FROM a19d a, a19d b
