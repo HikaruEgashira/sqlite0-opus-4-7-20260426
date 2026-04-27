@@ -2,51 +2,42 @@
 
 最新の実装計画。完了したタスクは `docs/memory/` または ADR に統合してから削除する (CLAUDE.md "Content Lifecycle Rules" 参照)。
 
-## Active Phase: Phase 2 — `Database` struct とインメモリ行ストア
+## Active Phase: Phase 3 — Pager + SQLite3 file-format 互換 storage
 
-ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-statement 実行 + `CREATE TABLE` / `INSERT` / `SELECT FROM t` の縦串を通す。
+ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が Phase 3 の境界を定義する。
 
-### Phase 2 の状態
-- Iter14.A〜D は完了 (`Database` struct / multi-statement / `CREATE TABLE` / `INSERT` / `SELECT FROM t` / `INSERT (col-list)` / `INSERT ... SELECT` / `CREATE TABLE` の duplicate column 検出)。
-- 次は Phase 1 の残 (Iter9, Iter12) または Phase 3 (VDBE) のどちらかへ。
+直近の実装スライス (Iter24): Pager 着手前に **Cursor 抽象** を導入し、AST evaluator を `Database.tables.get().rows` 直参照から Cursor 経由に切替える (ADR-0004 §3)。これにより Iter25 で Pager を導入したとき、evaluator 側の修正範囲が cursor 実装の追加だけで済む。
 
 各 Iter ごとに `tests/differential/cases.txt` を増やし、`bash tests/differential/run.sh` を緑にすること。
 
-### Phase 2 拡張 (実用 SQL の縦串)
-- [x] Iter15: `ORDER BY <expr> [ASC|DESC]` + `LIMIT N [OFFSET M]`
-- [x] Iter16: `DISTINCT`
-- [x] Iter17: 集約関数 (count, sum, min, max, avg, total) + `GROUP BY` / `HAVING`
-- [x] Iter18: `DELETE FROM t [WHERE ...]` / `UPDATE t SET col = expr [WHERE ...]`
+### Phase 3a: Cursor 抽象の導入 (Pager 着手前の refactor)
 
-### 残課題 (低優先)
-- [x] Iter17.A: `count(DISTINCT x)` / `sum(DISTINCT x)` / `avg(DISTINCT x)` / min/max/total + DISTINCT
-- [x] Iter19.A: comma-FROM (Cartesian) + qualified column refs (`t.x` / `t.*`) + table aliases
-- [x] Iter19.B: `CROSS JOIN` / `INNER JOIN ... ON` / `JOIN ... ON` keywords
-- [x] Iter19.C: `LEFT [OUTER] JOIN` (per-boundary ON + NULL padding for unmatched left rows)
-- [x] Iter20: `UNION` / `UNION ALL` / `INTERSECT` / `EXCEPT` (chain-level ORDER BY/LIMIT, dedup-replace-last semantics, column-count mismatch error)
-- [x] Iter21: `FROM (SELECT ...) [AS alias]` 部分問合せ (column-name 由来は alias > bare-ref > columnN; star は内側 cartesian 展開; nested / setop / aggregate / LEFT JOIN 連動を確認)
-- [x] Iter22.A: `EvalContext` に `?*Database` を追加し、SELECT/DML 全 evalExpr 経路に通す (refactor only)
-- [x] Iter22.B: スカラサブクエリ `(SELECT ...)` を式位置で受理 (空→NULL / 多列→error / 多行→先頭行; sqlite3 互換)
-- [x] Iter22.C: `IN (SELECT ...)` / `EXISTS (SELECT ...)` (空→ left 無視 0 / NULL 三値論理 / EXISTS は column-count 無視; `applyIn` の empty 早期 0 化は既存 `NULL IN ()` バグの修正も兼ねる)
-- [x] Iter22.D: correlated subqueries (`EvalContext.outer_frames` を 14 EvalContext サイトに通す + DML EvalContext に `column_qualifiers = [table_name]` を植える + `eval_column.evalColumnRef` が innermost-out フォールバック; correlated `EXISTS` / `IN (SELECT)` / scalar in SELECT-list を sqlite3 互換で実装。FROM-clause subquery の correlation は対象外)
-- [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要)
-- [x] strftime の `'+N days'` 等の date math modifier (`±N <unit>` の seconds/minutes/hours/days/months/years; `start of day/month/year`; chain対応; sign 任意; sqlite3互換: `+0.5 month`=15日, `+0.1 year`=36.5日, `+1 month` から日 overflow は JD 経由で renormalise)
-- [x] strftime の `%s` (Unix epoch) / `%J` (Julian day) (純粋に DateTime→数値; `{d}` shortest-unique decimal が sqlite3 `%.16g` と一致)
-- [x] `SELECT *` ambiguity detection across duplicate-alias FROM (e.g. `FROM a t, a t` → SyntaxError; multi-star は許容; `validateStarExpansion` を `executeOneSelect` に組込み)
-- [x] Iter20 拡張: setop chain での ORDER BY <name> 対応 (leftmost branch の projection を case-insensitive で解決; 任意 expr / 修飾名 / 不明な name は SyntaxError; `column1` 合成名は依然 sqlite3 と差異あり)
-- [x] Iter21.B: 任意 expression 列の合成名にソーステキスト採用 (`SELECT 1+2` → 列名 "1+2"; `SelectItem.ExprItem.source_text` を Parser から `parseSelectItem` で `[span_start..span_end]` で span キャプチャし `trimEnd`; `deriveExprColumnName` は alias > bare-ref > source_text > columnN の順で選ぶ)
-- [x] Iter22.E: `INSERT INTO t VALUES ((SELECT ...))` および `VALUES ((SELECT ...))` (Parser に `?*Database` 追加, dispatchOne で per-statement に設定; FROM `(VALUES ...)` 内のサブクエリも同経路で対応; FROM-clause 自体の `(SELECT ...)` ではなく VALUES tuple 内の subquery 限定)
-- [x] Iter22 拡張: correlated **FROM-clause** subquery (sqlite3 互換: 両エンジンとも `SELECT a.x, t.y FROM a, (SELECT a.x+10 AS y) t` は `no such column: a.x` で reject。sqlite3 は `LATERAL` キーワードを持たないため correlated FROM 自体が存在しない。仕様乖離なし — 実装不要)
-- [x] Iter23: `CAST(<expr> AS <type-name>)` (整数/実数/テキスト/blob/numeric affinity; sqlite3 substring rule で型名分類; multi-word `DOUBLE PRECISION` / 末尾 `(N)` 受理; integer は leading-digit + saturate; numeric は integer-valued + 非小数構文のとき integer; lex/ast/parser を分割しつつ実装)
+- [ ] Iter24.A: `cursor.zig` 新設、`Cursor` + `VTable` + in-memory `TableCursor` を実装。`engine_from.cartesianFromSources` の table 解決経路を Cursor 経由に切替。差分テスト 787/787 緑を維持。
+- [ ] Iter24.B: DML 経路 (`engine_dml.executeDelete` / `executeUpdate`) を Cursor 経由に切替。INSERT は schema 追記なので変更しない。
+- [ ] Iter24.C (任意): correlated subquery の outer-frame 経路の `current_row` 所有関係を Cursor contract で固める。
 
-## Backlog (Phase 3以降)
+### Phase 3b: Pager + read-only B-tree (SQLite3 .db 読み込み)
 
-- Phase 3: VDBE (バイトコードに移行) — ADR-0004 で再設計
-- Phase 4: Pager + B-tree (ファイル永続化, SQLite3ファイル形式互換) — ADR-0005
-- Phase 5: トランザクション + WAL
-- Phase 6: JOIN, GROUP BY, ORDER BY
+- [ ] Iter25.A: `pager.zig` 新設。`init(allocator, file_path)` で open, `getPage(n)` で 4096-byte buffer。LRU 16 page。kernel `flock` で exclusive lock。Unit test で sqlite3 fixture の page 1 header を読めること。
+- [ ] Iter25.B: `btree.zig` 新設。Table B-tree の cell parser + traversal。`BtreeCursor` を `cursor.zig` に追加。CLI に `-file <path>` 追加。差分ハーネス `run_file.sh` 新設。
+- [ ] Iter25.C: `schema.zig` 新設。`sqlite_schema` 経由で `Database.tables` populate。
+
+### Phase 3c: 書き込み path
+
+- [ ] Iter26.A: B-tree page 更新 + page split + sqlite_schema への INSERT。CREATE TABLE / INSERT / DELETE / UPDATE が persistent に。**rollback はまだ無い** (Phase 4 で WAL)。
+- [ ] Iter26.B: page split overflow (record が page サイズを超えるケース)。
+
+### 残課題 (低優先, Phase 2 由来)
+
+- [ ] strftime の `'now'` modifier (std.Io を Database / EvalContext に通すリファクタ要; Cursor 抽象を入れるタイミングで一緒に対応するか別 ADR か Iter25 着手前に判断)
+
+## Backlog (Phase 4 以降)
+
+- Phase 4: Transaction + WAL (rollback / journal / atomic commit) — ADR-0007
+- Phase 5: CLI 完全互換 (`.tables` / `.schema` / EXPLAIN / `-batch` モード) — ADR-0006
+- Phase 6: Index (CREATE INDEX), JOIN optimization, ANALYZE — 起票判断は Pager 完了時
 - Phase 7: Automated Reasoning (TLA+/Alloy/Lean) によるトランザクション安全性証明
-- CLI 完全互換 (`.tables` / `.schema` / エラーメッセージ形式) — ADR-0006
+- VDBE bytecode 移行: ADR-0004 §5 のトリガ条件成立時に再評価 (起票せず deferred)
 
 ## Conventions
 
