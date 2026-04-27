@@ -475,3 +475,19 @@ test "printf length modifier: %lld / %llu / %lf accepted as alias" {
     defer a.free(r3.text);
     try std.testing.expectEqualStrings("1.500000", r3.text);
 }
+
+test "printf sign flag: + and space last-wins" {
+    const a = std.testing.allocator;
+
+    // `%+ d` order: + then space → space wins → ' 1'
+    var p1 = [_]Value{ .{ .text = "%+ d" }, .{ .integer = 1 } };
+    const r1 = try fnPrintf(a, &p1);
+    defer a.free(r1.text);
+    try std.testing.expectEqualStrings(" 1", r1.text);
+
+    // `% +d` order: space then + → + wins → '+1'
+    var p2 = [_]Value{ .{ .text = "% +d" }, .{ .integer = 1 } };
+    const r2 = try fnPrintf(a, &p2);
+    defer a.free(r2.text);
+    try std.testing.expectEqualStrings("+1", r2.text);
+}

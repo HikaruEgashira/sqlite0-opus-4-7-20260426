@@ -2808,3 +2808,20 @@ SELECT length(cast(x'E697' as text))
 SELECT length(printf('%c', x'AB'))
 SELECT length(printf('%s', x'AB00CD'))
 SELECT length(printf('%s', cast(x'AB80' as text)))
+
+# printf sign-flag last-wins (Iter30.P): sqlite3 makes `+` and ` ` mutually
+# exclusive with the LAST flag winning, regardless of `-` position.
+# Verified: `%+ d` of 1 → ` 1` (space wins), `% +d` of 1 → `+1` (`+` wins).
+# C printf normally lets `+` win regardless of order, so this is a sqlite3
+# quirk we mirror.
+SELECT printf('%+ d', 1)
+SELECT printf('% +d', 1)
+SELECT printf('%-+ d', 1)
+SELECT printf('%- +d', 1)
+SELECT printf('%-+ d', -1)
+SELECT printf('%-+ 10.5f', 3.14)
+SELECT printf('%- +10.5f', 3.14)
+SELECT printf('%+ e', 1.5)
+SELECT printf('% +e', 1.5)
+SELECT printf('%+ g', 1.5)
+SELECT printf('% +g', 1.5)

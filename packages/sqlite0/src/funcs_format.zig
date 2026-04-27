@@ -264,12 +264,22 @@ pub const Spec = struct {
 fn parseSpec(fmt: []const u8, start: usize) Spec {
     var s = Spec{ .start = start, .end = start, .conv = '%' };
     var p = start;
-    // Flags
+    // Flags. sqlite3 quirk: `+` and ` ` are mutually-exclusive sign flags
+    // and LAST one written wins (`%+ d` of 1 → ` 1`, `% +d` of 1 → `+1`).
+    // C printf normally has `+` win regardless of order; sqlite3 follows
+    // its own precedence here. We track them independently and reset the
+    // other when one is set so the writer sees only the winner.
     while (p < fmt.len) : (p += 1) {
         switch (fmt[p]) {
             '-' => s.left_align = true,
-            '+' => s.plus = true,
-            ' ' => s.space = true,
+            '+' => {
+                s.plus = true;
+                s.space = false;
+            },
+            ' ' => {
+                s.space = true;
+                s.plus = false;
+            },
             '#' => s.alt = true,
             '0' => s.zero_pad = true,
             else => break,
