@@ -62,9 +62,17 @@ pub fn freeValue(allocator: std.mem.Allocator, v: Value) void {
     }
 }
 
+/// Unary `-`. INTEGER negates with overflow detection — `-LLONG_MIN`
+/// can't fit in i64, so sqlite3 promotes to REAL (`SELECT -(-9223372036854775808)`
+/// → 9.22e+18). REAL negates ordinarily; NULL passes through.
 pub fn negateValue(v: Value) Error!Value {
     return switch (v) {
-        .integer => |i| Value{ .integer = -%i },
+        .integer => |i| blk: {
+            if (i == std.math.minInt(i64)) {
+                break :blk Value{ .real = -@as(f64, @floatFromInt(i)) };
+            }
+            break :blk Value{ .integer = -i };
+        },
         .real => |f| Value{ .real = -f },
         .null => Value.null,
         else => Error.UnsupportedFeature,
@@ -80,12 +88,29 @@ pub fn applyArith(op: TokenKind, lhs_raw: Value, rhs_raw: Value) Error!Value {
         const a = lhs.integer;
         const b = rhs.integer;
         switch (op) {
-            .plus => return Value{ .integer = a +% b },
-            .minus => return Value{ .integer = a -% b },
-            .star => return Value{ .integer = a *% b },
+            // sqlite3 promotes to REAL on i64 overflow rather than
+            // wrapping silently — `LLONG_MAX + 1` -> 9.22e+18 etc.
+            .plus => {
+                const r = @addWithOverflow(a, b);
+                if (r[1] == 0) return Value{ .integer = r[0] };
+                return promoteArithToReal(op, a, b);
+            },
+            .minus => {
+                const r = @subWithOverflow(a, b);
+                if (r[1] == 0) return Value{ .integer = r[0] };
+                return promoteArithToReal(op, a, b);
+            },
+            .star => {
+                const r = @mulWithOverflow(a, b);
+                if (r[1] == 0) return Value{ .integer = r[0] };
+                return promoteArithToReal(op, a, b);
+            },
             .slash => {
                 if (b == 0) return Value.null;
-                if (a == std.math.minInt(i64) and b == -1) return Value.null;
+                // The one i64 division that overflows is LLONG_MIN/-1.
+                if (a == std.math.minInt(i64) and b == -1) {
+                    return promoteArithToReal(op, a, b);
+                }
                 return Value{ .integer = @divTrunc(a, b) };
             },
             .percent => {
@@ -111,6 +136,22 @@ pub fn applyArith(op: TokenKind, lhs_raw: Value, rhs_raw: Value) Error!Value {
         },
         else => unreachable,
     }
+}
+
+/// Re-do an integer arithmetic op as f64 after the i64 form overflowed.
+/// f64 can lose precision above 2^53 (`LLONG_MAX + 1` round-trips to
+/// 9.223372036854776e+18) — sqlite3 accepts the same loss, so byte-equal
+/// output requires using f64 too.
+fn promoteArithToReal(op: TokenKind, a: i64, b: i64) Value {
+    const fa = @as(f64, @floatFromInt(a));
+    const fb = @as(f64, @floatFromInt(b));
+    return switch (op) {
+        .plus => .{ .real = fa + fb },
+        .minus => .{ .real = fa - fb },
+        .star => .{ .real = fa * fb },
+        .slash => .{ .real = fa / fb },
+        else => unreachable,
+    };
 }
 
 fn toReal(v: Value) ?f64 {
