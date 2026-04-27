@@ -119,7 +119,9 @@ fn formatToValue(allocator: std.mem.Allocator, fmt: []const u8, args: []const Va
         }
 
         switch (spec.conv) {
-            '%' => try out.append(allocator, '%'),
+            // `%%` honors width (sqlite3 quirk — verified against 3.51.0:
+            // `printf('%5%')` → `'    %'`, `printf('%-5%')` → `'%    '`).
+            '%' => try writePercentLiteral(allocator, &out, spec),
             // `%n` in sqlite3 SQL printf is a no-op — it doesn't write
             // anything and doesn't consume an arg. (In C printf it would
             // store the byte count to a `int*` arg; sqlite3 disables this
@@ -338,15 +340,24 @@ fn writeString(
     if (spec.left_align) try appendN(allocator, out, ' ', pad);
 }
 
+fn writePercentLiteral(allocator: std.mem.Allocator, out: *std.ArrayList(u8), spec: Spec) !void {
+    const pad: usize = if (spec.width > 1) spec.width - 1 else 0;
+    if (!spec.left_align) try appendN(allocator, out, ' ', pad);
+    try out.append(allocator, '%');
+    if (spec.left_align) try appendN(allocator, out, ' ', pad);
+}
+
 fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value, spec: Spec) !void {
-    // sqlite3 quirk: `%c` reads the C-string's first byte and ALWAYS writes
-    // exactly 1 byte to the accumulator. Empty / NULL / leading-NUL inputs
-    // all produce a NUL byte (because `bufpt[0]` is the NUL terminator).
-    // INTEGER 65 is text-rendered to `"65"` first, so `printf('%c', 65)`
-    // emits `'6'` (first char of `"65"`), not `'A'`.
+    // sqlite3 quirk: `%c` reads the C-string's first byte and writes that
+    // byte `precision` times (default 1). Empty / NULL / leading-NUL inputs
+    // produce NUL byte(s). INTEGER 65 is text-rendered to `"65"` first, so
+    // `printf('%c', 65)` emits `'6'` (first char of `"65"`), not `'A'`.
     //
-    // Width pads the single byte; `0` flag is ignored for `%c` — sqlite3
-    // always uses spaces (`printf('%05c', 65)` → `"    6"`, not `"00006"`).
+    // Precision = repeat count: `printf('%.3c', 'A')` → `'AAA'`. Precision
+    // 0 or absent → 1 byte (sqlite3 etCharLit clamps at minimum 1).
+    //
+    // Width pads the rendered char run; `0` flag is ignored for `%c` —
+    // sqlite3 always uses spaces (`printf('%05c', 65)` → `'    6'`).
     var owned: ?[]u8 = null;
     defer if (owned) |b| allocator.free(b);
     const raw: []const u8 = switch (v) {
@@ -362,9 +373,10 @@ fn writeChar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), v: Value, sp
         },
     };
     const c: u8 = if (raw.len > 0) raw[0] else 0;
-    const pad: usize = if (spec.width > 1) spec.width - 1 else 0;
+    const repeat: usize = if (spec.precision) |p| (if (p == 0) 1 else p) else 1;
+    const pad: usize = if (spec.width > repeat) spec.width - repeat else 0;
     if (!spec.left_align) try appendN(allocator, out, ' ', pad);
-    try out.append(allocator, c);
+    try appendN(allocator, out, c, repeat);
     if (spec.left_align) try appendN(allocator, out, ' ', pad);
 }
 

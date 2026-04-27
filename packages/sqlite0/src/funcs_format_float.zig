@@ -28,8 +28,17 @@ pub fn writeFloat(
 ) !void {
     const f = coerceToFloat(v);
     const precision: usize = spec.precision orelse 6;
-    var buf: [64]u8 = undefined;
+    var buf: [80]u8 = undefined;
     const printed = std.fmt.bufPrint(&buf, "{d:.[1]}", .{ f, precision }) catch return Error.OutOfMemory;
+    // sqlite3 `%#f` quirk: with precision 0 the alt-form keeps the trailing
+    // decimal point (`printf('%#.0f', 1.0)` → `'1.'`). Zig's `{d:.0}`
+    // produces `'1'`. Append the dot inline; width padding is applied by
+    // `writeFloatBody`.
+    if (spec.alt and precision == 0 and printed.len < buf.len) {
+        buf[printed.len] = '.';
+        try writeFloatBody(allocator, out, buf[0 .. printed.len + 1], spec);
+        return;
+    }
     try writeFloatBody(allocator, out, printed, spec);
 }
 
@@ -49,8 +58,20 @@ pub fn writeExp(
     var raw_buf: [96]u8 = undefined;
     const raw = std.fmt.bufPrint(&raw_buf, "{e:.[1]}", .{ f, precision }) catch return Error.OutOfMemory;
     var fmt_buf: [128]u8 = undefined;
-    const body_full = normalizeExpForm(&fmt_buf, raw, upper);
-    try writeFloatBody(allocator, out, body_full, spec);
+    const normalized = normalizeExpForm(&fmt_buf, raw, upper);
+    // sqlite3 `%#e` with precision 0 keeps the trailing dot before the
+    // exponent (`printf('%#.0e', 1.0)` → `'1.e+00'`). Zig's `{e:.0}`
+    // gives `1e+00`. Splice a `.` between the mantissa and `[eE]`.
+    if (spec.alt and precision == 0) {
+        var spliced: [144]u8 = undefined;
+        const e_idx = std.mem.indexOfAny(u8, normalized, "eE") orelse normalized.len;
+        @memcpy(spliced[0..e_idx], normalized[0..e_idx]);
+        spliced[e_idx] = '.';
+        @memcpy(spliced[e_idx + 1 .. normalized.len + 1], normalized[e_idx..]);
+        try writeFloatBody(allocator, out, spliced[0 .. normalized.len + 1], spec);
+        return;
+    }
+    try writeFloatBody(allocator, out, normalized, spec);
 }
 
 /// `%g` / `%G`: pick between `%f` and `%e` based on the rounded magnitude.
@@ -85,17 +106,42 @@ pub fn writeGeneral(
         const stripped = stripGTrailing(&body_buf, e_raw, spec.alt, true);
         var final_buf: [128]u8 = undefined;
         const finalized = normalizeExpForm(&final_buf, stripped, upper);
-        @memcpy(body_buf[0..finalized.len], finalized);
-        break :blk body_buf[0..finalized.len];
+        // sqlite3 `%#g` quirk: alt-form keeps a visible decimal point
+        // even when the value has no fractional component
+        // (`printf('%#.0g', 1.5)` → `'2.'`). Splice one in if missing.
+        const out_slice = if (spec.alt) ensureMantissaDot(&body_buf, finalized) else body_buf[0..finalized.len];
+        if (!spec.alt) @memcpy(body_buf[0..finalized.len], finalized);
+        break :blk out_slice;
     } else blk: {
         const decimals_signed: i32 = @as(i32, @intCast(prec)) - 1 - exp_val;
         const decimals: usize = if (decimals_signed < 0) 0 else @intCast(decimals_signed);
         var raw_buf: [96]u8 = undefined;
         const raw = std.fmt.bufPrint(&raw_buf, "{d:.[1]}", .{ f, decimals }) catch return Error.OutOfMemory;
         const stripped = stripGTrailing(&body_buf, raw, spec.alt, false);
+        if (spec.alt and std.mem.indexOfScalar(u8, stripped, '.') == null and stripped.len < body_buf.len) {
+            body_buf[stripped.len] = '.';
+            break :blk body_buf[0 .. stripped.len + 1];
+        }
         break :blk stripped;
     };
     try writeFloatBody(allocator, out, body_full, spec);
+}
+
+/// Insert a `.` before the first `[eE]` (or at end) of `body` when no
+/// `.` is present in the mantissa portion. Used for `%#g` / `%#G` alt
+/// form when rounding collapsed the value to a single significant
+/// digit. Caller owns `buf`; returns a slice into it.
+fn ensureMantissaDot(buf: []u8, body: []const u8) []const u8 {
+    const e_idx = std.mem.indexOfAny(u8, body, "eE") orelse body.len;
+    const mantissa = body[0..e_idx];
+    if (std.mem.indexOfScalar(u8, mantissa, '.') != null) {
+        @memcpy(buf[0..body.len], body);
+        return buf[0..body.len];
+    }
+    @memcpy(buf[0..e_idx], mantissa);
+    buf[e_idx] = '.';
+    @memcpy(buf[e_idx + 1 .. body.len + 1], body[e_idx..]);
+    return buf[0 .. body.len + 1];
 }
 
 /// Convert Zig `{e}` exponent (`e0`, `e7`, `e-4`, `e100`) to sqlite3/C

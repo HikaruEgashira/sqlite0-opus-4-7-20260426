@@ -416,3 +416,43 @@ test "fnPrintf: %5c width-pads single byte; %05c uses spaces (no zero-pad)" {
     defer a.free(r2.text);
     try std.testing.expectEqualStrings("    6", r2.text);
 }
+
+test "printf alt-form: %#.0f keeps trailing dot" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%#.0f" }, .{ .real = 1.0 } };
+    const r = try fnPrintf(allocator, &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("1.", r.text);
+}
+
+test "printf alt-form: %#.0e keeps trailing dot before exponent" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%#.0e" }, .{ .real = 1.0 } };
+    const r = try fnPrintf(allocator, &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("1.e+00", r.text);
+}
+
+test "printf alt-form: %#.0g forces decimal point on rounded value" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%#.0g" }, .{ .real = 1.5 } };
+    const r = try fnPrintf(allocator, &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("2.", r.text);
+}
+
+test "printf %% width: %5%% pads with spaces" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{.{ .text = "%5%" }};
+    const r = try fnPrintf(allocator, &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("    %", r.text);
+}
+
+test "printf %c precision = repeat count" {
+    const allocator = std.testing.allocator;
+    var args = [_]Value{ .{ .text = "%.3c" }, .{ .text = "A" } };
+    const r = try fnPrintf(allocator, &args);
+    defer allocator.free(r.text);
+    try std.testing.expectEqualStrings("AAA", r.text);
+}

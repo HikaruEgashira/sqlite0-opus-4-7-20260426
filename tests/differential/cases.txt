@@ -2699,3 +2699,35 @@ SELECT strftime('%g', '-0100-01-01')
 SELECT strftime('%w', '-0001-12-31')
 SELECT strftime('%j', '-0004-12-31')
 SELECT timediff('0001-01-01', '-0001-12-31')
+
+# printf alt-form (`%#`) and width quirks (Iter30.L). sqlite3 quirks that
+# C printf already does but Zig's stdlib formatters don't:
+#   * `%%` honors width — `printf('%5%')` → `'    %'`.
+#   * `%c` precision = repeat count — `printf('%.3c', 'A')` → `'AAA'`.
+#     Precision 0 or absent → 1 byte (sqlite3 etCharLit min 1).
+#   * `%#f` / `%#e` / `%#g` with precision 0 keep the trailing decimal
+#     point (`printf('%#.0f', 1.0)` → `'1.'`).
+#   * `%#g` forces a visible decimal point even when rounding collapsed
+#     the value to a single significant digit (`printf('%#.0g', 1.5)`
+#     → `'2.'`).
+SELECT printf('%5%')
+SELECT printf('%-5%')
+SELECT printf('%10%')
+SELECT printf('%.3c', 'A')
+SELECT printf('%5.3c', 'A')
+SELECT printf('%-5.3c', 'A')
+SELECT printf('%.0c', 'A')
+SELECT printf('%.10c', 'A')
+SELECT printf('%.5c', 65)
+SELECT printf('%#.0f', 1.0)
+SELECT printf('%#.0f', 1.5)
+SELECT printf('%#.0f', -2.5)
+SELECT printf('%#.0e', 1.0)
+SELECT printf('%#.0e', 1.5e10)
+SELECT printf('%#.0E', 1.0)
+SELECT printf('%#.0g', 1.5)
+SELECT printf('%#.0g', 1.0)
+SELECT printf('%#.5g', 1.0)
+SELECT printf('%#g', 1.5)
+SELECT printf('%#g', 1.0)
+SELECT printf('%#G', 1e10)
