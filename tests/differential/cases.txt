@@ -959,3 +959,6 @@ CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(7); VALUES (1, (SELECT y FROM 
 SELECT col1 FROM (SELECT 1+2)
 SELECT * FROM (SELECT 1+2)
 SELECT * FROM (SELECT 1 + 2, 3*4)
+# Iter22.F: correlated FROM-clause subquery — sqlite3 has no LATERAL, so
+# both engines reject 'a.x' inside an inline subquery sharing the FROM list.
+CREATE TABLE a22f(x); INSERT INTO a22f VALUES(1),(2),(3); SELECT a22f.x, t.y FROM a22f, (SELECT a22f.x+10 AS y) t

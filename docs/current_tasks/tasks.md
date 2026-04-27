@@ -36,7 +36,7 @@ ADR-0003 に基づき、state を持つ `Database` オブジェクト + multi-st
 - [x] Iter20 拡張: setop chain での ORDER BY <name> 対応 (leftmost branch の projection を case-insensitive で解決; 任意 expr / 修飾名 / 不明な name は SyntaxError; `column1` 合成名は依然 sqlite3 と差異あり)
 - [x] Iter21.B: 任意 expression 列の合成名にソーステキスト採用 (`SELECT 1+2` → 列名 "1+2"; `SelectItem.ExprItem.source_text` を Parser から `parseSelectItem` で `[span_start..span_end]` で span キャプチャし `trimEnd`; `deriveExprColumnName` は alias > bare-ref > source_text > columnN の順で選ぶ)
 - [x] Iter22.E: `INSERT INTO t VALUES ((SELECT ...))` および `VALUES ((SELECT ...))` (Parser に `?*Database` 追加, dispatchOne で per-statement に設定; FROM `(VALUES ...)` 内のサブクエリも同経路で対応; FROM-clause 自体の `(SELECT ...)` ではなく VALUES tuple 内の subquery 限定)
-- [ ] Iter22 拡張: correlated **FROM-clause** subquery (cart は materialise 一度きり — outer 駆動で再実行する仕組みが要)
+- [x] Iter22 拡張: correlated **FROM-clause** subquery (sqlite3 互換: 両エンジンとも `SELECT a.x, t.y FROM a, (SELECT a.x+10 AS y) t` は `no such column: a.x` で reject。sqlite3 は `LATERAL` キーワードを持たないため correlated FROM 自体が存在しない。仕様乖離なし — 実装不要)
 
 ## Backlog (Phase 3以降)
 
