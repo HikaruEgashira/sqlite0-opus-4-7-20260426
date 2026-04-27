@@ -45,6 +45,7 @@
 const std = @import("std");
 const ops = @import("ops.zig");
 const btree_split = @import("btree_split.zig");
+const btree_insert = @import("btree_insert.zig");
 const pager_mod = @import("pager.zig");
 const record_encode = @import("record_encode.zig");
 
@@ -322,6 +323,55 @@ pub fn balanceDeeperInterior(
         right_page,
     );
     try pager.writePage(root_page_no, root_buf);
+}
+
+/// Bottom-of-spine leaf split for the recursive INSERT path
+/// (Iter26.B.3.c). Symmetric with `splitInteriorPage` but produces
+/// LEAF children. Allocates L_new + R_new, splits `all_combined` by
+/// `btree_split.splitLeafCells`, writes both leaves, and returns a
+/// `PromotedSplit` whose `new_cell` divider key matches the leaf
+/// split's `divider_key` (the largest rowid in the left half — leaf
+/// dividers are COPIED, not consumed, unlike interior split).
+///
+/// Does NOT touch the OLD leaf page — caller (= `insertIntoDeepTree`)
+/// tracks it in a deferred-free list and frees it after the topmost
+/// commit.
+///
+/// `all_combined.len < 2` → `Error.IoError` (nothing to split).
+pub fn splitLeafProduceChildren(
+    pager: *pager_mod.Pager,
+    all_combined: []const btree_insert.RebuildCell,
+) Error!PromotedSplit {
+    if (all_combined.len < 2) return Error.IoError;
+
+    const usable_size = try pager.usableSize();
+    const split = try btree_split.splitLeafCells(all_combined);
+
+    const allocator = pager.allocator;
+
+    // Allocate L_new + R_new before any pager writes — same shape as
+    // `splitInteriorPage` so `allocatePage` failures don't leave half-
+    // formatted pages on disk.
+    const left_page = try pager.allocatePage();
+    const right_page = try pager.allocatePage();
+
+    const left_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(left_buf);
+    @memset(left_buf, 0);
+    try btree_insert.rebuildLeafTablePage(left_buf, 0, usable_size, split.left);
+
+    const right_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+    defer allocator.free(right_buf);
+    @memset(right_buf, 0);
+    try btree_insert.rebuildLeafTablePage(right_buf, 0, usable_size, split.right);
+
+    try pager.writePage(left_page, left_buf);
+    try pager.writePage(right_page, right_buf);
+
+    return .{
+        .new_cell = .{ .left_child = left_page, .key = split.divider_key },
+        .new_right_child = right_page,
+    };
 }
 
 // Unit tests live in `btree_split_interior_test.zig` to keep this

@@ -1,4 +1,4 @@
-//! File-mode INSERT (Iter26.A.1 / .B.1 / .B.2). Split out of
+//! File-mode INSERT (Iter26.A.1 / .B.1 / .B.2 / .B.3). Split out of
 //! `engine_dml_file.zig` ahead of Iter26.C (overflow chain) so neither
 //! file crosses the 500-line discipline once chain-allocation wiring
 //! lands at the leaf-root + interior-root call sites.
@@ -15,6 +15,7 @@ const btree = @import("btree.zig");
 const btree_insert = @import("btree_insert.zig");
 const btree_overflow = @import("btree_overflow.zig");
 const btree_split = @import("btree_split.zig");
+const btree_split_interior = @import("btree_split_interior.zig");
 const record_encode = @import("record_encode.zig");
 const pager_mod = @import("pager.zig");
 
@@ -23,23 +24,22 @@ const Database = database.Database;
 const Table = database.Table;
 const Error = ops.Error;
 
-/// File-mode INSERT (Iter26.A.1 / .B.1 / .B.2): merge new rows into the
-/// existing rowid-sorted cell list, then either rebuild the affected
-/// leaf in place, balance-deeper a leaf root (B.1), or split the
-/// rightmost leaf of an interior root (B.2).
+/// File-mode INSERT (Iter26.A.1 / .B.1 / .B.2 / .B.3): merge new rows
+/// into the existing rowid-sorted cell list, then dispatch by root
+/// page type. Leaf root → rebuild in place or balance-deeper (B.1).
+/// Interior root → spine-descend to the rightmost leaf and propagate
+/// any split bottom-up; non-root interior overflow becomes a recursive
+/// interior split (B.3), root overflow becomes balance-deeper-interior.
 ///
 /// Restrictions:
-///   - root page must be either a leaf-table (any depth-0 case) or an
-///     interior-table (depth-1 case). Deeper trees and recursive
-///     interior split are Iter26.B.3 scope.
 ///   - INSERTs always grow the rightmost subtree because the rowid is
 ///     auto-assigned as `max(seen) + 1`. Mid-tree splits aren't
 ///     reachable through this entry point.
 ///   - rowid auto-assigned as `max(existing) + 1` (or 1 if empty).
 ///     Explicit rowid via INTEGER PRIMARY KEY alias is a future
 ///     iteration.
-///   - records exceeding `usable_size − 35` need an overflow chain
-///     (Iter26.C); rejected with `Error.UnsupportedFeature`.
+///   - records exceeding `usable_size − 35` use the overflow chain
+///     allocated via `btree_overflow.allocateOverflowChain` (Iter26.C).
 pub fn executeInsertFile(
     db: *Database,
     t: *Table,
@@ -77,7 +77,7 @@ pub fn executeInsertFile(
             root_work,
             root_header_offset,
         ),
-        .interior_table => try insertIntoInteriorRoot(
+        .interior_table => try insertIntoDeepTree(
             a,
             db,
             pager,
@@ -85,8 +85,6 @@ pub fn executeInsertFile(
             target_indices,
             source_rows,
             usable_size,
-            root_work,
-            root_header_offset,
         ),
         else => Error.UnsupportedFeature,
     };
@@ -175,11 +173,31 @@ fn buildRebuildCellWithOverflow(
     };
 }
 
-/// Iter26.B.2: depth-1 (interior root → leaves) INSERT path. We always
-/// fall through to the rightmost leaf because rowids are
-/// monotonically-increasing. The rightmost leaf either fits the new
-/// rows (cheap rebuild) or splits via `splitRightmostLeaf`.
-fn insertIntoInteriorRoot(
+/// One frame of the spine descend. Interior page snapshot the
+/// orchestrator keeps so it can rebuild the page in place (`.fits`)
+/// or hand a `merged_cells` view to `splitInteriorPage` (`.needs_split`).
+/// Cells are duped into the scratch arena — a pager getPage between
+/// snapshot and write may evict the original buffer.
+const SpineFrame = struct {
+    page_no: u32,
+    cells: []btree_split.InteriorCell,
+    right_child: u32,
+};
+
+/// Iter26.B.3 INSERT path for any depth ≥ 1 (interior root). The
+/// generalisation of B.2's `insertIntoInteriorRoot`: spine-descend
+/// from the root via `right_child` to the rightmost leaf, attempt
+/// the leaf rebuild; on `.needs_split` propagate the split up the
+/// spine, splitting interior pages where they can't fit and
+/// balance-deeper-interior'ing the root if it would overflow.
+///
+/// The whole flow is rightmost-only because the auto-assigned rowid
+/// is `max + 1` — every new row lands in the rightmost subtree.
+///
+/// Page 1 as interior root is rejected (sqlite_schema growth path
+/// is its own iteration; `balanceDeeperRoot` and
+/// `balanceDeeperInterior` both reject page 1).
+fn insertIntoDeepTree(
     a: std.mem.Allocator,
     db: *Database,
     pager: *pager_mod.Pager,
@@ -187,40 +205,56 @@ fn insertIntoInteriorRoot(
     target_indices: []const ?usize,
     source_rows: []const []Value,
     usable_size: usize,
-    root_work: []u8,
-    root_header_offset: usize,
 ) !u64 {
     _ = db;
-    // Page 1 as interior root would mean sqlite_schema overflowed and
-    // balance-deeper'd — currently impossible (B.1 rejects page 1) but
-    // belt-and-braces in case a future iteration changes that.
-    if (root_header_offset != 0) return Error.UnsupportedFeature;
+    if (btree.pageHeaderOffset(t.root_page) != 0) return Error.UnsupportedFeature;
 
-    const parent = try btree.parseInteriorTablePage(a, root_work, root_header_offset);
-
-    // Read & snapshot the rightmost leaf. Mutation will go to this
-    // page in the .fits path; in the .needs_split path it's freed.
-    const old_right_child = parent.right_child;
-    const right_orig = try pager.getPage(old_right_child);
-    const right_work = try a.alloc(u8, right_orig.len);
-    @memcpy(right_work, right_orig);
-
-    const right_header = try btree.parsePageHeader(right_work, 0);
-    if (right_header.page_type != .leaf_table) return Error.UnsupportedFeature;
-
-    const right_cells = try btree.parseLeafTablePage(a, right_work, 0, usable_size);
-
-    // max_rowid spans both parent's last divider key and the rightmost
-    // leaf's cells. Using the larger guards against an empty rightmost
-    // leaf (theoretically possible if a previous DELETE chain ran;
-    // harmless in B.2 since DELETE on multi-page tables is still
-    // UnsupportedFeature, but cheap to be correct).
-    var max_rowid: i64 = 0;
-    for (parent.cells) |c| {
-        if (c.key > max_rowid) max_rowid = c.key;
+    // -- Spine descend: root → ... → parent_of_leaf, leaf is `cur` after loop.
+    var spine: std.ArrayList(SpineFrame) = .empty;
+    var cur: u32 = t.root_page;
+    while (true) {
+        const page_bytes = try pager.getPage(cur);
+        const header_offset = btree.pageHeaderOffset(cur);
+        const header = try btree.parsePageHeader(page_bytes, header_offset);
+        switch (header.page_type) {
+            .leaf_table => break, // leaf reached; `cur` is its page_no
+            .interior_table => {},
+            else => return Error.UnsupportedFeature,
+        }
+        if (header_offset != 0) return Error.UnsupportedFeature; // non-root page 1 impossible; defensive
+        const info = try btree.parseInteriorTablePage(a, page_bytes, header_offset);
+        // parseInteriorTablePage already alloc'd `info.cells` from `a`.
+        const cells_split = try a.alloc(btree_split.InteriorCell, info.cells.len);
+        for (cells_split, info.cells) |*dst, src| {
+            dst.* = .{ .left_child = src.left_child, .key = src.key };
+        }
+        try spine.append(a, .{
+            .page_no = cur,
+            .cells = cells_split,
+            .right_child = info.right_child,
+        });
+        cur = info.right_child;
     }
+
+    const leaf_page_no = cur;
+    const leaf_orig = try pager.getPage(leaf_page_no);
+    const leaf_work = try a.alloc(u8, leaf_orig.len);
+    @memcpy(leaf_work, leaf_orig);
+    const leaf_cells = try btree.parseLeafTablePage(a, leaf_work, 0, usable_size);
+
+    // -- max_rowid: include every spine divider key + leaf cell rowid.
+    var max_rowid: i64 = 0;
+    for (spine.items) |frame| {
+        for (frame.cells) |c| {
+            if (c.key > max_rowid) max_rowid = c.key;
+        }
+    }
+    for (leaf_cells) |c| {
+        if (c.rowid > max_rowid) max_rowid = c.rowid;
+    }
+
     var combined: std.ArrayList(btree_insert.RebuildCell) = .empty;
-    for (right_cells) |c| {
+    for (leaf_cells) |c| {
         const dup = try a.dupe(u8, c.inline_bytes);
         try combined.append(a, .{
             .rowid = c.rowid,
@@ -228,7 +262,6 @@ fn insertIntoInteriorRoot(
             .overflow_head = c.overflow_head,
             .payload_len = if (c.overflow_head != 0) c.payload_len else 0,
         });
-        if (c.rowid > max_rowid) max_rowid = c.rowid;
     }
 
     var inserted: u64 = 0;
@@ -243,27 +276,110 @@ fn insertIntoInteriorRoot(
         inserted += 1;
     }
 
+    // -- Leaf classify. The .fits path is the common case (no split),
+    //    .needs_split kicks off the bottom-up propagation.
     switch (btree_split.classifyForLeaf(combined.items, 0, usable_size)) {
         .fits => {
-            try btree_insert.rebuildLeafTablePage(right_work, 0, usable_size, combined.items);
-            try pager.writePage(old_right_child, right_work);
+            try btree_insert.rebuildLeafTablePage(leaf_work, 0, usable_size, combined.items);
+            try pager.writePage(leaf_page_no, leaf_work);
+            return inserted;
         },
         .needs_split => {
-            // Convert btree.InteriorTableCell → btree_split.InteriorCell.
-            const parent_cells = try a.alloc(btree_split.InteriorCell, parent.cells.len);
-            for (parent_cells, parent.cells) |*dst, src| {
-                dst.* = .{ .left_child = src.left_child, .key = src.key };
-            }
-            try btree_split.splitRightmostLeaf(
-                pager,
-                t.root_page,
-                old_right_child,
-                parent_cells,
-                combined.items,
-            );
+            // Deferred-free list: the OLD leaf and any OLD interior
+            // pages that get split during spine ascent. Drained
+            // ONLY after the topmost commit (either an ancestor's
+            // .fits rewrite or balanceDeeperInterior on the root).
+            // Until then those pages are still reachable from the
+            // not-yet-updated grandparent, so freelist insertion
+            // would race integrity_check.
+            var deferred_free: std.ArrayList(u32) = .empty;
+
+            const ps_leaf = try btree_split_interior.splitLeafProduceChildren(pager, combined.items);
+            try deferred_free.append(a, leaf_page_no);
+
+            try propagateSplitUpSpine(a, pager, t.root_page, &spine, ps_leaf, usable_size, &deferred_free);
+            return inserted;
         },
-        .oversize_record => return Error.IoError, // invariant: handled above
+        .oversize_record => return Error.IoError, // invariant: handled by buildRebuildCellWithOverflow
     }
-    return inserted;
 }
 
+/// Walk back up the spine from leaf to root, inserting the carried
+/// `PromotedSplit` at each level and propagating further splits when
+/// interior pages would overflow. Drains `deferred_free` after the
+/// topmost commit.
+///
+/// Spine layout: `spine[0]` is the root, `spine[len-1]` is the parent
+/// of the leaf. We iterate from len-1 down to 0.
+fn propagateSplitUpSpine(
+    a: std.mem.Allocator,
+    pager: *pager_mod.Pager,
+    root_page_no: u32,
+    spine: *std.ArrayList(SpineFrame),
+    initial_carry: btree_split_interior.PromotedSplit,
+    usable_size: usize,
+    deferred_free: *std.ArrayList(u32),
+) !void {
+    var carry = initial_carry;
+    var i: usize = spine.items.len;
+    while (i > 0) {
+        i -= 1;
+        const frame = &spine.items[i];
+
+        // Compose merged cells: existing frame.cells ++ [carry.new_cell].
+        // `carry.new_cell.left_child` was the OLD frame.right_child's
+        // replacement L-half; the new frame.right_child is carry.new_right_child.
+        const merged = try a.alloc(btree_split.InteriorCell, frame.cells.len + 1);
+        for (merged[0..frame.cells.len], frame.cells) |*dst, src| {
+            dst.* = src;
+        }
+        merged[frame.cells.len] = carry.new_cell;
+        const merged_right_child = carry.new_right_child;
+
+        switch (btree_split.classifyForInterior(merged, 0, usable_size)) {
+            .fits => {
+                // Rewrite this interior page in place (page_no preserved).
+                const allocator = pager.allocator;
+                const buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
+                defer allocator.free(buf);
+                @memset(buf, 0);
+                try btree_split.writeInteriorTablePage(buf, 0, usable_size, merged, merged_right_child);
+                try pager.writePage(frame.page_no, buf);
+
+                // Topmost write committed — safe to drain deferred frees.
+                for (deferred_free.items) |pn| try pager.freePage(pn);
+                return;
+            },
+            .needs_split => {
+                if (i == 0) {
+                    // Root level — balance-deeper-interior. Page 1
+                    // root is rejected inside the helper. root_page_no
+                    // is reused (no freePage of root).
+                    try btree_split_interior.balanceDeeperInterior(
+                        pager,
+                        root_page_no,
+                        merged,
+                        merged_right_child,
+                    );
+                    for (deferred_free.items) |pn| try pager.freePage(pn);
+                    return;
+                }
+                // Non-root interior split. Old frame page joins the
+                // deferred-free list (still reachable from grandparent
+                // until we update it on the next iteration / ancestor's
+                // .fits write).
+                const ps_interior = try btree_split_interior.splitInteriorPage(
+                    pager,
+                    merged,
+                    merged_right_child,
+                );
+                try deferred_free.append(a, frame.page_no);
+                carry = ps_interior;
+            },
+        }
+    }
+    // Spine exhausted without committing — should not happen because
+    // i == 0 lands in balanceDeeperInterior. Defensive: if we get
+    // here, something corrupt happened.
+    return Error.IoError;
+}

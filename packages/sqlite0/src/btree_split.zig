@@ -120,9 +120,8 @@ pub const InteriorFitClass = enum { fits, needs_split };
 /// Predicate over a candidate list of interior cells. `fits` means
 /// `writeInteriorTablePage` will succeed at the given header offset and
 /// usable size; `needs_split` means the cell content + pointer array
-/// would not fit. Used by `splitRightmostLeaf` to pre-check the parent
-/// root before committing the child writes — a parent that wouldn't fit
-/// requires recursive interior split (Iter26.B.3).
+/// would not fit. Used by the INSERT spine walker to decide between an
+/// in-place rewrite and a recursive interior split (Iter26.B.3).
 pub fn classifyForInterior(
     cells: []const InteriorCell,
     header_offset: usize,
@@ -286,99 +285,13 @@ pub fn balanceDeeperRoot(
     try pager.writePage(root_page_no, root_buf);
 }
 
-/// Split the rightmost leaf of an interior root (Iter26.B.2). The
-/// monotonic-INSERT path always grows into the rightmost leaf, so this
-/// is the only split shape the B.2 differential surface exercises.
-///
-/// Inputs:
-///   - `root_page_no`: interior root (page 1 rejected — see B.1 doc).
-///   - `old_right_child`: the leaf that currently sits in the parent's
-///     `right_child` slot and is overflowing.
-///   - `parent_cells`: existing interior cells of the parent (sub-slice
-///     borrow OK; copied into the new parent before any pager mutation).
-///   - `all_combined`: rowid-sorted list of every cell that should live
-///     across the two new leaves (= existing right_child cells + new
-///     INSERT rows merged by the caller).
-///
-/// Sequence (parent-last invariant matches B.1):
-///   1. classifyForInterior pre-check on the proposed new parent. If
-///      it would overflow, bail with `Error.UnsupportedFeature`
-///      (Iter26.B.3 scope) BEFORE allocating any new pages — avoids
-///      orphan + dbsize-bumped state on the failure path. Sentinel
-///      `left_child=0` is fine because classifyForInterior only
-///      consults each cell's key varint width.
-///   2. allocate L_new, R_new (bumps page 1 dbsize twice).
-///   3. write children: L_new, then R_new.
-///   4. write parent_root LAST (now pointing at L_new + R_new).
-///   5. freePage(old_right_child) — the OLD leaf is now unreachable from
-///      the parent and must enter the freelist or `PRAGMA
-///      integrity_check` would flag it as "never used".
-pub fn splitRightmostLeaf(
-    pager: *pager_mod.Pager,
-    root_page_no: u32,
-    old_right_child: u32,
-    parent_cells: []const InteriorCell,
-    all_combined: []const btree_insert.RebuildCell,
-) Error!void {
-    if (root_page_no == 1) return Error.UnsupportedFeature;
-    if (all_combined.len < 2) return Error.IoError;
-
-    const usable_size = try pager.usableSize();
-    const split = try splitLeafCells(all_combined);
-
-    const allocator = pager.allocator;
-
-    // Compose the new parent's interior cell list with sentinel
-    // left_child=0 first so we can run the fit check BEFORE touching
-    // the pager. The real page number gets patched in after
-    // allocation succeeds.
-    const new_parent_cells = try allocator.alloc(InteriorCell, parent_cells.len + 1);
-    defer allocator.free(new_parent_cells);
-    @memcpy(new_parent_cells[0..parent_cells.len], parent_cells);
-    new_parent_cells[parent_cells.len] = .{
-        .left_child = 0,
-        .key = split.divider_key,
-    };
-
-    // Pre-check parent fit (root_page_no != 1, so header_offset = 0).
-    // Failing here means recursive interior split is needed (B.3) —
-    // surface UnsupportedFeature without leaving any orphan pages
-    // behind.
-    if (classifyForInterior(new_parent_cells, 0, usable_size) != .fits) {
-        return Error.UnsupportedFeature;
-    }
-
-    // Parent will fit — safe to allocate L_new + R_new and write them.
-    const left_page_no = try pager.allocatePage();
-    const right_page_no = try pager.allocatePage();
-    new_parent_cells[parent_cells.len].left_child = left_page_no;
-
-    // Build leaf bodies in scratch buffers; rebuildLeafTablePage may
-    // still reject if a single record is oversize, in which case the
-    // newly-allocated pages stay orphaned (acceptable per module doc).
-    const left_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
-    defer allocator.free(left_buf);
-    @memset(left_buf, 0);
-    try btree_insert.rebuildLeafTablePage(left_buf, 0, usable_size, split.left);
-
-    const right_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
-    defer allocator.free(right_buf);
-    @memset(right_buf, 0);
-    try btree_insert.rebuildLeafTablePage(right_buf, 0, usable_size, split.right);
-
-    try pager.writePage(left_page_no, left_buf);
-    try pager.writePage(right_page_no, right_buf);
-
-    const root_buf = try allocator.alloc(u8, pager_mod.PAGE_SIZE);
-    defer allocator.free(root_buf);
-    @memset(root_buf, 0);
-    try writeInteriorTablePage(root_buf, 0, usable_size, new_parent_cells, right_page_no);
-    try pager.writePage(root_page_no, root_buf);
-
-    // OLD right child is now unreachable from the parent — reclaim it
-    // through the freelist so integrity_check stays "ok".
-    try pager.freePage(old_right_child);
-}
+// `splitRightmostLeaf` (the B.2 depth-1 split helper) was removed in
+// Iter26.B.3.c. Its responsibilities are now handled by the spine-
+// descending orchestrator in `engine_dml_insert_file.insertIntoDeepTree`,
+// which composes `btree_split_interior.splitLeafProduceChildren` plus
+// `splitInteriorPage` / `balanceDeeperInterior` to handle arbitrary
+// depth. The depth-1 case still works through the same path
+// (spine.items.len == 1, root rewrite via classifyForInterior `.fits`).
 
 // Unit tests live in `btree_split_test.zig` to keep this file under
 // the 500-line discipline (CLAUDE.md "Module Splitting Rules").
