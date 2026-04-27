@@ -1177,3 +1177,24 @@ SELECT mod(10, 0)
 # Irrational-result formatter check (advisor)
 SELECT pow(2, 0.5)
 SELECT sqrt(2)
+
+# Iter29.G — zeroblob(N) / randomblob(N). zeroblob(N) returns N zero
+# bytes (clamps N<0 / NULL / unparsable TEXT to 0). randomblob(N)
+# returns max(N, 1) random bytes (sqlite3 quirk: even N=0 yields a
+# 1-byte blob). Direct BLOB output is excluded from fixtures because
+# sqlite3 CLI truncates at first NUL — length/typeof/hex give a
+# stable byte-equal comparison.
+SELECT length(zeroblob(8))
+SELECT typeof(zeroblob(8))
+SELECT hex(zeroblob(0))
+SELECT hex(zeroblob(3))
+SELECT length(zeroblob(0))
+SELECT length(zeroblob(-5))
+SELECT length(zeroblob(NULL))
+SELECT length(zeroblob('5'))
+SELECT length(zeroblob('foo'))
+SELECT length(randomblob(16))
+SELECT typeof(randomblob(16))
+SELECT length(randomblob(0))
+SELECT length(randomblob(-3))
+SELECT length(randomblob(NULL))

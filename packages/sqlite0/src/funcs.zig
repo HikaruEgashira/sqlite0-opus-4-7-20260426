@@ -35,6 +35,8 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "char")) return text.fnChar(allocator, args);
     if (util.eqlIgnoreCase(name, "unicode")) return text.fnUnicode(allocator, args);
     if (util.eqlIgnoreCase(name, "random")) return fnRandom(args);
+    if (util.eqlIgnoreCase(name, "zeroblob")) return fnZeroblob(allocator, args);
+    if (util.eqlIgnoreCase(name, "randomblob")) return fnRandomblob(allocator, args);
     if (util.eqlIgnoreCase(name, "printf") or util.eqlIgnoreCase(name, "format")) return fmt_mod.fnPrintf(allocator, args);
     if (util.eqlIgnoreCase(name, "strftime")) return time_mod.fnStrftime(allocator, args);
     if (util.eqlIgnoreCase(name, "date")) return time_mod.fnDate(allocator, args);
@@ -105,12 +107,55 @@ var random_prng: ?std.Random.DefaultPrng = null;
 /// sqlite3's per-call re-evaluation. sqlite3 errors on `random(1)` (no args).
 fn fnRandom(args: []const Value) Error!Value {
     if (args.len != 0) return Error.WrongArgumentCount;
+    ensurePrng();
+    const bits = random_prng.?.random().int(u64);
+    return Value{ .integer = @bitCast(bits) };
+}
+
+fn ensurePrng() void {
     if (random_prng == null) {
         const seed = @intFromPtr(&random_prng) ^ 0xdeadbeefcafebabe;
         random_prng = std.Random.DefaultPrng.init(seed);
     }
-    const bits = random_prng.?.random().int(u64);
-    return Value{ .integer = @bitCast(bits) };
+}
+
+/// `zeroblob(N)` — return N zero bytes. sqlite3 clamps `N < 0` and
+/// NULL to 0 bytes; TEXT input is parsed (`'5'` → 5 bytes, `'foo'`
+/// → 0 bytes via the lenient prefix parser). Always returns BLOB
+/// even when length is 0.
+fn fnZeroblob(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 1) return Error.WrongArgumentCount;
+    const n = blobLengthFromArg(args[0], 0);
+    const bytes = try allocator.alloc(u8, n);
+    @memset(bytes, 0);
+    return Value{ .blob = bytes };
+}
+
+/// `randomblob(N)` — return N random bytes. sqlite3 clamps `N < 1`
+/// (including `0` / `-N` / NULL / non-numeric TEXT) up to 1 byte —
+/// quirky but stable across versions. Bytes come from the same
+/// process-wide PRNG as `random()`.
+fn fnRandomblob(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 1) return Error.WrongArgumentCount;
+    const n = blobLengthFromArg(args[0], 1);
+    const bytes = try allocator.alloc(u8, n);
+    ensurePrng();
+    random_prng.?.random().bytes(bytes);
+    return Value{ .blob = bytes };
+}
+
+/// Common length-coercion shape for `zeroblob` / `randomblob`. NULL
+/// and out-of-range numerics fall back to `min`. The `i64` cast goes
+/// through `numericAsReal` so TEXT inputs parse the same way they do
+/// for `mod()` / `pow()` / etc.
+fn blobLengthFromArg(v: Value, min: usize) usize {
+    if (v == .null) return min;
+    const r = util.numericAsReal(v);
+    if (std.math.isNan(r) or r < @as(f64, @floatFromInt(min))) return min;
+    // u32 is more than enough — 4GB upper cap matches sqlite3's
+    // SQLITE_MAX_LENGTH default and prevents OOM on `zeroblob(1e18)`.
+    if (r > 1_000_000_000.0) return 1_000_000_000;
+    return @intFromFloat(r);
 }
 
 fn fnLength(allocator: std.mem.Allocator, args: []const Value) Error!Value {
