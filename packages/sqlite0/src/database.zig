@@ -88,6 +88,14 @@ pub const Table = struct {
     /// sqlite_schema` would silently corrupt page 1 (sqlite3 rejects
     /// with "table sqlite_master may not be modified" — we mirror).
     is_system: bool = false,
+    /// Iter29.S — monotonic rowid sequence for in-memory non-IPK tables.
+    /// Bumped per row by `executeInsert`; the bumped value becomes
+    /// `db.last_insert_rowid` after a successful INSERT. Unused for
+    /// IPK tables (the IPK column value is the rowid) and for
+    /// file-mode tables (rowid comes from B-tree leaf cell metadata).
+    /// Not decremented on DELETE — sqlite3 doesn't reuse rowids by
+    /// default (max+1 selection). 0 = no rows ever inserted.
+    next_implicit_rowid: i64 = 0,
 
     pub fn deinit(self: *Table, allocator: std.mem.Allocator) void {
         for (self.rows.items) |row| {
@@ -152,6 +160,21 @@ pub const Database = struct {
     /// commit batch (or is dropped as a unit on ROLLBACK). Implicit
     /// rollback on `deinit` discards staged frames via `pager.close`.
     in_transaction: bool = false,
+    /// Iter29.S — connection-wide last-INSERT rowid (mirrors sqlite3's
+    /// `last_insert_rowid()` API). Updated by `executeInsert` /
+    /// `executeInsertFile` after a successful INSERT to the rowid of the
+    /// last inserted row. Initial value 0 (sqlite3 quirk: returns 0 on
+    /// a fresh connection before any INSERT). Not touched by DELETE /
+    /// UPDATE / CREATE TABLE / SELECT.
+    last_insert_rowid: i64 = 0,
+    /// Iter29.S — rowcount of the most recent DML statement (sqlite3
+    /// `changes()`). Set by INSERT/UPDATE/DELETE dispatch in `engine`.
+    /// Reset to 0 on connection open. Spec quirk: SELECT/PRAGMA do NOT
+    /// touch this — the previous DML's value persists across reads.
+    last_changes: i64 = 0,
+    /// Iter29.S — cumulative rowcount across all completed DML on this
+    /// connection (sqlite3 `total_changes()`). Monotonically increasing.
+    total_changes: i64 = 0,
     /// Iter27.F — savepoint stack (LIFO). Entries are pushed by
     /// SAVEPOINT, popped by RELEASE / COMMIT / ROLLBACK / by ROLLBACK
     /// TO (which keeps the named entry but pops everything above it).

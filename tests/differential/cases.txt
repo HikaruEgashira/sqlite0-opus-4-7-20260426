@@ -1488,3 +1488,34 @@ SELECT typeof(0x8000000000000000)
 SELECT -0x8000000000000000
 SELECT -0x10000000000000000
 
+# Iter29.S: state-aware functions changes() / total_changes() /
+# last_insert_rowid(). Each test runs in its own connection so the
+# state baseline is consistent. Multi-statement strings let us
+# exercise INSERT → state-read pairs in one shot.
+#  - Fresh connection: all three return 0.
+#  - Wrong arg count: error on both engines.
+#  - INSERT 1 row → last_insert_rowid = 1, changes = 1, total = 1.
+#  - INSERT 3 rows in one VALUES → last_insert_rowid = 3, changes = 3.
+#  - IPK explicit value sets last_insert_rowid to that value.
+#  - DELETE/UPDATE bump changes/total but NOT last_insert_rowid.
+SELECT changes()
+SELECT total_changes()
+SELECT last_insert_rowid()
+SELECT typeof(changes())
+SELECT typeof(last_insert_rowid())
+SELECT changes(1)
+SELECT last_insert_rowid(1)
+CREATE TABLE t(x); INSERT INTO t VALUES(10); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(10); SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(10),(20),(30); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(10),(20),(30); SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(10),(20),(30); SELECT total_changes();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(5, 'a'); SELECT last_insert_rowid();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(5, 'a'); INSERT INTO t VALUES(NULL, 'b'); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; SELECT total_changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1); INSERT INTO t VALUES(2); SELECT total_changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT changes(); SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1); BEGIN; INSERT INTO t VALUES(2); ROLLBACK; SELECT last_insert_rowid();

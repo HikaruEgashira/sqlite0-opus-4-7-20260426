@@ -5,15 +5,20 @@ const text = @import("funcs_text.zig");
 const fmt_mod = @import("funcs_format.zig");
 const time_mod = @import("funcs_time.zig");
 const math_mod = @import("funcs_math.zig");
+const database = @import("database.zig");
 
 const Value = util.Value;
 const Error = util.Error;
+const Database = database.Database;
 
 /// Built-in scalar function dispatch. `name` is matched case-insensitively.
 /// `args` are owned by the caller — implementations must not free them, but
 /// may dupe data into the returned Value, which the caller takes ownership of.
 /// Returns `Error.UnknownFunction` for names that aren't registered yet.
-pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value) Error!Value {
+/// `db` is non-null whenever evaluation runs through `engine.dispatchOne`;
+/// state-aware functions (`changes()` / `last_insert_rowid()` / etc.) read
+/// from it. Functions that only need allocator-and-args ignore the param.
+pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args: []const Value) Error!Value {
     if (util.eqlIgnoreCase(name, "length")) return fnLength(allocator, args);
     if (util.eqlIgnoreCase(name, "lower")) return fnLower(allocator, args);
     if (util.eqlIgnoreCase(name, "upper")) return fnUpper(allocator, args);
@@ -73,7 +78,28 @@ pub fn call(allocator: std.mem.Allocator, name: []const u8, args: []const Value)
     if (util.eqlIgnoreCase(name, "degrees")) return math_mod.fnDegrees(args);
     if (util.eqlIgnoreCase(name, "radians")) return math_mod.fnRadians(args);
     if (util.eqlIgnoreCase(name, "mod")) return math_mod.fnMod(args);
+    // Iter29.S — state-aware functions reading connection-wide DML
+    // bookkeeping. `db == null` (parser-time VALUES tuple eval) gets
+    // back 0 — sqlite3's matching behaviour on a fresh connection.
+    if (util.eqlIgnoreCase(name, "changes")) return fnChanges(db, args);
+    if (util.eqlIgnoreCase(name, "total_changes")) return fnTotalChanges(db, args);
+    if (util.eqlIgnoreCase(name, "last_insert_rowid")) return fnLastInsertRowid(db, args);
     return Error.UnknownFunction;
+}
+
+fn fnChanges(db: ?*Database, args: []const Value) Error!Value {
+    if (args.len != 0) return Error.WrongArgumentCount;
+    return Value{ .integer = if (db) |d| d.last_changes else 0 };
+}
+
+fn fnTotalChanges(db: ?*Database, args: []const Value) Error!Value {
+    if (args.len != 0) return Error.WrongArgumentCount;
+    return Value{ .integer = if (db) |d| d.total_changes else 0 };
+}
+
+fn fnLastInsertRowid(db: ?*Database, args: []const Value) Error!Value {
+    if (args.len != 0) return Error.WrongArgumentCount;
+    return Value{ .integer = if (db) |d| d.last_insert_rowid else 0 };
 }
 
 /// `iif(cond, a, b)` — sqlite3's CASE WHEN shorthand. Returns `a` when
@@ -346,21 +372,21 @@ fn fnMinMax(allocator: std.mem.Allocator, args: []const Value, dir: MinMax) Erro
 test "funcs: length(text) byte count" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .text = "hello" }};
-    const r = try call(allocator, "length", &args);
+    const r = try call(allocator, null, "length", &args);
     try std.testing.expectEqual(@as(i64, 5), r.integer);
 }
 
 test "funcs: length(NULL) is NULL" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.null};
-    const r = try call(allocator, "length", &args);
+    const r = try call(allocator, null, "length", &args);
     try std.testing.expectEqual(Value.null, r);
 }
 
 test "funcs: lower" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .text = "Hello World" }};
-    const r = try call(allocator, "LOWER", &args);
+    const r = try call(allocator, null, "LOWER", &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("hello world", r.text);
 }
@@ -368,7 +394,7 @@ test "funcs: lower" {
 test "funcs: substr basic" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .{ .text = "hello" }, .{ .integer = 2 }, .{ .integer = 3 } };
-    const r = try call(allocator, "substr", &args);
+    const r = try call(allocator, null, "substr", &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("ell", r.text);
 }
@@ -376,7 +402,7 @@ test "funcs: substr basic" {
 test "funcs: substr negative start" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .{ .text = "hello" }, .{ .integer = -3 } };
-    const r = try call(allocator, "substr", &args);
+    const r = try call(allocator, null, "substr", &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("llo", r.text);
 }
@@ -384,7 +410,7 @@ test "funcs: substr negative start" {
 test "funcs: substr negative length" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .{ .text = "hello" }, .{ .integer = 2 }, .{ .integer = -1 } };
-    const r = try call(allocator, "substr", &args);
+    const r = try call(allocator, null, "substr", &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("h", r.text);
 }
@@ -392,28 +418,28 @@ test "funcs: substr negative length" {
 test "funcs: abs integer" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .integer = -7 }};
-    const r = try call(allocator, "abs", &args);
+    const r = try call(allocator, null, "abs", &args);
     try std.testing.expectEqual(@as(i64, 7), r.integer);
 }
 
 test "funcs: abs(text 'foo') is real 0.0" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .text = "foo" }};
-    const r = try call(allocator, "abs", &args);
+    const r = try call(allocator, null, "abs", &args);
     try std.testing.expectEqual(@as(f64, 0.0), r.real);
 }
 
 test "funcs: coalesce picks first non-null" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .null, .null, .{ .integer = 42 }, .{ .integer = 99 } };
-    const r = try call(allocator, "coalesce", &args);
+    const r = try call(allocator, null, "coalesce", &args);
     try std.testing.expectEqual(@as(i64, 42), r.integer);
 }
 
 test "funcs: typeof returns lowercase tag" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .real = 1.5 }};
-    const r = try call(allocator, "typeof", &args);
+    const r = try call(allocator, null, "typeof", &args);
     defer allocator.free(r.text);
     try std.testing.expectEqualStrings("real", r.text);
 }
@@ -421,27 +447,27 @@ test "funcs: typeof returns lowercase tag" {
 test "funcs: round to integer always returns real" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .real = 3.5 }};
-    const r = try call(allocator, "round", &args);
+    const r = try call(allocator, null, "round", &args);
     try std.testing.expectEqual(@as(f64, 4.0), r.real);
 }
 
 test "funcs: round half-away-from-zero for negative" {
     const allocator = std.testing.allocator;
     var args = [_]Value{.{ .real = -2.5 }};
-    const r = try call(allocator, "round", &args);
+    const r = try call(allocator, null, "round", &args);
     try std.testing.expectEqual(@as(f64, -3.0), r.real);
 }
 
 test "funcs: min(NULL, ...) is NULL" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .null, .{ .integer = 1 }, .{ .integer = 2 } };
-    const r = try call(allocator, "min", &args);
+    const r = try call(allocator, null, "min", &args);
     try std.testing.expectEqual(Value.null, r);
 }
 
 test "funcs: max picks largest" {
     const allocator = std.testing.allocator;
     var args = [_]Value{ .{ .integer = 1 }, .{ .integer = 3 }, .{ .integer = 2 } };
-    const r = try call(allocator, "max", &args);
+    const r = try call(allocator, null, "max", &args);
     try std.testing.expectEqual(@as(i64, 3), r.integer);
 }

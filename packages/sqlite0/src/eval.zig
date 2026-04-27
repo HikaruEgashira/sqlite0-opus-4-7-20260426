@@ -309,7 +309,7 @@ fn evalFuncCall(ctx: EvalContext, expr: *const Expr, fc: Expr.FuncCall) Error!Va
     for (fc.args) |arg_expr| {
         arg_values.appendAssumeCapacity(try evalExpr(ctx, arg_expr));
     }
-    return funcs.call(ctx.allocator, fc.name, arg_values.items);
+    return funcs.call(ctx.allocator, ctx.db, fc.name, arg_values.items);
 }
 
 test "eval: literal integer" {

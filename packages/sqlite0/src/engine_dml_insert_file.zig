@@ -101,7 +101,6 @@ fn insertIntoLeafRoot(
     work: []u8,
     header_offset: usize,
 ) !u64 {
-    _ = db;
     // Parse existing cells and dupe their record bytes into the scratch
     // arena: `work` will be overwritten by the rebuild / balance-deeper
     // path, and the source slices borrow from it.
@@ -142,6 +141,10 @@ fn insertIntoLeafRoot(
         },
         .oversize_record => return Error.IoError, // invariant: handled above
     }
+    // Iter29.S — record the rowid of the LAST inserted cell so
+    // `last_insert_rowid()` returns it. Only commit on success
+    // (after the writePage / balanceDeeperRoot above completes).
+    if (prepared.len > 0) db.last_insert_rowid = prepared[prepared.len - 1].rowid;
     return inserted;
 }
 
@@ -291,7 +294,6 @@ fn insertIntoDeepTree(
     source_rows: []const []Value,
     usable_size: usize,
 ) !u64 {
-    _ = db;
     if (btree.pageHeaderOffset(t.root_page) != 0) return Error.UnsupportedFeature;
 
     // -- Spine descend: root → ... → parent_of_leaf, leaf is `cur` after loop.
@@ -363,6 +365,7 @@ fn insertIntoDeepTree(
         .fits => {
             try btree_insert.rebuildLeafTablePage(leaf_work, 0, usable_size, combined.items);
             try pager.writePage(leaf_page_no, leaf_work);
+            if (prepared.len > 0) db.last_insert_rowid = prepared[prepared.len - 1].rowid;
             return inserted;
         },
         .needs_split => {
@@ -379,6 +382,7 @@ fn insertIntoDeepTree(
             try deferred_free.append(a, leaf_page_no);
 
             try propagateSplitUpSpine(a, pager, t.root_page, &spine, ps_leaf, usable_size, &deferred_free);
+            if (prepared.len > 0) db.last_insert_rowid = prepared[prepared.len - 1].rowid;
             return inserted;
         },
         .oversize_record => return Error.IoError, // invariant: handled by buildRebuildCellWithOverflow

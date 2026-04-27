@@ -235,6 +235,14 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             db.allocator.free(undone_row);
         }
     }
+    // Iter29.S — track last-inserted rowid in a local that we commit
+    // to `db.last_insert_rowid` only after the full for-loop succeeds.
+    // The errdefer above rolls rows back on failure; same rollback
+    // shape applies here. For non-IPK tables we additionally stage
+    // a local copy of `t.next_implicit_rowid` so the counter doesn't
+    // advance on a failed (partial) INSERT.
+    var last_rowid: i64 = db.last_insert_rowid;
+    var local_next_implicit: i64 = t.next_implicit_rowid;
     for (source_rows) |row| {
         const new_row = try db.allocator.alloc(Value, t.columns.len);
         var k: usize = 0;
@@ -252,15 +260,24 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             .null => {
                 max_rowid += 1;
                 new_row[ipk] = .{ .integer = max_rowid };
+                last_rowid = max_rowid;
             },
             .integer => |explicit| {
                 if (explicit > max_rowid) max_rowid = explicit;
+                last_rowid = explicit;
             },
             else => {},
-        };
+        } else {
+            local_next_implicit += 1;
+            last_rowid = local_next_implicit;
+        }
         try enforceNotNull(t, new_row);
         t.rows.appendAssumeCapacity(new_row);
         inserted += 1;
+    }
+    if (inserted > 0) {
+        db.last_insert_rowid = last_rowid;
+        if (t.ipk_column == null) t.next_implicit_rowid = local_next_implicit;
     }
     return inserted;
 }

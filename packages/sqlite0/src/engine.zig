@@ -82,6 +82,8 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             // `db.pager`. CREATE TABLE / DELETE / UPDATE still go
             // through the read-only guard.
             const rowcount = try engine_dml.executeInsert(db, p.allocator, parsed);
+            db.last_changes = @intCast(rowcount);
+            db.total_changes += @intCast(rowcount);
             return .{ .insert = .{ .rowcount = rowcount } };
         },
         .keyword_delete => {
@@ -90,6 +92,8 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             // handled via Pager + rebuild-page (Iter26.A.2.a). The
             // read-only guard no longer applies here.
             const rowcount = try engine_dml.executeDelete(db, p.allocator, parsed);
+            db.last_changes = @intCast(rowcount);
+            db.total_changes += @intCast(rowcount);
             return .{ .delete = .{ .rowcount = rowcount } };
         },
         .keyword_update => {
@@ -97,6 +101,8 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             // executeUpdate dispatches on `t.root_page` — file-mode is
             // handled via Pager + rebuild-page (Iter26.A.2.b).
             const rowcount = try engine_dml.executeUpdate(db, p.allocator, parsed);
+            db.last_changes = @intCast(rowcount);
+            db.total_changes += @intCast(rowcount);
             return .{ .update = .{ .rowcount = rowcount } };
         },
         .keyword_pragma => {
