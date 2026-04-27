@@ -2587,3 +2587,46 @@ SELECT hex(NULL)
 SELECT typeof(hex(NULL))
 SELECT length(hex(NULL))
 SELECT hex(NULL) IS NULL
+
+# --- Iter30.I: TZ offset (±HH:MM, Z) + HH:MM partial time
+# `Z` means already UTC (no shift). `±HH:MM` is the input's offset
+# from UTC; we subtract to convert to UTC. Range: hours 0..14, mins 0..59.
+SELECT date('2024-01-15 12:34:56+05:00')
+SELECT date('2024-01-15 12:34:56-05:00')
+SELECT date('2024-01-15T12:34:56+05:00')
+SELECT date('2024-01-15 12:34:56Z')
+SELECT datetime('2024-01-15 12:34:56+05:00')
+SELECT datetime('2024-01-15 12:34:56-05:00')
+SELECT datetime('2024-01-15 12:34:56Z')
+SELECT datetime('2024-01-15T07:34:56+05:30')
+SELECT datetime('2024-01-15 12:34:56+12:00')
+SELECT datetime('2024-01-15 12:34:56-12:00')
+SELECT datetime('2024-01-15 12:34:56+14:00')
+SELECT datetime('2024-01-15 12:34:56-14:00')
+SELECT datetime('2024-01-15 12:34:56+14:59')
+SELECT datetime('2024-01-15 12:34:56+10:30')
+SELECT time('2024-01-15 12:34:56+05:00')
+SELECT julianday('2024-01-15 12:34:56+05:00')
+SELECT unixepoch('2024-01-15 12:34:56+05:00')
+SELECT datetime('2024-01-15 12:34:56.5+05:00')
+# TZ rejected — bad shape, out of range, or missing colon.
+SELECT datetime('2024-01-15 12:34:56+15:00')
+SELECT datetime('2024-01-15 12:34:56+24:00')
+SELECT datetime('2024-01-15 12:34:56+12:60')
+SELECT datetime('2024-01-15 12:34:56+05')
+SELECT datetime('2024-01-15 12:34:56+0500')
+SELECT datetime('2024-01-15 12:34:56 UTC')
+SELECT datetime('2024-01-15 12:34:56+5:00')
+# HH:MM time-only (5 chars), seconds default to 0.
+SELECT time('12:34')
+SELECT datetime('12:34')
+SELECT date('12:34')
+SELECT time('12:34Z')
+SELECT time('12:34+05:00')
+SELECT time('12:34:56')
+SELECT time('12:34:56+05:00')
+# HH:MM with fractional seconds via colon-only — sqlite3 rejects (HH:MM
+# can't have fractional, that needs SS).
+SELECT time('12:34.5')
+SELECT datetime('2024-01-15 12:34')
+SELECT datetime('2024-01-15T12:34Z')

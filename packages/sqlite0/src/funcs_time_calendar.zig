@@ -20,11 +20,11 @@ pub const DateTime = struct {
 
 pub const Ymd = struct { year: u16, month: u8, day: u8 };
 
-/// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS[.fff][Z]`,
-/// `YYYY-MM-DDTHH:MM:SS[.fff][Z]`, or `HH:MM:SS[.fff][Z]` (time-only —
-/// date defaults to 2000-01-01 per sqlite3 time() docs). Year must lie
-/// in 0..=9999, month in 1..=12, day in 1..=31. Hour/minute/second are
-/// strict (≤23/59/59 — sqlite3 rejects `25:00:00`).
+/// Accept `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS[.fff]][Z|±HH:MM]`,
+/// `YYYY-MM-DDTHH:MM[:SS[.fff]][Z|±HH:MM]`, or `HH:MM[:SS[.fff]][Z|±HH:MM]`
+/// (time-only — date defaults to 2000-01-01 per sqlite3 time() docs).
+/// Year must lie in 0..=9999, month in 1..=12, day in 1..=31.
+/// Hour/minute/second are strict (≤23/59/59 — sqlite3 rejects `25:00:00`).
 ///
 /// Sub-second precision: `.NNN…` reads as fractional seconds, stored as
 /// integer milliseconds. First three digits are the integer ms; a fourth
@@ -33,9 +33,16 @@ pub const Ymd = struct { year: u16, month: u8, day: u8 };
 /// digits past the fourth are ignored. `'2024-01-01 12:34:56.0009'`
 /// thus stores 1ms; `'.9999'` stores 999ms (not 1000); `.50050'` → 501.
 ///
-/// `Z` (Zulu/UTC) is accepted at end of input — sqlite3 treats both
-/// `'…56Z'` and `'…56.5Z'` as already-UTC and ignores the marker.
+/// **Timezone**:
+///   * `Z` (Zulu/UTC) — already-UTC, no shift.
+///   * `±HH:MM` — input is at the given offset from UTC; we shift to UTC.
+///     `+05:00` means input is 5h ahead of UTC, so we subtract 5h.
+///     Range: hours 0..14, minutes 0..59 (sqlite3 rejects `+15:00`,
+///     `+14:60`, etc.).
 /// Anything else past the seconds (or fractional digits) → NULL.
+///
+/// **Partial time**: `HH:MM` (5 chars) is accepted, seconds default to 0.
+/// `HH` alone is NOT a time — sqlite3 falls through to numeric/JD.
 ///
 /// Day-overflow within a valid month (e.g. `2023-02-29`, `2023-04-31`)
 /// is renormalised forward via Julian round-trip to match sqlite3's
@@ -54,14 +61,22 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
         end -= 1;
     }
     const s = in[0..end];
-    // Time-only `HH:MM:SS[.fff][Z]`: sqlite3 fills the date with 2000-01-01.
-    if (s.len >= 8 and s[2] == ':' and s[5] == ':') {
+    // Time-only `HH:MM[:SS[.fff]][Z|±HH:MM]`: sqlite3 fills the date with 2000-01-01.
+    if (s.len >= 5 and s[2] == ':') {
         const hour = parseUintFixed(u8, s[0..2]) orelse return null;
         const minute = parseUintFixed(u8, s[3..5]) orelse return null;
-        const second = parseUintFixed(u8, s[6..8]) orelse return null;
-        if (hour > 23 or minute > 59 or second > 59) return null;
-        const ms = parseSubsecAndZ(s[8..]) orelse return null;
-        return .{ .year = 2000, .month = 1, .day = 1, .hour = hour, .minute = minute, .second = second, .millisecond = ms };
+        if (hour > 23 or minute > 59) return null;
+        var second: u8 = 0;
+        var ms_tail_start: usize = 5;
+        if (s.len >= 8 and s[5] == ':') {
+            second = parseUintFixed(u8, s[6..8]) orelse return null;
+            if (second > 59) return null;
+            ms_tail_start = 8;
+        }
+        const tail = parseTzSubsecTail(s[ms_tail_start..], ms_tail_start == 8) orelse return null;
+        var dt: DateTime = .{ .year = 2000, .month = 1, .day = 1, .hour = hour, .minute = minute, .second = second, .millisecond = tail.ms };
+        if (tail.offset_min != 0) dt = applyTzOffset(dt, tail.offset_min) orelse return null;
+        return dt;
     }
     if (s.len < 10) return null;
     if (s[4] != '-' or s[7] != '-') return null;
@@ -72,38 +87,64 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
     if (day < 1 or day > 31) return null;
 
     var dt = DateTime{ .year = year, .month = month, .day = day };
+    var offset_min: i16 = 0;
     if (s.len > 10) {
-        if (s.len < 19) return null;
+        // Datetime with time component: needs at least HH:MM (16 chars total).
+        if (s.len < 16) return null;
         if (s[10] != ' ' and s[10] != 'T') return null;
-        if (s[13] != ':' or s[16] != ':') return null;
+        if (s[13] != ':') return null;
         const hour = parseUintFixed(u8, s[11..13]) orelse return null;
         const minute = parseUintFixed(u8, s[14..16]) orelse return null;
-        const second = parseUintFixed(u8, s[17..19]) orelse return null;
-        if (hour > 23 or minute > 59 or second > 59) return null;
-        const ms = parseSubsecAndZ(s[19..]) orelse return null;
+        if (hour > 23 or minute > 59) return null;
+        var second: u8 = 0;
+        var tail_start: usize = 16;
+        if (s.len >= 19 and s[16] == ':') {
+            second = parseUintFixed(u8, s[17..19]) orelse return null;
+            if (second > 59) return null;
+            tail_start = 19;
+        }
+        const tail = parseTzSubsecTail(s[tail_start..], tail_start == 19) orelse return null;
         dt.hour = hour;
         dt.minute = minute;
         dt.second = second;
-        dt.millisecond = ms;
+        dt.millisecond = tail.ms;
+        offset_min = tail.offset_min;
     }
 
     if (dt.day > daysInMonth(dt.year, dt.month)) {
         // Lenient day overflow → roll forward via Julian round-trip.
         // Time fields (including ms) ride through unchanged.
         const jd = dateTimeToJulianFloat(dt);
-        return julianFloatToDateTime(jd);
+        dt = julianFloatToDateTime(jd) orelse return null;
     }
+    if (offset_min != 0) dt = applyTzOffset(dt, offset_min) orelse return null;
     return dt;
 }
 
-/// Parse the optional `.fff…[Z]` tail after `HH:MM:SS`. Empty or `Z`
-/// alone → 0ms. A `.` must be followed by ≥1 digit. Returns null if the
-/// tail contains anything else after the digits/optional Z (sqlite3 is
-/// strict — `'…56xxxxx'` and `'…56.7Z!'` both fail to parse).
-fn parseSubsecAndZ(tail: []const u8) ?u16 {
+const TzSubsecTail = struct { ms: u16, offset_min: i16 };
+
+/// Subtract `offset_min` minutes from `dt` to convert input-local time
+/// to UTC (`+05:00` input → subtract 5h). Round-trip via Julian to handle
+/// day/month/year crossings. Out-of-range result (year < 0 or > 9999) → null.
+fn applyTzOffset(dt: DateTime, offset_min: i16) ?DateTime {
+    const jd = dateTimeToJulianFloat(dt);
+    const adjusted_jd = jd - @as(f64, @floatFromInt(offset_min)) / 1440.0;
+    return julianFloatToDateTime(adjusted_jd);
+}
+
+/// Parse the optional `.fff…[Z|±HH:MM]` tail after the seconds (or after
+/// HH:MM when no seconds field is given). Empty / `Z` → 0ms, 0 offset. A
+/// `.` must be followed by ≥1 digit. `±HH:MM` is accepted with hours
+/// 0..14 and minutes 0..59; sqlite3 rejects `+15:00`, `+14:60`, missing
+/// colon, single-digit hour, etc. Returns null if the tail contains
+/// anything else after the recognized tokens.
+fn parseTzSubsecTail(tail: []const u8, seconds_present: bool) ?TzSubsecTail {
     var idx: usize = 0;
     var ms: u16 = 0;
-    if (idx < tail.len and tail[idx] == '.') {
+    // Fractional seconds are only valid AFTER HH:MM:SS — sqlite3 rejects
+    // `'12:34.5'` because `.fff` requires the SS field. The TZ token (Z
+    // or ±HH:MM) is still accepted in the no-seconds path.
+    if (seconds_present and idx < tail.len and tail[idx] == '.') {
         idx += 1;
         // Require at least one digit after the dot — sqlite3 rejects `'…56.'`.
         if (idx >= tail.len or tail[idx] < '0' or tail[idx] > '9') return null;
@@ -127,9 +168,21 @@ fn parseSubsecAndZ(tail: []const u8) ?u16 {
             while (idx < tail.len and tail[idx] >= '0' and tail[idx] <= '9') : (idx += 1) {}
         }
     }
-    if (idx < tail.len and tail[idx] == 'Z') idx += 1;
+    var offset_min: i16 = 0;
+    if (idx < tail.len and tail[idx] == 'Z') {
+        idx += 1;
+    } else if (idx < tail.len and (tail[idx] == '+' or tail[idx] == '-')) {
+        const sign: i16 = if (tail[idx] == '+') 1 else -1;
+        idx += 1;
+        if (idx + 5 > tail.len or tail[idx + 2] != ':') return null;
+        const tz_hour = parseUintFixed(u8, tail[idx .. idx + 2]) orelse return null;
+        const tz_min = parseUintFixed(u8, tail[idx + 3 .. idx + 5]) orelse return null;
+        if (tz_hour > 14 or tz_min > 59) return null;
+        offset_min = sign * (@as(i16, tz_hour) * 60 + @as(i16, tz_min));
+        idx += 5;
+    }
     if (idx != tail.len) return null;
-    return ms;
+    return .{ .ms = ms, .offset_min = offset_min };
 }
 
 fn parseUintFixed(comptime T: type, s: []const u8) ?T {
