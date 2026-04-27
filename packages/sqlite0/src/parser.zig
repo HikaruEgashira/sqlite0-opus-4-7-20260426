@@ -292,7 +292,7 @@ pub const Parser = struct {
             .real => {
                 self.advance();
                 const text = tok.slice(self.src);
-                const f = std.fmt.parseFloat(f64, text) catch return Error.InvalidNumber;
+                const f = parseRealLiteral(self.allocator, text) catch return Error.InvalidNumber;
                 return ast.makeLiteral(self.allocator, Value{ .real = f });
             },
             .string => {
@@ -402,12 +402,33 @@ fn hexDigitValue(c: u8) u8 {
 /// decimal literal that exceeds i64. Hex literals (`0x` / `0X` prefix)
 /// are read as u64 and bit-cast to i64 — sqlite3 wraps the same way
 /// (`0xFFFFFFFFFFFFFFFF` → -1, `0x8000000000000000` → LLONG_MIN).
+/// `std.fmt.parseInt` accepts embedded `_` as a digit separator
+/// natively, matching sqlite3's `1_000_000` / `0xff_ff` shapes.
 fn parseIntegerLiteral(text: []const u8) !i64 {
     if (text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X')) {
         const u = try std.fmt.parseInt(u64, text[2..], 16);
         return @bitCast(u);
     }
     return std.fmt.parseInt(i64, text, 10);
+}
+
+/// Parse a `.real` token's text into f64. `std.fmt.parseFloat` does not
+/// strip digit-separator underscores, so we copy out a clean span when
+/// `text` contains any. Allocation only fires for the rare separator
+/// case; the hot path stays zero-alloc.
+fn parseRealLiteral(allocator: std.mem.Allocator, text: []const u8) !f64 {
+    if (std.mem.indexOfScalar(u8, text, '_') == null) {
+        return std.fmt.parseFloat(f64, text);
+    }
+    const buf = try allocator.alloc(u8, text.len);
+    defer allocator.free(buf);
+    var w: usize = 0;
+    for (text) |c| {
+        if (c == '_') continue;
+        buf[w] = c;
+        w += 1;
+    }
+    return std.fmt.parseFloat(f64, buf[0..w]);
 }
 
 test "Parser: parseExpr literal" {

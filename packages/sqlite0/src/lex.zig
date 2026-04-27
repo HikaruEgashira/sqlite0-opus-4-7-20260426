@@ -246,14 +246,32 @@ pub const Lexer = struct {
         }
         var saw_dot = false;
         var saw_exp = false;
+        // `prev_digit` gates two things: (1) the `_` digit-separator —
+        // sqlite3 accepts `_` only between two decimal digits, never
+        // adjacent to `.`/`e`/sign or at start/end; (2) the `e`
+        // introducer — `1e10` is real but `e10` alone is an identifier
+        // and `.e5` is rejected.
+        var prev_digit = false;
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];
             switch (c) {
-                '0'...'9' => self.pos += 1,
+                '0'...'9' => {
+                    self.pos += 1;
+                    prev_digit = true;
+                },
+                '_' => {
+                    if (!prev_digit) break;
+                    if (self.pos + 1 >= self.src.len) break;
+                    const n = self.src[self.pos + 1];
+                    if (n < '0' or n > '9') break;
+                    self.pos += 1;
+                    prev_digit = false;
+                },
                 '.' => {
                     if (saw_dot or saw_exp) break;
                     saw_dot = true;
                     self.pos += 1;
+                    prev_digit = false;
                 },
                 'e', 'E' => {
                     if (saw_exp) break;
@@ -262,53 +280,69 @@ pub const Lexer = struct {
                     if (self.pos < self.src.len and (self.src[self.pos] == '+' or self.src[self.pos] == '-')) {
                         self.pos += 1;
                     }
+                    prev_digit = false;
                 },
                 else => break,
             }
+        }
+        // Trailing identifier-like char (incl. `_`) on a numeric token
+        // means the user wrote a malformed literal (`1_`, `1__0`,
+        // `1e10g`, `1.5x`); sqlite3 emits one `.invalid` token spanning
+        // the whole bad span rather than `1` + `_000_000` (which would
+        // alias-parse silently in `SELECT 1_000_000`).
+        if (self.pos < self.src.len) {
+            const c = self.src[self.pos];
+            if (isIdentTail(c)) {
+                while (self.pos < self.src.len and isIdentTail(self.src[self.pos])) self.pos += 1;
+                return .{ .kind = .invalid, .start = start, .end = self.pos };
+            }
+        }
+        // Exponent introduced but no exponent digit followed (`1e`,
+        // `1e+`). sqlite3 rejects.
+        if (saw_exp and !prev_digit) {
+            return .{ .kind = .invalid, .start = start, .end = self.pos };
         }
         const kind: TokenKind = if (saw_dot or saw_exp) .real else .integer;
         return .{ .kind = kind, .start = start, .end = self.pos };
     }
 
     /// Hex integer literal `0x<hex>` / `0X<hex>`. Caller has verified
-    /// `src[pos] == '0'` and `src[pos+1]` is `x`/`X`. We read the hex
-    /// span greedily and then check for a trailing alphanumeric tail so
-    /// `0xg` / `0x10z` surface as one `.invalid` token rather than
-    /// silently producing `0` + identifier (matches sqlite3 3.51.0).
+    /// `src[pos] == '0'` and `src[pos+1]` is `x`/`X`. The hex span
+    /// accepts a single `_` as a digit separator (`0xff_ff`), but only
+    /// between two hex digits — never directly after `0x` or trailing.
+    /// Empty digits or any leftover identifier-like tail surface as one
+    /// `.invalid` token (matches sqlite3 3.51.0 "unrecognized token").
     fn hexNumber(self: *Lexer, start: u32) Token {
         self.pos += 2; // skip `0x` / `0X`
         const digits_start = self.pos;
+        var prev_digit = false;
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];
-            const is_hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-            if (!is_hex) break;
-            self.pos += 1;
+            if (isHexDigit(c)) {
+                self.pos += 1;
+                prev_digit = true;
+                continue;
+            }
+            if (c == '_' and prev_digit) {
+                if (self.pos + 1 >= self.src.len) break;
+                if (!isHexDigit(self.src[self.pos + 1])) break;
+                self.pos += 1;
+                prev_digit = false;
+                continue;
+            }
+            break;
         }
         if (self.pos == digits_start) {
-            // `0x` with no hex digits. Consume any trailing identifier-
-            // like chars so re-lex emits a single `.invalid` span.
-            while (self.pos < self.src.len) {
-                const c = self.src[self.pos];
-                const is_ident = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
-                if (!is_ident) break;
-                self.pos += 1;
-            }
+            // `0x` with no hex digits. Consume the identifier-like tail
+            // so re-lex emits a single `.invalid` span.
+            while (self.pos < self.src.len and isIdentTail(self.src[self.pos])) self.pos += 1;
             return .{ .kind = .invalid, .start = start, .end = self.pos };
         }
-        // Trailing alphanumeric / `_` after a valid hex span: sqlite3
-        // treats `0x10g` as one bad token, not `0x10` + `g`.
-        if (self.pos < self.src.len) {
-            const c = self.src[self.pos];
-            const is_ident = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
-            if (is_ident) {
-                while (self.pos < self.src.len) {
-                    const cc = self.src[self.pos];
-                    const i = (cc >= 'a' and cc <= 'z') or (cc >= 'A' and cc <= 'Z') or (cc >= '0' and cc <= '9') or cc == '_';
-                    if (!i) break;
-                    self.pos += 1;
-                }
-                return .{ .kind = .invalid, .start = start, .end = self.pos };
-            }
+        // Trailing identifier-like char on a valid hex span: malformed
+        // (`0x10g`, `0xff_`, `0xff__ff`). Sqlite3 emits one bad token.
+        if (self.pos < self.src.len and isIdentTail(self.src[self.pos])) {
+            while (self.pos < self.src.len and isIdentTail(self.src[self.pos])) self.pos += 1;
+            return .{ .kind = .invalid, .start = start, .end = self.pos };
         }
         return .{ .kind = .integer, .start = start, .end = self.pos };
     }
@@ -371,4 +405,15 @@ pub const Lexer = struct {
         return .{ .kind = kind, .start = start, .end = self.pos };
     }
 };
+
+fn isHexDigit(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+/// Identifier-tail char class — alphanumeric or `_`. Used by the
+/// numeric lexers to detect malformed-literal trailing tails like
+/// `1_`, `1e10g`, `0xff_`.
+fn isIdentTail(c: u8) bool {
+    return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+}
 

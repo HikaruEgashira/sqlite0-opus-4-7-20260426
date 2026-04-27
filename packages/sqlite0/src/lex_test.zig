@@ -137,3 +137,46 @@ test "Lexer: hex literal rejects empty digits / trailing tail" {
     try std.testing.expectEqual(TokenKind.invalid, t.kind);
     try std.testing.expectEqualStrings("0x10g", t.slice("0x10g"));
 }
+
+test "Lexer: digit separator `_` accepted between digits" {
+    // Decimal / hex / real all accept embedded `_` between two digits.
+    var lx = Lexer.init("1_000_000 0xff_ff 1.5_5 1e1_0");
+    const a = lx.next();
+    try std.testing.expectEqual(TokenKind.integer, a.kind);
+    try std.testing.expectEqualStrings("1_000_000", a.slice("1_000_000 0xff_ff 1.5_5 1e1_0"));
+    const b = lx.next();
+    try std.testing.expectEqual(TokenKind.integer, b.kind);
+    try std.testing.expectEqualStrings("0xff_ff", b.slice("1_000_000 0xff_ff 1.5_5 1e1_0"));
+    const c = lx.next();
+    try std.testing.expectEqual(TokenKind.real, c.kind);
+    try std.testing.expectEqualStrings("1.5_5", c.slice("1_000_000 0xff_ff 1.5_5 1e1_0"));
+    const d = lx.next();
+    try std.testing.expectEqual(TokenKind.real, d.kind);
+    try std.testing.expectEqualStrings("1e1_0", d.slice("1_000_000 0xff_ff 1.5_5 1e1_0"));
+}
+
+test "Lexer: digit separator rejects edge cases" {
+    // Trailing `_` makes the whole token bad (was the silent-accept bug).
+    var lx_trail = Lexer.init("1_");
+    const t1 = lx_trail.next();
+    try std.testing.expectEqual(TokenKind.invalid, t1.kind);
+    try std.testing.expectEqualStrings("1_", t1.slice("1_"));
+    // Double `__` rejected.
+    var lx_dub = Lexer.init("1__0");
+    try std.testing.expectEqual(TokenKind.invalid, lx_dub.next().kind);
+    // `_` adjacent to `.` rejected on either side.
+    var lx_dot = Lexer.init("1_.5");
+    try std.testing.expectEqual(TokenKind.invalid, lx_dot.next().kind);
+    // `_` adjacent to `e` rejected.
+    var lx_exp = Lexer.init("1e_10");
+    try std.testing.expectEqual(TokenKind.invalid, lx_exp.next().kind);
+    // `0x_ff` — `_` immediately after `0x` is rejected.
+    var lx_hex = Lexer.init("0x_ff");
+    try std.testing.expectEqual(TokenKind.invalid, lx_hex.next().kind);
+    // `1e` with no exponent digits is bad.
+    var lx_e = Lexer.init("1e");
+    try std.testing.expectEqual(TokenKind.invalid, lx_e.next().kind);
+    // Real with trailing identifier char (`1.5g` / `1e10g`) is one bad token.
+    var lx_rg = Lexer.init("1.5g");
+    try std.testing.expectEqual(TokenKind.invalid, lx_rg.next().kind);
+}
