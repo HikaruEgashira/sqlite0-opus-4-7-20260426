@@ -305,18 +305,30 @@ fn writeIntPaddedPrefixed(
     prefix: []const u8,
     spec: Spec,
 ) !void {
-    // precision = minimum number of digits
-    const min_digits = spec.precision orelse 0;
-    const pad_zeros: usize = if (digits.len < min_digits) min_digits - digits.len else 0;
+    // sqlite3 quirk (printf.c::etRADIX): the `0` flag forces the effective
+    // precision up to `width - sign_len`, so the zero-padding becomes part of
+    // the digit run rather than a separate fill. Two consequences fall out of
+    // this single rule:
+    //   * `0` wins over `-`: when content fills width via boosted precision,
+    //     there is no slack left for left-justify spaces. `printf('%-05d', 42)`
+    //     → "00042", not "42   ".
+    //   * `0` wins over explicit precision when the precision is too small:
+    //     `printf('%05.0d', 0)` → "00000", not "    0".
+    // Note `prefix.len` (alt-form `0x`/`0X`/`0`) is intentionally NOT subtracted
+    // — sqlite3 adds the alt-form prefix AFTER zero-padding, which can push
+    // total length past `width`. `printf('%-#05x', 255)` → "0x000ff" (7 chars).
     const sign_len: usize = if (sign != null) 1 else 0;
+    const explicit_prec = spec.precision orelse 0;
+    const min_digits: usize = if (spec.zero_pad and spec.width > sign_len)
+        @max(explicit_prec, spec.width - sign_len)
+    else
+        explicit_prec;
+    const pad_zeros: usize = if (digits.len < min_digits) min_digits - digits.len else 0;
     const content_len = digits.len + pad_zeros + sign_len + prefix.len;
     const total_pad: usize = if (content_len < spec.width) spec.width - content_len else 0;
-    // sqlite3: explicit precision suppresses zero-pad flag
-    const use_zero_pad = spec.zero_pad and spec.precision == null and !spec.left_align;
-    if (!spec.left_align and !use_zero_pad) try appendN(allocator, out, ' ', total_pad);
+    if (!spec.left_align) try appendN(allocator, out, ' ', total_pad);
     if (sign) |s| try out.append(allocator, s);
     try out.appendSlice(allocator, prefix);
-    if (use_zero_pad) try appendN(allocator, out, '0', total_pad);
     try appendN(allocator, out, '0', pad_zeros);
     try out.appendSlice(allocator, digits);
     if (spec.left_align) try appendN(allocator, out, ' ', total_pad);

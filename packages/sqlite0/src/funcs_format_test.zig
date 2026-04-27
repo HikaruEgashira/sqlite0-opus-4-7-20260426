@@ -215,3 +215,43 @@ test "fnPrintf: %#d / %#u alt-form is no-op for decimal" {
     defer a.free(r2.text);
     try std.testing.expectEqualStrings("42", r2.text);
 }
+
+test "fnPrintf: %-05d → 0 wins over -, content fills width" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%-05d" }, .{ .integer = 42 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("00042", r.text);
+}
+
+test "fnPrintf: %-05d of -42 keeps sign outside zero-pad" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%-05d" }, .{ .integer = -42 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("-0042", r.text);
+}
+
+test "fnPrintf: %05.0d of 0 → 0 flag boosts precision past explicit precision" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%05.0d" }, .{ .integer = 0 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("00000", r.text);
+}
+
+test "fnPrintf: %-#05x of 255 → alt prefix added AFTER zero-pad, exceeds width" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%-#05x" }, .{ .integer = 255 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("0x000ff", r.text);
+}
+
+test "fnPrintf: %05.10d → explicit precision exceeds width-boosted minimum" {
+    const a = std.testing.allocator;
+    var p = [_]Value{ .{ .text = "%05.10d" }, .{ .integer = 42 } };
+    const r = try fnPrintf(a, &p);
+    defer a.free(r.text);
+    try std.testing.expectEqualStrings("0000000042", r.text);
+}

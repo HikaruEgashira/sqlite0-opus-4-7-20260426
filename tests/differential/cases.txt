@@ -1942,6 +1942,28 @@ SELECT typeof(char(0x110000))
 SELECT hex(char(0))
 SELECT hex(char(0x80))
 SELECT hex(char(0x10000))
+# Iter29.AG: printf integer `0` flag wins over `-` and explicit precision.
+# sqlite3 quirk (printf.c::etRADIX): `0` flag forces effective precision to
+# `width - sign_len`, so left-justify becomes a no-op when content fills width
+# and a too-small explicit precision gets boosted. The alt-form `0x`/`0X`/`0`
+# prefix is added AFTER zero-padding, so `%-#05x` of 255 produces 7 bytes.
+SELECT '[' || printf('%-05d', 42) || ']'
+SELECT '[' || printf('%-05d', -42) || ']'
+SELECT '[' || printf('%-+05d', 42) || ']'
+SELECT '[' || printf('%-+05d', -42) || ']'
+SELECT '[' || printf('%- 05d', 42) || ']'
+SELECT '[' || printf('%05.0d', 0) || ']'
+SELECT '[' || printf('%05.3d', 0) || ']'
+SELECT '[' || printf('%05.3d', 42) || ']'
+SELECT '[' || printf('%-05.3d', 42) || ']'
+SELECT '[' || printf('%-#05x', 255) || ']'
+SELECT '[' || printf('%-#06x', 255) || ']'
+SELECT '[' || printf('%-#08x', 255) || ']'
+SELECT '[' || printf('%-#05X', 255) || ']'
+SELECT '[' || printf('%-08o', 7) || ']'
+SELECT '[' || printf('%-05x', 255) || ']'
+SELECT '[' || printf('%-05o', 7) || ']'
+SELECT '[' || printf('%05.10d', 42) || ']'
 
 
 
