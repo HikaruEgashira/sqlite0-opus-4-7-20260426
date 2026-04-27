@@ -2260,6 +2260,14 @@ SELECT datetime('  1704067200', 'unixepoch')
 SELECT datetime('1704067200  ', 'unixepoch')
 SELECT datetime('  2460310.5', 'julianday')
 SELECT datetime('  not', 'unixepoch')
+SELECT printf('%d', 9223372036854775808)
+SELECT printf('%d', 1e100)
+SELECT printf('%d', 1e20)
+SELECT printf('%d', 1.5)
+SELECT printf('%d', -1.5)
+SELECT printf('%i', 1e100)
+SELECT printf('%x', 1e100)
+SELECT printf('%d', '999999999999999999999')
 
 
 

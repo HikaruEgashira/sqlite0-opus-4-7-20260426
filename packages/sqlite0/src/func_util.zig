@@ -62,8 +62,11 @@ pub fn utf8CharCount(bytes: []const u8) usize {
 pub fn toIntCoerce(v: Value) Error!i64 {
     return switch (v) {
         .integer => |i| i,
-        .real => |f| @intFromFloat(f),
-        .text, .blob => |bytes| @intFromFloat(parseFloatLoose(bytes)),
+        // Saturating cast — clamps out-of-range / non-finite floats to
+        // i64.min/max (sqlite3 parity, see `ops.coerceToI64`). `@intFromFloat`
+        // would panic on `printf('%d', 9.99e99)` and similar inputs.
+        .real => |f| std.math.lossyCast(i64, f),
+        .text, .blob => |bytes| std.math.lossyCast(i64, parseFloatLoose(bytes)),
         .null => Error.UnsupportedFeature,
     };
 }

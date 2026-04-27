@@ -235,10 +235,25 @@ fn coerceToInt(v: Value) i64 {
     return switch (v) {
         .null => 0,
         .integer => |i| i,
-        .real => |r| @intFromFloat(r),
-        .text => |t| std.fmt.parseInt(i64, t, 10) catch 0,
-        .blob => |b| std.fmt.parseInt(i64, b, 10) catch 0,
+        // lossyCast clamps non-finite/out-of-range f64 to match sqlite3:
+        // +Inf and values > i64.max → LLONG_MAX, -Inf and values < i64.min
+        // → LLONG_MIN, NaN → 0. Plain `@intFromFloat` panics in safety
+        // builds for any of these — `printf('%d', 9223372036854775808)`
+        // hit the panic until this saturating path landed.
+        .real => |r| std.math.lossyCast(i64, r),
+        .text => |t| coerceTextToInt(t),
+        .blob => |b| coerceTextToInt(b),
     };
+}
+
+/// Decimal-prefix parse with float fallback — matches sqlite3 printf which
+/// will accept `'999999999999999999999'` as a number even though it
+/// overflows i64 (clamps to LLONG_MAX) and `'1e6'` as 1000000. parseInt
+/// alone rejects both forms.
+fn coerceTextToInt(s: []const u8) i64 {
+    if (std.fmt.parseInt(i64, s, 10)) |i| return i else |_| {}
+    if (std.fmt.parseFloat(f64, s)) |f| return std.math.lossyCast(i64, f) else |_| {}
+    return 0;
 }
 
 fn writeSignedInt(
