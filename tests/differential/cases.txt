@@ -2938,3 +2938,17 @@ SELECT strftime('%l','2024-01-01 00:30:00')
 SELECT strftime('%l','2024-01-01 12:30:00')
 SELECT strftime('%','2024-01-01')
 SELECT strftime('a%','2024-01-01')
+
+# date/time floor/ceiling modifiers (Iter30.V):
+#  * sqlite3 3.46+ accepts `floor` / `ceiling` as modifiers; in 3.51 they
+#    are no-ops on the parsed DateTime (verified empirically).
+SELECT date('2024-01-15','floor')
+SELECT date('2024-01-15','ceiling')
+SELECT julianday('2024-01-01 12:00:00','floor')
+SELECT datetime('2024-01-01 12:00:00.5','floor')
+SELECT datetime('2024-01-01 12:00:00.5','ceiling')
+SELECT time('2024-01-01 12:00:00.5','floor')
+SELECT date('2024-01-31','floor','+1 day')
+SELECT date('2024-01-31','ceiling','-1 day')
+SELECT date(2451545.5,'floor')
+SELECT julianday(2451545.7,'ceiling')

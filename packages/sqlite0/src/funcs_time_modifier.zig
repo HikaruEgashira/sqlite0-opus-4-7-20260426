@@ -34,6 +34,15 @@ pub fn applyModifier(dt: DateTime, mod: []const u8) ?DateTime {
         return applyWeekday(dt, rest);
     }
 
+    // sqlite3 3.46+ accepts `floor` and `ceiling` as modifiers — they were
+    // added for sub-second time rounding but in 3.51 they're effectively
+    // no-ops on the parsed DateTime (verified empirically: `julianday(...,
+    // 'floor')` and `julianday(...)` return the same value). Accept silently
+    // so chains like `('2024-01-01', 'floor', '+1 day')` work.
+    if (util.eqlIgnoreCase(mod, "floor") or util.eqlIgnoreCase(mod, "ceiling")) {
+        return dt;
+    }
+
     return applyDelta(dt, mod);
 }
 
