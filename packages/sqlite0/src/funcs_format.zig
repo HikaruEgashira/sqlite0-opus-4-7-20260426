@@ -250,12 +250,14 @@ fn coerceToInt(v: Value) i64 {
     };
 }
 
-/// Decimal-prefix parse with float fallback — matches sqlite3 printf which
-/// will accept `'999999999999999999999'` as a number even though it
-/// overflows i64 (clamps to LLONG_MAX) and `'1e6'` as 1000000. parseInt
-/// alone rejects both forms.
+/// printf TEXT→i64: try the atoi64 prefix parse first (sqlite3's
+/// printf accepts `'10abc'` → 10, `'  10  '` → 10, `'0x10'` → 0). If
+/// that finds nothing, fall back to parseFloat → saturating-i64 so
+/// pure-exponential strings like `'9.99e99'` still produce a saturated
+/// integer the way sqlite3 does. atoi64 itself lives in `func_util` so
+/// `eval_cast` can share it.
 fn coerceTextToInt(s: []const u8) i64 {
-    if (std.fmt.parseInt(i64, s, 10)) |i| return i else |_| {}
+    if (util.atoi64Prefix(s)) |i| return i;
     if (std.fmt.parseFloat(f64, s)) |f| return std.math.lossyCast(i64, f) else |_| {}
     return 0;
 }

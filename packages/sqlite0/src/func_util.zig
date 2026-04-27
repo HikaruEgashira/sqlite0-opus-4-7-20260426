@@ -59,6 +59,33 @@ pub fn utf8CharCount(bytes: []const u8) usize {
     return n;
 }
 
+/// sqlite3 `atoi64`-style lenient prefix parse for TEXT→i64 coercion.
+/// Skip leading ASCII whitespace, accept optional `+`/`-`, take the
+/// longest run of decimal digits, stop at the first non-digit (no hex,
+/// no exponent — `'0x10'` parses the leading `0` then stops, `'1e6'`
+/// stops at `e`). Returns null when no digits appear at all (caller
+/// can chain a float fallback). Saturates to LLONG_MIN/MAX on overflow,
+/// matching sqlite3's `printf` and `CAST AS INTEGER` paths.
+pub fn atoi64Prefix(bytes: []const u8) ?i64 {
+    var i: usize = 0;
+    while (i < bytes.len and (bytes[i] == ' ' or bytes[i] == '\t' or bytes[i] == '\n' or bytes[i] == '\r')) i += 1;
+    var neg = false;
+    if (i < bytes.len and (bytes[i] == '+' or bytes[i] == '-')) {
+        neg = bytes[i] == '-';
+        i += 1;
+    }
+    if (i >= bytes.len or bytes[i] < '0' or bytes[i] > '9') return null;
+    var n: i64 = 0;
+    while (i < bytes.len and bytes[i] >= '0' and bytes[i] <= '9') : (i += 1) {
+        const d: i64 = bytes[i] - '0';
+        if (n > @divTrunc(std.math.maxInt(i64) - d, 10)) {
+            return if (neg) std.math.minInt(i64) else std.math.maxInt(i64);
+        }
+        n = n * 10 + d;
+    }
+    return if (neg) -n else n;
+}
+
 pub fn toIntCoerce(v: Value) Error!i64 {
     return switch (v) {
         .integer => |i| i,

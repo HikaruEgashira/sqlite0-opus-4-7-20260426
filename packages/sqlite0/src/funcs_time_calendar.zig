@@ -43,7 +43,17 @@ pub const Ymd = struct { year: u16, month: u8, day: u8 };
 /// → `2023-03-01`). Renormalisation never crosses out of the 0..=9999
 /// year window — the only literal that could trigger a year overflow
 /// is day=32, which is rejected upstream.
-pub fn parseDateTime(s: []const u8) ?DateTime {
+pub fn parseDateTime(in: []const u8) ?DateTime {
+    // sqlite3 strips trailing ASCII whitespace before parsing
+    // (`date('2024-01-01  ')` → `'2024-01-01'`) but rejects any leading
+    // whitespace (`date('  2024-01-01')` → NULL). Mirror exactly.
+    var end = in.len;
+    while (end > 0) {
+        const c = in[end - 1];
+        if (c != ' ' and c != '\t' and c != '\n' and c != '\r') break;
+        end -= 1;
+    }
+    const s = in[0..end];
     // Time-only `HH:MM:SS[.fff][Z]`: sqlite3 fills the date with 2000-01-01.
     if (s.len >= 8 and s[2] == ':' and s[5] == ':') {
         const hour = parseUintFixed(u8, s[0..2]) orelse return null;

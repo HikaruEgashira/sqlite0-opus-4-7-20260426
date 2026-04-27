@@ -2303,6 +2303,16 @@ SELECT instr(x'01020304', x'0203')
 SELECT instr('héllo', x'a96c')
 SELECT instr('abc', x'62')
 SELECT instr('abc', x'00')
+SELECT printf('%d', '  10  ')
+SELECT printf('%d', '0x10')
+SELECT printf('%d', '10abc')
+SELECT printf('%d', 'abc10')
+SELECT printf('%d', '+10')
+SELECT printf('%d', '-10')
+SELECT date('2024-01-01  ')
+SELECT date('  2024-01-01')
+SELECT datetime('2024-01-01 12:34:56  ')
+SELECT time('12:34:56  ')
 
 
 
