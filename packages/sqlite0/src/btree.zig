@@ -165,6 +165,58 @@ pub fn parseLeafTablePage(
     return cells;
 }
 
+/// One interior-table-page cell: pointer to a left child page plus the
+/// largest rowid in that subtree. The right child of the page (anything
+/// with key > all interior cells) lives in `PageHeader.right_child`, not
+/// in this struct.
+pub const InteriorTableCell = struct {
+    left_child: u32,
+    key: i64,
+};
+
+pub const InteriorTableInfo = struct {
+    cells: []InteriorTableCell,
+    right_child: u32,
+};
+
+/// Parse an interior-table page (type 0x05). Returns the cells in
+/// pointer-array order (sorted by key ascending) plus the page's
+/// right_child pointer. `cells` is owned by `alloc`.
+pub fn parseInteriorTablePage(
+    alloc: std.mem.Allocator,
+    page: []const u8,
+    header_offset: usize,
+) Error!InteriorTableInfo {
+    const h = try parsePageHeader(page, header_offset);
+    if (h.page_type != .interior_table) return Error.IoError;
+
+    const ptr_array_offset = header_offset + h.size();
+    if (page.len < ptr_array_offset + @as(usize, h.cell_count) * 2) return Error.IoError;
+
+    const cells = try alloc.alloc(InteriorTableCell, h.cell_count);
+    errdefer alloc.free(cells);
+
+    var i: usize = 0;
+    while (i < h.cell_count) : (i += 1) {
+        const cell_offset: usize = readU16(page, ptr_array_offset + i * 2);
+        if (cell_offset + 4 > page.len) return Error.IoError;
+
+        const left_child = readU32(page, cell_offset);
+        const key_v = try record.decodeVarint(page[cell_offset + 4 ..]);
+        cells[i] = .{
+            .left_child = left_child,
+            .key = @bitCast(key_v.value),
+        };
+    }
+    return .{ .cells = cells, .right_child = h.right_child };
+}
+
+/// Page-1 has the 100-byte sqlite3 file header before the B-tree page
+/// header begins. Every other page starts the header at offset 0.
+pub fn pageHeaderOffset(page_no: u32) usize {
+    return if (page_no == 1) 100 else 0;
+}
+
 fn readU16(bytes: []const u8, off: usize) u16 {
     return (@as(u16, bytes[off]) << 8) | bytes[off + 1];
 }
@@ -179,67 +231,11 @@ fn readU32(bytes: []const u8, off: usize) u32 {
 // -- tests --
 
 const testing = std.testing;
-
-const TestCellInput = struct { rowid: i64, record: []const u8 };
-
-/// Test helper: build a leaf-table page with the given cells. Each input
-/// is `(rowid, record_bytes)`. Cells are laid out back-to-front starting
-/// from the end of `page_size`. Cell pointer array follows the page
-/// header in pointer-array order (= input order).
-fn buildLeafTablePage(
-    alloc: std.mem.Allocator,
-    page_size: usize,
-    header_offset: usize,
-    cells: []const TestCellInput,
-) ![]u8 {
-    const buf = try alloc.alloc(u8, page_size);
-    @memset(buf, 0);
-
-    // Compute cell positions from the end.
-    var cell_positions = try alloc.alloc(usize, cells.len);
-    defer alloc.free(cell_positions);
-
-    var content_start: usize = page_size;
-    // Walk cells in reverse so the LAST input cell ends up at LOWEST offset
-    // (= LAST physical position). With back-to-front layout the FIRST
-    // input cell ends up at the highest offset.
-    var k: usize = cells.len;
-    while (k > 0) {
-        k -= 1;
-        const c = cells[k];
-        // Cell layout: payload_len varint + rowid varint + record bytes.
-        var tmp: [9]u8 = undefined;
-        const pl_n = record.encodeVarint(c.record.len, &tmp);
-        const rid_n = record.encodeVarint(@as(u64, @bitCast(c.rowid)), &tmp);
-        const cell_size = pl_n + rid_n + c.record.len;
-        content_start -= cell_size;
-        cell_positions[k] = content_start;
-
-        var pos = content_start;
-        pos += record.encodeVarint(c.record.len, buf[pos..]);
-        pos += record.encodeVarint(@as(u64, @bitCast(c.rowid)), buf[pos..]);
-        @memcpy(buf[pos .. pos + c.record.len], c.record);
-    }
-
-    // Header at header_offset.
-    buf[header_offset] = 0x0d; // leaf table
-    buf[header_offset + 1] = 0x00; // freeblock high
-    buf[header_offset + 2] = 0x00; // freeblock low
-    buf[header_offset + 3] = @intCast((cells.len >> 8) & 0xff);
-    buf[header_offset + 4] = @intCast(cells.len & 0xff);
-    buf[header_offset + 5] = @intCast((content_start >> 8) & 0xff);
-    buf[header_offset + 6] = @intCast(content_start & 0xff);
-    buf[header_offset + 7] = 0x00; // fragmented
-
-    // Cell pointer array.
-    const ptr_off = header_offset + 8;
-    for (cell_positions, 0..) |cp, i| {
-        buf[ptr_off + i * 2] = @intCast((cp >> 8) & 0xff);
-        buf[ptr_off + i * 2 + 1] = @intCast(cp & 0xff);
-    }
-
-    return buf;
-}
+const test_util = @import("btree_test_util.zig");
+const TestCellInput = test_util.TestCellInput;
+const TestInteriorCellInput = test_util.TestInteriorCellInput;
+const buildLeafTablePage = test_util.buildLeafTablePage;
+const buildInteriorTablePage = test_util.buildInteriorTablePage;
 
 test "parsePageHeader: leaf table" {
     const page = [_]u8{
@@ -364,4 +360,35 @@ test "parseLeafTablePage: cell pointer beyond page → IoError" {
 test "parseLeafTablePage: rejects non-leaf page type" {
     const page = [_]u8{ 0x05, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0, 0 } ++ [_]u8{0} ** 244;
     try testing.expectError(Error.IoError, parseLeafTablePage(testing.allocator, &page, 0, 256));
+}
+
+test "parseInteriorTablePage: two cells + right_child" {
+    const inputs = [_]TestInteriorCellInput{
+        .{ .left_child = 5, .key = 100 },
+        .{ .left_child = 7, .key = 200 },
+    };
+    const buf = try buildInteriorTablePage(testing.allocator, 512, 0, 9, &inputs);
+    defer testing.allocator.free(buf);
+
+    const info = try parseInteriorTablePage(testing.allocator, buf, 0);
+    defer testing.allocator.free(info.cells);
+    try testing.expectEqual(@as(u32, 9), info.right_child);
+    try testing.expectEqual(@as(usize, 2), info.cells.len);
+    try testing.expectEqual(@as(u32, 5), info.cells[0].left_child);
+    try testing.expectEqual(@as(i64, 100), info.cells[0].key);
+    try testing.expectEqual(@as(u32, 7), info.cells[1].left_child);
+    try testing.expectEqual(@as(i64, 200), info.cells[1].key);
+}
+
+test "parseInteriorTablePage: rejects leaf page" {
+    const inputs = [_]TestCellInput{};
+    const buf = try buildLeafTablePage(testing.allocator, 512, 0, &inputs);
+    defer testing.allocator.free(buf);
+    try testing.expectError(Error.IoError, parseInteriorTablePage(testing.allocator, buf, 0));
+}
+
+test "pageHeaderOffset: page 1 = 100, others = 0" {
+    try testing.expectEqual(@as(usize, 100), pageHeaderOffset(1));
+    try testing.expectEqual(@as(usize, 0), pageHeaderOffset(2));
+    try testing.expectEqual(@as(usize, 0), pageHeaderOffset(42));
 }

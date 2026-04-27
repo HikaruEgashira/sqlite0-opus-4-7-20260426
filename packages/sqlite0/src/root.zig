@@ -36,6 +36,8 @@ pub const cursor = @import("cursor.zig");
 pub const pager = @import("pager.zig");
 pub const record = @import("record.zig");
 pub const btree = @import("btree.zig");
+pub const btree_test_util = @import("btree_test_util.zig");
+pub const btree_walk = @import("btree_walk.zig");
 
 pub const Value = value.Value;
 pub const Result = exec.Result;
