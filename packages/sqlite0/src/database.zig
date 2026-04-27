@@ -125,6 +125,15 @@ pub const Database = struct {
         db.journal_mode = try journal.detectJournalMode(&db.pager.?);
         if (db.journal_mode == .delete_legacy) {
             try journal.maybeRunRecovery(&db.pager.?, path);
+        } else if (db.journal_mode == .wal) {
+            // Iter27.A — read-side WAL. Scan the `<path>-wal` sidecar
+            // (if any) and attach the resulting index to the Pager so
+            // subsequent getPage calls (including the schema scan
+            // below) see WAL-resident page versions.
+            const wal_recovery = @import("wal_recovery.zig");
+            if (try wal_recovery.openIfPresent(allocator, path)) |state| {
+                try db.pager.?.attachWal(state);
+            }
         }
 
         const schema = @import("schema.zig");

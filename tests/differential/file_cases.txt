@@ -349,3 +349,52 @@ VERIFY: SELECT n, s FROM t WHERE s = 'updated' ORDER BY n
 # btree_walk arm that enumerates leaves under each interior child.
 SETUP: CREATE TABLE t(n, s); WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n<600) INSERT INTO t SELECT n, zeroblob(3000) FROM c
 QUERY: SELECT count(*), min(n), max(n), length(s) FROM t WHERE n IN (1, 200, 400, 600)
+
+
+# ---- Iter27.A: WAL read-side ----
+# WAL_SETUP runs after SETUP under `.dbconfig no_ckpt_on_close on`,
+# leaving the -wal sidecar populated when sqlite0 opens the file.
+# sqlite0 must scan the WAL, populate its in-memory page index, and
+# return WAL-resident page versions from getPage so SELECT matches
+# sqlite3 (which sees the same WAL on its own subsequent open).
+
+# Single INSERT inside WAL — page 2 (the table root) lives in WAL,
+# never made it to main. sqlite0 SELECTing must read it from -wal.
+SETUP: CREATE TABLE t(x);
+WAL_SETUP: INSERT INTO t VALUES (42);
+QUERY: SELECT * FROM t
+
+# Multi-row INSERT in WAL — leaf page is rewritten in-WAL each row.
+# Latest-version-wins inside the index because all writes commit.
+SETUP: CREATE TABLE t(n, s);
+WAL_SETUP: INSERT INTO t VALUES (1, 'one'), (2, 'two'), (3, 'three');
+QUERY: SELECT n, s FROM t ORDER BY n
+
+# CREATE TABLE inside WAL — sqlite_schema (page 1) gets a new
+# leaf cell appended in WAL. Schema scan at open-time must read
+# the WAL-resident page 1, otherwise the table is invisible.
+SETUP: CREATE TABLE pre(x); INSERT INTO pre VALUES (1);
+WAL_SETUP: CREATE TABLE post(y); INSERT INTO post VALUES (99);
+QUERY: SELECT (SELECT count(*) FROM pre), (SELECT count(*) FROM post)
+
+# UPDATE in WAL — same page rewritten with new bytes; the WAL frame
+# overrides the original page even though both have the same page_no.
+SETUP: CREATE TABLE t(n); INSERT INTO t VALUES (1), (2), (3);
+WAL_SETUP: UPDATE t SET n = n + 100;
+QUERY: SELECT n FROM t ORDER BY n
+
+# DELETE in WAL — leaf rebuild in-WAL leaves a smaller page.
+SETUP: CREATE TABLE t(n); INSERT INTO t VALUES (1), (2), (3), (4), (5);
+WAL_SETUP: DELETE FROM t WHERE n % 2 = 0;
+QUERY: SELECT count(*), min(n), max(n) FROM t
+
+# Connection-died-mid-tx canary. The unCOMMITted INSERT (999) is not
+# guaranteed to reach -wal — sqlite3's page cache may keep it in memory
+# until commit forces a frame write. The tentative-then-promoted
+# discard path is covered by the synthetic wal_recovery.zig unit test
+# that controls bytes on disk directly. This case acts as an
+# end-to-end regression canary: whichever way sqlite3 lays out the
+# bytes, sqlite0 must agree on the visible rows.
+SETUP: CREATE TABLE t(n); INSERT INTO t VALUES (1);
+WAL_SETUP: INSERT INTO t VALUES (2); BEGIN; INSERT INTO t VALUES (999);
+QUERY: SELECT n FROM t ORDER BY n

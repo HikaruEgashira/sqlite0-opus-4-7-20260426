@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const ops = @import("ops.zig");
+const wal_recovery = @import("wal_recovery.zig");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const Error = ops.Error;
@@ -41,6 +42,10 @@ pub const Pager = struct {
     /// Maximum cache size. Hardcoded for Iter25.A — Phase 4 will surface
     /// a tunable when WAL needs a bigger working set.
     cache_capacity: usize = 16,
+    /// Iter27.A — populated by `attachWal` for WAL-mode databases. When
+    /// set, `getPage` consults it before pread'ing the main file. Owns
+    /// the `<dbname>-wal` fd and is torn down by `close()`.
+    wal: ?wal_recovery.WalState = null,
 
     /// Open `file_path` read-write and acquire an exclusive non-blocking
     /// flock. The Pager owns the fd until `close()`.
@@ -73,6 +78,8 @@ pub const Pager = struct {
     }
 
     pub fn close(self: *Pager) void {
+        if (self.wal) |*w| w.deinit();
+        self.wal = null;
         for (self.cache.items) |entry| self.allocator.free(entry.data);
         self.cache.deinit(self.allocator);
         // Best-effort lock release — close() always drops it anyway, but
@@ -81,6 +88,30 @@ pub const Pager = struct {
         _ = std.c.flock(self.fd, std.posix.LOCK.UN);
         _ = std.c.close(self.fd);
         self.fd = -1;
+    }
+
+    /// Iter27.A — hand the Pager an open WAL state. The Pager takes
+    /// ownership; teardown happens in `close()`. Idempotent rejection
+    /// of double-attach is intentional: WAL recovery should run exactly
+    /// once at open time, and a second attach would silently leak the
+    /// previous state's fd.
+    pub fn attachWal(self: *Pager, state: wal_recovery.WalState) Error!void {
+        if (self.wal != null) return Error.IoError;
+        self.wal = state;
+        // Drop any cached page that the WAL now overrides. After the
+        // schema scan ran without WAL knowledge, page 1 in particular
+        // could be stale. For Iter27.A's open-time attach the cache is
+        // typically empty here, but defensive eviction keeps the
+        // invariant simple: "WAL takes precedence, full stop".
+        var i: usize = 0;
+        while (i < self.cache.items.len) {
+            if (self.wal.?.lookupPagePayload(self.cache.items[i].page_no) != null) {
+                const evicted = self.cache.orderedRemove(i);
+                self.allocator.free(evicted.data);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Bytes reserved at the end of every page by the database header
@@ -359,9 +390,23 @@ pub const Pager = struct {
             }
         }
 
-        // Cache miss: read from disk.
+        // Cache miss: WAL takes precedence over the main file (Iter27.A).
+        // If the page is in the WAL index, pread the page payload from
+        // the WAL fd. Otherwise fall through to the main file pread.
         const buf = try self.allocator.alloc(u8, PAGE_SIZE);
         errdefer self.allocator.free(buf);
+
+        if (self.wal) |*w| {
+            if (w.lookupPagePayload(page_no) != null) {
+                try w.readPage(page_no, buf);
+                try self.cache.insert(self.allocator, 0, .{ .page_no = page_no, .data = buf });
+                if (self.cache.items.len > self.cache_capacity) {
+                    const evicted = self.cache.pop().?;
+                    self.allocator.free(evicted.data);
+                }
+                return self.cache.items[0].data;
+            }
+        }
 
         const offset: std.c.off_t = @intCast(@as(usize, page_no - 1) * PAGE_SIZE);
         const n = std.c.pread(self.fd, buf.ptr, PAGE_SIZE, offset);

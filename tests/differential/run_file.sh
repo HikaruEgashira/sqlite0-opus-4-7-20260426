@@ -37,6 +37,7 @@ total=0
 run_query_case() {
   local setup="$1"
   local query="$2"
+  local wal_setup="$3"
   total=$((total + 1))
 
   local fixture="${WORK_DIR}/case-${total}.db"
@@ -48,6 +49,19 @@ run_query_case() {
     return
   fi
 
+  # WAL_SETUP runs after SETUP under `.dbconfig no_ckpt_on_close on` so
+  # the -wal sidecar persists after sqlite3 exits (Iter27.A read-side
+  # fixture mechanism — see ADR-0007 §6 and the spike in Iter27.A).
+  # Without no_ckpt_on_close, sqlite3 truncates -wal to 0 bytes on
+  # close and there's nothing for sqlite0 to recover.
+  if [[ -n "$wal_setup" ]]; then
+    if ! sqlite3 -cmd '.dbconfig no_ckpt_on_close on' "$fixture" "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; $wal_setup" >/dev/null 2>&1; then
+      fail=$((fail + 1))
+      fails+=("WAL_SETUP failed (case $total): $wal_setup")
+      return
+    fi
+  fi
+
   local expected actual
   expected="$(sqlite3 "$fixture" "$query" 2>&1)" || expected="<error>"
   actual="$("$SQLITE0" -file "$fixture" -c "$query" 2>&1)" || actual="<error>"
@@ -56,7 +70,7 @@ run_query_case() {
     pass=$((pass + 1))
   else
     fail=$((fail + 1))
-    fails+=("Case $total (QUERY)"$'\n'"  SETUP:    $setup"$'\n'"  QUERY:    $query"$'\n'"  expected: $expected"$'\n'"  actual:   $actual")
+    fails+=("Case $total (QUERY)"$'\n'"  SETUP:    $setup"$'\n'"  WAL_SETUP: $wal_setup"$'\n'"  QUERY:    $query"$'\n'"  expected: $expected"$'\n'"  actual:   $actual")
   fi
 }
 
@@ -122,29 +136,31 @@ run_mutate_case() {
 
 setup=""
 query=""
+wal_setup=""
 mutate=""
 verify=""
 skip_rt="0"
 flush_case() {
   if [[ -n "$setup" ]]; then
     if [[ -n "$query" ]]; then
-      run_query_case "$setup" "$query"
+      run_query_case "$setup" "$query" "$wal_setup"
     elif [[ -n "$mutate" && -n "$verify" ]]; then
       run_mutate_case "$setup" "$mutate" "$verify" "$skip_rt"
     fi
   fi
-  setup=""; query=""; mutate=""; verify=""; skip_rt="0"
+  setup=""; query=""; wal_setup=""; mutate=""; verify=""; skip_rt="0"
 }
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   case "$line" in
     '#'*) continue ;;
     '') flush_case ;;
-    'SETUP: '*)   setup="${line#SETUP: }" ;;
-    'QUERY: '*)   query="${line#QUERY: }" ;;
-    'MUTATE: '*)  mutate="${line#MUTATE: }" ;;
-    'VERIFY: '*)  verify="${line#VERIFY: }" ;;
-    'SKIP_RT: '*) skip_rt="${line#SKIP_RT: }" ;;
+    'SETUP: '*)     setup="${line#SETUP: }" ;;
+    'WAL_SETUP: '*) wal_setup="${line#WAL_SETUP: }" ;;
+    'QUERY: '*)     query="${line#QUERY: }" ;;
+    'MUTATE: '*)    mutate="${line#MUTATE: }" ;;
+    'VERIFY: '*)    verify="${line#VERIFY: }" ;;
+    'SKIP_RT: '*)   skip_rt="${line#SKIP_RT: }" ;;
     *)
       echo "error: unrecognised line in $CASES: $line" >&2
       exit 2
