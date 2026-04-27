@@ -76,6 +76,18 @@ pub fn fnJulianday(allocator: std.mem.Allocator, args: []const Value) Error!Valu
     return Value{ .real = calendar.dateTimeToJulianFloat(dt) };
 }
 
+/// `unixepoch(timestring, [modifier]*)` — sqlite3 returns seconds since
+/// 1970-01-01 00:00:00 UTC as INTEGER. The 0-arg `unixepoch()` form
+/// requires resolving `'now'` which depends on `std.Io` plumbing — until
+/// that lands, we return NULL (sqlite3 returns NULL for any input that
+/// fails to resolve, so the surface contract is preserved).
+pub fn fnUnixepoch(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    _ = allocator;
+    if (args.len == 0) return Value.null;
+    const dt = parseAndApplyModifiers(args) orelse return Value.null;
+    return Value{ .integer = calendar.unixEpochSeconds(dt) };
+}
+
 /// Core formatter shared by strftime/date/time/datetime. `args` is the
 /// post-format slice: [datestring, modifier1, modifier2, ...]. A NULL
 /// or non-text/blob datestring or modifier collapses the whole result

@@ -2057,6 +2057,20 @@ SELECT NULL==1
 SELECT typeof(1==1)
 SELECT typeof(NULL==1)
 SELECT 1=='abc'
+# Iter29.AL: unixepoch() — Unix timestamp from date-string (sqlite3 datefunc.c).
+# Returns INTEGER seconds since 1970-01-01 UTC. Same modifier pipeline as
+# date()/datetime()/julianday(): timestring, then optional modifiers. Invalid
+# input → NULL. 0-arg form needs 'now' resolution (deferred — std.Io plumbing).
+SELECT unixepoch('2024-01-01')
+SELECT unixepoch('1970-01-01')
+SELECT unixepoch('2024-01-01 12:00:00')
+SELECT unixepoch('2024-06-15 12:34:56')
+SELECT unixepoch('2000-01-01')
+SELECT unixepoch('2024-12-31 23:59:59')
+SELECT typeof(unixepoch('2024-01-01'))
+SELECT unixepoch('not a date')
+SELECT unixepoch('2024-01-31', '+1 day')
+SELECT unixepoch('2024-01-01', '+1 hour')
 
 
 

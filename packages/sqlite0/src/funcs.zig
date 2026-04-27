@@ -56,6 +56,7 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "time")) return time_mod.fnTime(allocator, args);
     if (util.eqlIgnoreCase(name, "datetime")) return time_mod.fnDatetime(allocator, args);
     if (util.eqlIgnoreCase(name, "julianday")) return time_mod.fnJulianday(allocator, args);
+    if (util.eqlIgnoreCase(name, "unixepoch")) return time_mod.fnUnixepoch(allocator, args);
     if (util.eqlIgnoreCase(name, "iif")) return fnIif(allocator, args);
     // sqlite3 math extension (SQLITE_ENABLE_MATH_FUNCTIONS).
     if (util.eqlIgnoreCase(name, "pi")) return math_mod.fnPi(args);
