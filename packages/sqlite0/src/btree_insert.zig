@@ -1,7 +1,7 @@
-//! Leaf-table page cell insertion (Iter26.A.1, ADR-0005 §2). Pure
-//! `[]u8` → `[]u8` mutation; no Pager / no walker / no encode logic.
-//! Higher layers compose this with `Pager.writePage` and
-//! `record_encode.encodeRecord` to land an INSERT.
+//! Leaf-table page cell insertion + rebuild (Iter26.A.1 / .A.2,
+//! ADR-0005 §2). Pure `[]u8` → `[]u8` mutation; no Pager / no walker /
+//! no encode logic. Higher layers compose these with `Pager.writePage`
+//! and `record_encode.encodeRecord` to land an INSERT / DELETE / UPDATE.
 //!
 //! ## Free-space accounting
 //!
@@ -12,6 +12,15 @@
 //! That's a deliberate Iter26.A.1 simplification (no defrag / vacuum
 //! pass yet); the next layer treats `.page_full` as "split needed",
 //! and Iter26.B implements split.
+//!
+//! ## Why "rebuild" for DELETE/UPDATE
+//!
+//! `rebuildLeafTablePage` re-emits a fresh leaf page from a list of
+//! surviving (rowid, record) pairs. This avoids freeblock-chain
+//! bookkeeping entirely — the page comes back maximally compacted, the
+//! pointer array tightly packed, and the gap zeroed. DELETE drops
+//! matching cells before the rebuild; UPDATE replaces matching cells'
+//! record bytes. Both operations call the same primitive.
 //!
 //! ## Overflow rejection
 //!
@@ -28,6 +37,14 @@ const record_encode = @import("record_encode.zig");
 pub const Error = ops.Error;
 
 pub const InsertOutcome = enum { ok, page_full };
+
+/// One (rowid, record_bytes) pair to install into a fresh leaf page.
+/// Borrowed slice — `rebuildLeafTablePage` copies into the destination
+/// buffer.
+pub const RebuildCell = struct {
+    rowid: i64,
+    record_bytes: []const u8,
+};
 
 /// Insert one new cell (rowid + record bytes) into the leaf-table page
 /// at `page` in rowid-sorted position. Returns `.page_full` if the
@@ -118,6 +135,86 @@ pub fn insertLeafTableCell(
     page[header_offset + 6] = @intCast(new_content_start & 0xff);
 
     return .ok;
+}
+
+/// Rewrite `page` as a fresh leaf-table page containing exactly `cells`
+/// (in the given order — caller is responsible for rowid-ascending sort,
+/// matching sqlite3's invariant). The B-tree page header is rewritten,
+/// the cell pointer array is repacked tight, cell content is laid out
+/// back-to-front from `usable_size`, and the gap between the pointer
+/// array end and the cell content area start is zeroed. Bytes BEFORE
+/// `header_offset` (the 100-byte file header on page 1) are left
+/// untouched.
+///
+/// Errors:
+///   - `Error.IoError` if any cell's record exceeds the overflow
+///     threshold (`usable_size - 35`) — overflow chains are Iter26.C.
+///   - `Error.IoError` if the cell pointer array would not fit before
+///     the cell content area (page over-full).
+pub fn rebuildLeafTablePage(
+    page: []u8,
+    header_offset: usize,
+    usable_size: usize,
+    cells: []const RebuildCell,
+) Error!void {
+    if (page.len < usable_size) return Error.IoError;
+    const x: usize = usable_size - 35;
+    for (cells) |c| {
+        if (c.record_bytes.len > x) return Error.IoError;
+    }
+
+    // Lay out cell content back-to-front from `usable_size`. Walking
+    // cells in reverse lets us write each cell body and its pointer
+    // slot in one pass (slot k receives offset content_start of the
+    // same iteration; no two cells overlap).
+    var content_start: usize = usable_size;
+    const ptr_array_offset = header_offset + 8;
+    const required_ptr_array: usize = cells.len * 2;
+    if (ptr_array_offset + required_ptr_array > usable_size) return Error.IoError;
+
+    // First pass: compute each cell's destination offset (rightmost
+    // first). We can't write the pointer array until we know all
+    // offsets, but we can write each cell body immediately because
+    // no two cells overlap.
+    var k: usize = cells.len;
+    while (k > 0) {
+        k -= 1;
+        const c = cells[k];
+        const payload_len_n = record_encode.varintLen(c.record_bytes.len);
+        const rowid_n = record_encode.varintLen(@as(u64, @bitCast(c.rowid)));
+        const cell_size: usize = payload_len_n + rowid_n + c.record_bytes.len;
+        if (cell_size > content_start - (ptr_array_offset + required_ptr_array)) {
+            return Error.IoError; // would collide with pointer array
+        }
+        content_start -= cell_size;
+
+        var pos = content_start;
+        pos += record.encodeVarint(c.record_bytes.len, page[pos..]);
+        pos += record.encodeVarint(@as(u64, @bitCast(c.rowid)), page[pos..]);
+        @memcpy(page[pos .. pos + c.record_bytes.len], c.record_bytes);
+
+        // Write the pointer slot for this cell. Slot index = k.
+        const ptr_slot = ptr_array_offset + k * 2;
+        page[ptr_slot] = @intCast((content_start >> 8) & 0xff);
+        page[ptr_slot + 1] = @intCast(content_start & 0xff);
+    }
+
+    // Empty-cells case: content_start stays at usable_size (sqlite3
+    // stores 0 in cell_content_area to mean 65536 only when usable
+    // page size IS 65536; for our 4096 fixtures the literal value is
+    // fine).
+    const ptr_array_end = ptr_array_offset + required_ptr_array;
+    @memset(page[ptr_array_end..content_start], 0);
+
+    // Header.
+    page[header_offset] = 0x0d; // leaf table
+    page[header_offset + 1] = 0x00; // first_freeblock — none, fully compacted
+    page[header_offset + 2] = 0x00;
+    page[header_offset + 3] = @intCast((cells.len >> 8) & 0xff);
+    page[header_offset + 4] = @intCast(cells.len & 0xff);
+    page[header_offset + 5] = @intCast((content_start >> 8) & 0xff);
+    page[header_offset + 6] = @intCast(content_start & 0xff);
+    page[header_offset + 7] = 0x00; // fragmented_free_bytes — none
 }
 
 fn readU16(bytes: []const u8, off: usize) u16 {
@@ -218,6 +315,99 @@ test "insertLeafTableCell: returns page_full when no contiguous room" {
 
     const r = try insertLeafTableCell(page, 0, 256, 2, second);
     try testing.expectEqual(InsertOutcome.page_full, r);
+}
+
+test "rebuildLeafTablePage: round-trip three cells" {
+    const r1 = [_]u8{ 0x02, 0x01, 0x05 };
+    const r2 = [_]u8{ 0x02, 0x01, 0x0a };
+    const r3 = [_]u8{ 0x02, 0x01, 0x0f };
+    const page = try testing.allocator.alloc(u8, 4096);
+    defer testing.allocator.free(page);
+    @memset(page, 0xab); // garbage marker so we can prove the gap is zeroed
+
+    const cells = [_]RebuildCell{
+        .{ .rowid = 1, .record_bytes = &r1 },
+        .{ .rowid = 2, .record_bytes = &r2 },
+        .{ .rowid = 3, .record_bytes = &r3 },
+    };
+    try rebuildLeafTablePage(page, 0, 4096, &cells);
+
+    const parsed = try btree.parseLeafTablePage(testing.allocator, page, 0, 4096);
+    defer testing.allocator.free(parsed);
+    try testing.expectEqual(@as(usize, 3), parsed.len);
+    try testing.expectEqual(@as(i64, 1), parsed[0].rowid);
+    try testing.expectEqual(@as(i64, 2), parsed[1].rowid);
+    try testing.expectEqual(@as(i64, 3), parsed[2].rowid);
+    try testing.expectEqualSlices(u8, &r2, parsed[1].record_bytes);
+}
+
+test "rebuildLeafTablePage: empty cell list yields valid empty leaf" {
+    const page = try testing.allocator.alloc(u8, 4096);
+    defer testing.allocator.free(page);
+    @memset(page, 0xff);
+
+    const empty = [_]RebuildCell{};
+    try rebuildLeafTablePage(page, 0, 4096, &empty);
+
+    const cells = try btree.parseLeafTablePage(testing.allocator, page, 0, 4096);
+    defer testing.allocator.free(cells);
+    try testing.expectEqual(@as(usize, 0), cells.len);
+
+    // The 8-byte header should be the only non-gap region; the
+    // ptr-array-end-to-content-start gap must be zeroed.
+    var i: usize = 8;
+    while (i < 4096) : (i += 1) try testing.expectEqual(@as(u8, 0), page[i]);
+}
+
+test "rebuildLeafTablePage: zeroes the gap between ptr array and content" {
+    const r1 = [_]u8{ 0x02, 0x01, 0x07 };
+    const page = try testing.allocator.alloc(u8, 4096);
+    defer testing.allocator.free(page);
+    @memset(page, 0xcc);
+
+    const cells = [_]RebuildCell{.{ .rowid = 1, .record_bytes = &r1 }};
+    try rebuildLeafTablePage(page, 0, 4096, &cells);
+
+    // Find content_start from the header.
+    const content_start: usize = (@as(usize, page[5]) << 8) | page[6];
+    const ptr_array_end: usize = 8 + 1 * 2;
+    var i: usize = ptr_array_end;
+    while (i < content_start) : (i += 1) try testing.expectEqual(@as(u8, 0), page[i]);
+}
+
+test "rebuildLeafTablePage: header_offset=100 (page 1) preserves file header" {
+    const r1 = [_]u8{ 0x02, 0x01, 0x42 };
+    const page = try testing.allocator.alloc(u8, 4096);
+    defer testing.allocator.free(page);
+    @memset(page, 0); // simulate a real page-1 with a sqlite3 file header
+    // Plant a marker in the first 100 bytes — must survive the rebuild.
+    page[0] = 'S';
+    page[1] = 'Q';
+    page[99] = 0x42;
+
+    const cells = [_]RebuildCell{.{ .rowid = 7, .record_bytes = &r1 }};
+    try rebuildLeafTablePage(page, 100, 4096, &cells);
+
+    try testing.expectEqual(@as(u8, 'S'), page[0]);
+    try testing.expectEqual(@as(u8, 'Q'), page[1]);
+    try testing.expectEqual(@as(u8, 0x42), page[99]);
+
+    const parsed = try btree.parseLeafTablePage(testing.allocator, page, 100, 4096);
+    defer testing.allocator.free(parsed);
+    try testing.expectEqual(@as(usize, 1), parsed.len);
+    try testing.expectEqual(@as(i64, 7), parsed[0].rowid);
+}
+
+test "rebuildLeafTablePage: rejects oversize record (overflow threshold)" {
+    const big = try testing.allocator.alloc(u8, 4096); // > X = 4096-35
+    defer testing.allocator.free(big);
+    @memset(big, 0);
+
+    const page = try testing.allocator.alloc(u8, 4096);
+    defer testing.allocator.free(page);
+
+    const cells = [_]RebuildCell{.{ .rowid = 1, .record_bytes = big }};
+    try testing.expectError(Error.IoError, rebuildLeafTablePage(page, 0, 4096, &cells));
 }
 
 test "insertLeafTableCell: header_offset=100 (page 1)" {

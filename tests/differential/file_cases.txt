@@ -88,3 +88,59 @@ VERIFY: SELECT i, f, t FROM m
 SETUP: CREATE TABLE t(x)
 MUTATE: INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)
 VERIFY: SELECT x FROM t
+
+# Iter26.A.2.a DELETE cases (file-mode rebuild-page).
+
+# DELETE without WHERE — drop everything from a populated table.
+SETUP: CREATE TABLE t(a); INSERT INTO t VALUES (1), (2), (3)
+MUTATE: DELETE FROM t
+VERIFY: SELECT count(*) FROM t
+
+# DELETE WHERE matching a subset.
+SETUP: CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 'x'), (2, 'y'), (3, 'z')
+MUTATE: DELETE FROM t WHERE a = 2
+VERIFY: SELECT a, b FROM t
+
+# DELETE WHERE matching no rows — table contents and on-disk bytes unchanged.
+SETUP: CREATE TABLE t(a); INSERT INTO t VALUES (10), (20)
+MUTATE: DELETE FROM t WHERE a = 999
+VERIFY: SELECT a FROM t
+
+# DELETE then re-SELECT after a mixed INSERT+DELETE batch.
+SETUP: CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3), (4)
+MUTATE: DELETE FROM t WHERE x > 2
+VERIFY: SELECT x FROM t
+
+# Iter26.A.2.b UPDATE cases (file-mode rebuild-page).
+
+# UPDATE without WHERE — rewrite every row.
+SETUP: CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 'x'), (2, 'y')
+MUTATE: UPDATE t SET b = 'z'
+VERIFY: SELECT a, b FROM t
+
+# UPDATE WHERE matching one row, single column.
+SETUP: CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 'old'), (2, 'old'), (3, 'old')
+MUTATE: UPDATE t SET b = 'new' WHERE a = 2
+VERIFY: SELECT a, b FROM t
+
+# UPDATE multiple columns at once.
+SETUP: CREATE TABLE p(name TEXT, age INTEGER); INSERT INTO p VALUES ('alice', 30), ('bob', 25)
+MUTATE: UPDATE p SET name = 'BOB', age = 26 WHERE name = 'bob'
+VERIFY: SELECT name, age FROM p ORDER BY name
+
+# UPDATE WHERE matches no rows — file unchanged.
+SETUP: CREATE TABLE t(a); INSERT INTO t VALUES (1), (2)
+MUTATE: UPDATE t SET a = 99 WHERE a = 999
+VERIFY: SELECT a FROM t
+
+# UPDATE growing the row's record (small int → larger int).
+SETUP: CREATE TABLE t(n INTEGER); INSERT INTO t VALUES (5), (10)
+MUTATE: UPDATE t SET n = 1000000 WHERE n = 5
+VERIFY: SELECT n FROM t
+
+# UPDATE assignment-order: every RHS sees the OLD row. sqlite3 yields
+# (11, 1) for (a + 10, a) because b's RHS reads the pre-update a.
+# A naive in-place mutation between assignments would yield (11, 11).
+SETUP: CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 0)
+MUTATE: UPDATE t SET a = a + 10, b = a
+VERIFY: SELECT a, b FROM t

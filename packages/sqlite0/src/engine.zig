@@ -79,13 +79,16 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_delete => {
             const parsed = try stmt_dml.parseDeleteStatement(p);
-            try assertWritable(db);
+            // executeDelete dispatches on `t.root_page` — file-mode is
+            // handled via Pager + rebuild-page (Iter26.A.2.a). The
+            // read-only guard no longer applies here.
             const rowcount = try engine_dml.executeDelete(db, p.allocator, parsed);
             return .{ .delete = .{ .rowcount = rowcount } };
         },
         .keyword_update => {
             const parsed = try stmt_dml.parseUpdateStatement(p);
-            try assertWritable(db);
+            // executeUpdate dispatches on `t.root_page` — file-mode is
+            // handled via Pager + rebuild-page (Iter26.A.2.b).
             const rowcount = try engine_dml.executeUpdate(db, p.allocator, parsed);
             return .{ .update = .{ .rowcount = rowcount } };
         },
@@ -93,11 +96,11 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     }
 }
 
-/// Reject DDL/DML against a Pager-backed Database until Iter26.A lands
-/// the write path. This guards against silent in-memory shadow state
-/// masquerading as a persisted mutation: `Database.openFile` populates
-/// `tables` from sqlite_schema, but `registerTable` / `executeInsert` /
-/// etc. all mutate per-process state with no path back to the file.
+/// Reject CREATE TABLE against a Pager-backed Database until Iter26.A.3
+/// lands schema-page allocation. INSERT/DELETE/UPDATE now have file-mode
+/// paths (Iter26.A.1 / .A.2) and dispatch on `Table.root_page` themselves;
+/// only CREATE TABLE would still mutate `db.tables` with no path back to
+/// the file, hence the gate stays for it alone.
 fn assertWritable(db: *Database) Error!void {
     if (db.pager != null) return Error.ReadOnlyDatabase;
 }

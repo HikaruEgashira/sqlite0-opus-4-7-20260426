@@ -83,6 +83,30 @@ pub const Pager = struct {
         self.fd = -1;
     }
 
+    /// Bytes reserved at the end of every page by the database header
+    /// (file header byte 20). sqlite3 defaults to 0 in some builds and
+    /// 12 in newer ones; sqlite_alter_table / sqlite3_analyze emit 0,
+    /// while a fresh `sqlite3` CLI tends to emit 12. The usable area
+    /// per page is `PAGE_SIZE - reserved_space`. Required for any
+    /// page-rebuild path so cell content doesn't spill into the
+    /// reserved tail (which sqlite3's `PRAGMA integrity_check` flags as
+    /// "free space corruption").
+    ///
+    /// Returns 0 if the file is too small to have a header (shouldn't
+    /// happen for an opened sqlite3 db; `Error.IoError` would have
+    /// surfaced earlier).
+    pub fn reservedSpace(self: *Pager) Error!u8 {
+        const page1 = try self.getPage(1);
+        if (page1.len < 21) return Error.IoError;
+        return page1[20];
+    }
+
+    /// Convenience: PAGE_SIZE − reserved tail. Cells must not extend
+    /// past byte `usableSize()`.
+    pub fn usableSize(self: *Pager) Error!usize {
+        return PAGE_SIZE - @as(usize, try self.reservedSpace());
+    }
+
     /// Write `bytes` (exactly PAGE_SIZE) to page `page_no` via pwrite,
     /// then update the LRU cache so subsequent `getPage` reads see the
     /// new contents without an extra disk roundtrip. Iter26.A.0 — the

@@ -11,6 +11,9 @@
 //! on error, ADR-0003 §1) lives here. UPDATE intentionally stops at row-
 //! level atomicity (consistent with sqlite3); DELETE is atomic at the
 //! statement level via the survivors-list swap.
+//!
+//! File-mode (Pager-backed) DML lives in `engine_dml_file.zig`; the
+//! public entry points here dispatch on `Table.root_page`.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -21,11 +24,7 @@ const eval = @import("eval.zig");
 const database = @import("database.zig");
 const engine = @import("engine.zig");
 const func_util = @import("func_util.zig");
-const btree = @import("btree.zig");
-const btree_insert = @import("btree_insert.zig");
-const record = @import("record.zig");
-const record_encode = @import("record_encode.zig");
-const pager_mod = @import("pager.zig");
+const engine_dml_file = @import("engine_dml_file.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -38,6 +37,12 @@ const Error = ops.Error;
 /// failures leave the table unchanged (all-or-nothing — ADR-0003 §1).
 pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedDelete) !u64 {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
+    // File-mode tables (root_page != 0) take the Pager + rebuild-page
+    // path. The fork lives here so engine.dispatchOne stays oblivious
+    // to backend choice — same shape as executeInsert.
+    if (t.root_page != 0) {
+        return engine_dml_file.executeDeleteFile(db, t, parsed);
+    }
     // Build the per-table-row qualifier vector once: each column is
     // qualified by the (unaliased) table name so correlated subqueries can
     // reference `<table>.<col>` from the WHERE predicate's outer frame.
@@ -107,6 +112,13 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     const indices = try arena.alloc(usize, parsed.assignments.len);
     for (parsed.assignments, indices) |a, *idx| {
         idx.* = findTableColumn(t, a.column) orelse return Error.SyntaxError;
+    }
+
+    // File-mode tables (root_page != 0) take the rebuild-page path
+    // (Iter26.A.2.b). The dispatch happens after column-index
+    // validation so parse-time errors still surface uniformly.
+    if (t.root_page != 0) {
+        return engine_dml_file.executeUpdateFile(db, t, parsed, indices);
     }
 
     const dml_qualifiers = try arena.alloc([]const u8, t.columns.len);
@@ -180,7 +192,7 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     // append behaviour. The dispatch lives here so the caller-side
     // (engine.dispatchOne) doesn't need to know about the backend.
     if (t.root_page != 0) {
-        return executeInsertFile(db, arena, t, target_indices, source_rows);
+        return engine_dml_file.executeInsertFile(db, t, target_indices, source_rows);
     }
 
     try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);
@@ -250,83 +262,3 @@ fn findTableColumn(t: *const Table, name: []const u8) ?usize {
     return null;
 }
 
-/// File-mode INSERT (Iter26.A.1): build a working copy of the table's
-/// root page, insert each new row's cell into it via
-/// `btree_insert.insertLeafTableCell`, then commit the whole batch with
-/// one `Pager.writePage`. All-or-nothing per ADR-0003 §1: if any row
-/// triggers `.page_full` (or any other failure), the working buffer is
-/// discarded and the on-disk page is untouched.
-///
-/// Restrictions for Iter26.A.1:
-///   - root page must be a leaf-table (multi-page B-trees → split path
-///     not yet implemented; returns `Error.UnsupportedFeature`).
-///   - no per-page split (single-page tables only); `.page_full`
-///     returns `Error.UnsupportedFeature` so the user knows the limit.
-///   - rowid auto-assigned as `max(existing_rowids) + 1` (or 1 if the
-///     leaf is empty). Explicit rowid via INTEGER PRIMARY KEY alias is
-///     a future iteration.
-fn executeInsertFile(
-    db: *Database,
-    _: std.mem.Allocator,
-    t: *Table,
-    target_indices: []?usize,
-    source_rows: []const []Value,
-) !u64 {
-    const pager = if (db.pager) |*pp| pp else return Error.IoError;
-
-    // The "arena" param threading from `Database.execute` is actually
-    // `db.allocator` (no per-statement arena yet — see ADR-0003 §8 for
-    // the planned shape). Until that lands, manage our own scratch
-    // arena locally so the work buffer + encoded records get released
-    // even on the error paths.
-    var scratch = std.heap.ArenaAllocator.init(db.allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-
-    const original = try pager.getPage(t.root_page);
-    const work = try a.alloc(u8, original.len);
-    @memcpy(work, original);
-
-    const header_offset = btree.pageHeaderOffset(t.root_page);
-    const header = try btree.parsePageHeader(work, header_offset);
-    if (header.page_type != .leaf_table) return Error.UnsupportedFeature;
-
-    // Find current max rowid by parsing existing cells. Linear scan over
-    // the cell pointer array is fine for Iter26.A.1's small fixtures.
-    var max_rowid: i64 = 0;
-    {
-        const cells = try btree.parseLeafTablePage(a, work, header_offset, pager_mod.PAGE_SIZE);
-        for (cells) |c| {
-            if (c.rowid > max_rowid) max_rowid = c.rowid;
-        }
-    }
-
-    var inserted: u64 = 0;
-    for (source_rows) |row| {
-        const new_values = try a.alloc(Value, t.columns.len);
-        for (new_values, 0..) |*slot, k| {
-            slot.* = if (target_indices[k]) |src_idx| row[src_idx] else Value.null;
-        }
-
-        const rec = try record_encode.encodeRecord(a, new_values);
-        max_rowid += 1;
-        const outcome = try btree_insert.insertLeafTableCell(
-            work,
-            header_offset,
-            pager_mod.PAGE_SIZE,
-            max_rowid,
-            rec,
-        );
-        switch (outcome) {
-            .ok => inserted += 1,
-            .page_full => return Error.UnsupportedFeature, // Iter26.B
-        }
-    }
-
-    // Commit: one writePage call lands the entire batch atomically with
-    // respect to the cache. The on-disk write is a single pwrite — torn
-    // writes are still possible at the OS layer, which is the price we
-    // pay for "no fsync" until Phase 4.
-    try pager.writePage(t.root_page, work);
-    return inserted;
-}

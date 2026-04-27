@@ -338,10 +338,11 @@ test "loadFromPager: rejects non-sqlite3 file" {
     try testing.expectError(Error.IoError, loadFromPager(&db, &p));
 }
 
-test "file-mode Database rejects DELETE/UPDATE/CREATE TABLE (Iter26.A.1 partial guard)" {
-    // After Iter26.A.1, INSERT is allowed in file mode (exercised by
-    // run_file.sh). DELETE / UPDATE / CREATE TABLE remain gated by
-    // engine.assertWritable until A.2 / A.3 land them.
+test "file-mode Database rejects CREATE TABLE (Iter26.A.3 still pending)" {
+    // After Iter26.A.1/.A.2, INSERT/DELETE are allowed in file mode
+    // (exercised by run_file.sh). UPDATE was added in A.2.b. Only
+    // CREATE TABLE remains gated by engine.assertWritable until A.3
+    // lands schema-page allocation.
     const path = try makeTempPath("readonly");
     defer testing.allocator.free(path);
     defer unlinkPath(path);
@@ -362,8 +363,6 @@ test "file-mode Database rejects DELETE/UPDATE/CREATE TABLE (Iter26.A.1 partial 
     var db = try database.Database.openFile(testing.allocator, path);
     defer db.deinit();
 
-    try testing.expectError(Error.ReadOnlyDatabase, db.execute("DELETE FROM t"));
-    try testing.expectError(Error.ReadOnlyDatabase, db.execute("UPDATE t SET a = 1"));
     try testing.expectError(Error.ReadOnlyDatabase, db.execute("CREATE TABLE u(z)"));
 
     // SELECT still works against file-mode databases (Iter25 read path).
