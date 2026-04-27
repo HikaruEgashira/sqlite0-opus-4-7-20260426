@@ -19,6 +19,13 @@
 //! arena) — Value contents are aliased by reference for in-memory backends
 //! (zero-cost) and will need explicit dupe when Phase 3b's BtreeCursor lands
 //! (page eviction can invalidate the bytes between rows).
+//!
+//! Write-side cursor API (`delete_current`, `update_column_at_current`,
+//! `insert`) is deferred to Iter26.A. The in-memory DML path in
+//! `engine_dml.zig` still mutates `t.rows` directly because the write
+//! contract's shape is dictated by Pager B-tree mechanics that don't exist
+//! yet. Designing it now is speculation; Phase 3b/c will define the
+//! primitives once the page format is concrete.
 
 const std = @import("std");
 const value_mod = @import("value.zig");

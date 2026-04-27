@@ -13,18 +13,17 @@ ADR-0004 で Phase 順序を改訂 (Pager を VDBE より先行)。ADR-0005 が 
 ### Phase 3a: Cursor 抽象の導入 (Pager 着手前の refactor)
 
 - [x] Iter24.A: `cursor.zig` 新設、`Cursor` + `VTable` + in-memory `TableCursor` を実装。`engine_from.resolveSource` の `.table_ref` 経路を `TableCursor` + `materializeRows` 経由に切替。差分テスト 787/787 緑を維持。Phase 3b で `BtreeCursor` を追加するとき call site は無修正。
-- [ ] Iter24.B: DML 経路 (`engine_dml.executeDelete` / `executeUpdate`) を Cursor 経由に切替。INSERT は schema 追記なので変更しない。
-- [ ] Iter24.C (任意): correlated subquery の outer-frame 経路の `current_row` 所有関係を Cursor contract で固める。
+- ~~Iter24.B/C~~: 削除。理由: DML の write-side cursor API (`delete_current` / `update_column_at_current`) は Pager B-tree mechanics に dictate されるため Phase 3b/c で再起票する (Iter26.A 参照)。correlated subquery の outer-frame 所有関係も page-eviction model 確定後でないと設計できない (Iter25.B に absorb)。
 
 ### Phase 3b: Pager + read-only B-tree (SQLite3 .db 読み込み)
 
 - [ ] Iter25.A: `pager.zig` 新設。`init(allocator, file_path)` で open, `getPage(n)` で 4096-byte buffer。LRU 16 page。kernel `flock` で exclusive lock。Unit test で sqlite3 fixture の page 1 header を読めること。
-- [ ] Iter25.B: `btree.zig` 新設。Table B-tree の cell parser + traversal。`BtreeCursor` を `cursor.zig` に追加。CLI に `-file <path>` 追加。差分ハーネス `run_file.sh` 新設。
+- [ ] Iter25.B: `btree.zig` 新設。Table B-tree の cell parser + traversal。`BtreeCursor` を `cursor.zig` に追加。CLI に `-file <path>` 追加。差分ハーネス `run_file.sh` 新設。**OuterFrame.current_row 所有関係を BtreeCursor lifetime contract に統合**。
 - [ ] Iter25.C: `schema.zig` 新設。`sqlite_schema` 経由で `Database.tables` populate。
 
 ### Phase 3c: 書き込み path
 
-- [ ] Iter26.A: B-tree page 更新 + page split + sqlite_schema への INSERT。CREATE TABLE / INSERT / DELETE / UPDATE が persistent に。**rollback はまだ無い** (Phase 4 で WAL)。
+- [ ] Iter26.A: B-tree page 更新 + page split + sqlite_schema への INSERT。**Cursor write-side API (`delete_current` / `update_column_at_current` / `insert`) を導入し、`engine_dml.executeDelete` / `executeUpdate` を Cursor 経由に切替** (Iter24.B 由来の作業をここで吸収)。CREATE TABLE / INSERT / DELETE / UPDATE が persistent に。**rollback はまだ無い** (Phase 4 で WAL)。
 - [ ] Iter26.B: page split overflow (record が page サイズを超えるケース)。
 
 ### 残課題 (低優先, Phase 2 由来)
