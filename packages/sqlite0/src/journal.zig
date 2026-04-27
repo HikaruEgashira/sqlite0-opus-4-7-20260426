@@ -11,18 +11,25 @@
 //!
 //! Scope (purely additive — Iter27.0.b stays read-only on the main DB
 //! before recovery commits):
-//!   - **Single-segment journals only**. sqlite3 may emit multiple
-//!     header segments mid-transaction (sub-journals); we treat the
-//!     first segment as authoritative and stop on the first invalid
-//!     record. This matches `pager_count == 0` "scan to end" behaviour.
+//!   - **Single-segment journals only, page_count must be set**.
+//!     sqlite3 emits multi-segment journals when a transaction wraps
+//!     past `cache_spill`; each segment has its own 28-byte header at
+//!     a sector-aligned offset. Scanning straight to EOF would treat
+//!     the next segment's magic bytes as a "record" and replay them as
+//!     garbage page contents (silent corruption). We trust
+//!     `header.page_count` and refuse `page_count == 0` (the "the
+//!     process died before finalising" sentinel) with `Error.IoError`.
+//!     Multi-segment recovery is Iter27.D scope.
 //!   - **Per-record checksums are NOT verified**. sqlite3's checksum
 //!     adds defence in depth against torn writes, but a mis-rolled-back
 //!     page would be detected by `PRAGMA integrity_check` downstream.
 //!     Phase 4 hardening (Iter27.D) adds verification.
-//!   - **No fsync between writes**. ADR-0007 §1.6 mandates fsync at
-//!     `Pager.flushCommitFrame` (Iter27.B+). For Iter27.0.b the
-//!     existing "best-effort durability" Phase 3 contract holds —
-//!     a power loss mid-recovery means the next open re-runs recovery
+//!   - **No fsync between writes** (ADR-0007 §1.6). The recovery
+//!     conceptually IS a commit (on-disk state atomically changes from
+//!     "pre-rollback" to "post-rollback"), but durability lands at
+//!     `Pager.flushCommitFrame` in Iter27.B+. For Iter27.0.b the
+//!     existing "best-effort durability" Phase 3 contract holds — a
+//!     power loss mid-recovery means the next open re-runs recovery
 //!     because the journal is unlinked LAST.
 //!
 //! Failure semantics: any parse error or short read returns
@@ -171,23 +178,34 @@ pub fn recover(pager: *pager_mod.Pager, journal_path: []const u8) Error!void {
 
     const header = try parseHeader(journal_bytes);
 
+    // Multi-segment journals (page_count == 0 sentinel) are Iter27.D scope.
+    // Scanning straight-to-EOF here would treat the next segment's 28-byte
+    // header magic (0xd9d505f9...) as a "record" and replay it as garbage
+    // page contents — silent corruption of the main DB. Refuse the journal
+    // and leave it on disk for manual inspection per the module's
+    // fail-loud contract.
+    if (header.page_count == 0) return Error.IoError;
+
     // Records start at the first sector boundary. Each is
     // [page_no u32 BE | page bytes | checksum u32 BE].
     const record_size: usize = 4 + header.page_size + 4;
     var rec_off: usize = header.sector_size;
     var applied: u32 = 0;
-    const max_records: u32 = if (header.page_count == 0) std.math.maxInt(u32) else header.page_count;
+    const max_records: u32 = header.page_count;
 
     while (applied < max_records and rec_off + record_size <= size) {
         const page_no = readU32BE(journal_bytes[rec_off .. rec_off + 4]);
-        // page_no == 0 is sqlite3's sentinel for "end of records in
-        // this segment" when page_count is unknown.
-        if (page_no == 0) break;
+        // page_no == 0 inside a finalised segment is structural corruption,
+        // not an end-of-records sentinel (that branch only applies when
+        // page_count == 0, which we've already rejected above).
+        if (page_no == 0) return Error.IoError;
         const page_bytes = journal_bytes[rec_off + 4 .. rec_off + 4 + header.page_size];
         try pager.writePage(page_no, page_bytes);
         rec_off += record_size;
         applied += 1;
     }
+
+    if (applied != max_records) return Error.IoError;
 
     // Shrink the file back if the aborted transaction had extended it.
     try pager.truncate(header.initial_db_size);
