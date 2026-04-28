@@ -24,6 +24,7 @@ const engine_setop = @import("engine_setop.zig");
 const engine_dml = @import("engine_dml.zig");
 const engine_ddl_file = @import("engine_ddl_file.zig");
 const engine_meta = @import("engine_meta.zig");
+const engine_cte = @import("engine_cte.zig");
 const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
@@ -46,8 +47,7 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     defer p.allocator = saved;
 
     // VALUES tuples evaluate eagerly during parsing; expose `db` so
-    // `(SELECT ...)` inside a tuple can resolve. Restored on exit so other
-    // entry points (REPL between dispatches) don't see a stale pointer.
+    // `(SELECT ...)` inside a tuple can resolve. Restored on exit.
     const saved_db = p.db;
     p.db = db;
     defer p.db = saved_db;
@@ -55,18 +55,11 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     switch (p.cur.kind) {
         .keyword_select, .keyword_with => {
             const parsed = try stmt_mod.parseSelectStatement(p);
-            // Iter31.Z — materialise any `WITH name AS (...)` CTEs into
-            // `db.transient_ctes` before the main SELECT runs. Earlier
-            // CTEs are visible to later CTEs because we extend the
-            // slice incrementally. Cleared on exit (defer) so the next
-            // statement starts with a fresh empty slice — the arena
-            // tearing down right after this returns also reclaims the
-            // backing rows / columns / TransientCte slots.
+            // Iter31.Z — CTEs publish to db.transient_ctes incrementally
+            // so a later CTE can see earlier ones; restored on exit.
             const saved_ctes = db.transient_ctes;
             defer db.transient_ctes = saved_ctes;
-            if (parsed.with_ctes.len > 0) {
-                try materializeCtes(db, p.allocator, parsed.with_ctes);
-            }
+            if (parsed.with_ctes.len > 0) try engine_cte.materialize(db, p.allocator, parsed.with_ctes);
             const arena_rows = try executeSelect(db, p.allocator, parsed);
             const long_rows = try dupeRowsToLongLived(db.allocator, arena_rows);
             return .{ .select = long_rows };
@@ -129,11 +122,8 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     }
 }
 
-/// Result of a SELECT used as a row source. Iter21 added this so subqueries
-/// in FROM can advertise their projected column names without a second
-/// FROM-resolution pass at the call site. The CLI / direct executeSelect
-/// callers (which don't print headers) keep using `executeSelect` and
-/// discard the column metadata.
+/// SELECT row source + projected column names. CLI / direct callers
+/// stay on `executeSelect` and discard the column metadata.
 pub const SelectResult = struct {
     rows: [][]Value,
     columns: [][]const u8,
@@ -478,70 +468,6 @@ pub fn lookupTable(db: *Database, scratch: std.mem.Allocator, name: []const u8) 
     const lower = try database.lowerCaseDupe(scratch, name);
     defer scratch.free(lower);
     return db.tables.getPtr(lower) orelse Error.NoSuchTable;
-}
-
-/// Iter31.Z — execute each CTE body left-to-right and stash the result
-/// on `db.transient_ctes`. A later CTE that references an earlier one
-/// resolves through `engine_from.resolveSource` because we extend the
-/// visible slice after each materialisation. All allocations live in
-/// the per-statement arena (`alloc`); the caller's defer restores
-/// `db.transient_ctes` to its prior value, after which the arena
-/// teardown reclaims the rows.
-fn materializeCtes(
-    db: *Database,
-    alloc: std.mem.Allocator,
-    ctes: []const stmt_mod.ParsedCte,
-) Error!void {
-    const slots = try alloc.alloc(database.TransientCte, ctes.len);
-    var i: usize = 0;
-    while (i < ctes.len) : (i += 1) {
-        const cte = ctes[i];
-        const rows_const, const columns_default = try materializeOneCteBody(db, alloc, cte.body);
-        // Iter31.AA — `WITH t(c1, c2) AS (...)` overrides the body's
-        // projected names. Width must match (sqlite3 errors with
-        // "table t has N values for M columns"); we surface the same
-        // condition as a SyntaxError to stay within the existing error
-        // taxonomy.
-        const columns: []const []const u8 = if (cte.column_names) |overrides| blk: {
-            if (overrides.len != columns_default.len) return Error.SyntaxError;
-            break :blk overrides;
-        } else columns_default;
-        slots[i] = .{
-            .name = cte.name,
-            .columns = columns,
-            .rows = rows_const,
-        };
-        // Publish through `db.transient_ctes` so the next CTE in the
-        // list can resolve a `.table_ref` against earlier names.
-        db.transient_ctes = slots[0 .. i + 1];
-    }
-}
-
-/// Iter31.AA — execute one CTE body and return `(rows, default_columns)`.
-/// SELECT path delegates to `executeSelectWithColumns`. VALUES path
-/// returns the eagerly-evaluated rows verbatim and synthesises
-/// `column1`/`column2`/... matching sqlite3's auto-naming. Both paths
-/// allocate in the per-statement arena (`alloc`).
-fn materializeOneCteBody(
-    db: *Database,
-    alloc: std.mem.Allocator,
-    body: stmt_mod.CteBody,
-) Error!struct { []const []const Value, []const []const u8 } {
-    return switch (body) {
-        .select => |ps| blk: {
-            const result = try executeSelectWithColumns(db, alloc, ps);
-            const rows_const = try alloc.alloc([]const Value, result.rows.len);
-            for (result.rows, rows_const) |row, *slot| slot.* = row;
-            break :blk .{ rows_const, result.columns };
-        },
-        .values => |rows| blk: {
-            const arity: usize = if (rows.len > 0) rows[0].len else 0;
-            const cols = try @import("stmt_from.zig").synthesizeColumnNames(alloc, arity);
-            const rows_const = try alloc.alloc([]const Value, rows.len);
-            for (rows, rows_const) |row, *slot| slot.* = row;
-            break :blk .{ rows_const, cols };
-        },
-    };
 }
 
 /// Deep-copy `rows` from arena-backed memory into `long`. Each TEXT/BLOB
