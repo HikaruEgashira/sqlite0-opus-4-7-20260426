@@ -41,6 +41,12 @@ pub const Expr = union(enum) {
     compare: Compare,
     eq_check: EqCheck,
     is_check: IsCheck,
+    /// `value IS [NOT] TRUE` / `value IS [NOT] FALSE` — sqlite3 special
+    /// case where the RHS is the bare TRUE/FALSE keyword. Unlike plain
+    /// `IS`, this applies truthiness coercion (lenient TEXT→numeric,
+    /// NULL → false for both polarities). `IS DISTINCT FROM TRUE` etc.
+    /// fold into `negated = has_not XOR has_distinct` like `is_check`.
+    is_truthy: IsTruthy,
     between: Between,
     in_list: InList,
     logical_and: LogicalBinary,
@@ -88,6 +94,7 @@ pub const Expr = union(enum) {
     ///   IS DISTINCT FROM           → negated=true
     ///   IS NOT DISTINCT FROM       → negated=false
     pub const IsCheck = struct { left: *Expr, right: *Expr, negated: bool };
+    pub const IsTruthy = struct { value: *Expr, expect_true: bool, negated: bool };
     pub const Between = struct { value: *Expr, lo: *Expr, hi: *Expr, negated: bool };
     pub const InList = struct { value: *Expr, items: []*Expr, negated: bool };
     pub const LogicalBinary = struct { left: *Expr, right: *Expr };
@@ -143,6 +150,7 @@ pub const Expr = union(enum) {
                 e.left.deinit(allocator);
                 e.right.deinit(allocator);
             },
+            .is_truthy => |e| e.value.deinit(allocator),
             .between => |b| {
                 b.value.deinit(allocator);
                 b.lo.deinit(allocator);
@@ -251,6 +259,12 @@ pub fn makeEqCheck(allocator: std.mem.Allocator, op: EqOp, left: *Expr, right: *
 pub fn makeIsCheck(allocator: std.mem.Allocator, left: *Expr, right: *Expr, negated: bool) !*Expr {
     const node = try allocator.create(Expr);
     node.* = .{ .is_check = .{ .left = left, .right = right, .negated = negated } };
+    return node;
+}
+
+pub fn makeIsTruthy(allocator: std.mem.Allocator, value: *Expr, expect_true: bool, negated: bool) !*Expr {
+    const node = try allocator.create(Expr);
+    node.* = .{ .is_truthy = .{ .value = value, .expect_true = expect_true, .negated = negated } };
     return node;
 }
 

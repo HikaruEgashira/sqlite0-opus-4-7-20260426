@@ -172,3 +172,38 @@ SELECT datetime('2024-01-01T12:00:00')
 SELECT datetime('2024-01-01t')
 SELECT datetime('2024-01-01T12')
 SELECT datetime('2024-01-01T12:')
+
+# IS [NOT] [DISTINCT FROM] TRUE/FALSE applies truthiness (Iter31.M):
+#  * sqlite3 special-cases bare TRUE/FALSE on the IS RHS — instead of
+#    strict identicalValues, it coerces LHS via the same lenient path
+#    used by `iif()` (TEXT prefix, REAL→bool). NULL never matches
+#    either polarity (both `NULL IS TRUE` and `NULL IS FALSE` → 0).
+#  * `IS DISTINCT FROM TRUE` ↔ NOT (x IS TRUE); negation chain folds
+#    via has_not XOR has_distinct, identical to plain IS.
+#  * Old impl ran through `is_check` after the parser collapsed
+#    TRUE/FALSE to INTEGER 1/0, missing both the truthiness coercion
+#    and the NULL-rejection.
+SELECT 1 IS TRUE
+SELECT 0 IS TRUE
+SELECT NULL IS TRUE
+SELECT 1 IS FALSE
+SELECT 0 IS FALSE
+SELECT NULL IS FALSE
+SELECT 1 IS NOT TRUE
+SELECT 1 IS NOT FALSE
+SELECT NULL IS NOT TRUE
+SELECT NULL IS NOT FALSE
+SELECT 'abc' IS TRUE
+SELECT '1abc' IS TRUE
+SELECT 1.5 IS TRUE
+SELECT 0.0 IS FALSE
+SELECT TRUE IS TRUE
+SELECT FALSE IS FALSE
+SELECT 1 IS DISTINCT FROM TRUE
+SELECT 1 IS NOT DISTINCT FROM TRUE
+SELECT '1abc' IS DISTINCT FROM TRUE
+SELECT 'abc' IS NOT DISTINCT FROM FALSE
+SELECT NULL IS DISTINCT FROM TRUE
+SELECT NULL IS NOT DISTINCT FROM FALSE
+SELECT 0 IS DISTINCT FROM FALSE
+SELECT 0 IS NOT DISTINCT FROM FALSE

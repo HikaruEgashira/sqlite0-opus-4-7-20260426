@@ -76,6 +76,7 @@ fn exprHasAggregate(expr: *const ast.Expr) bool {
         .compare => |c| exprHasAggregate(c.left) or exprHasAggregate(c.right),
         .eq_check => |e| exprHasAggregate(e.left) or exprHasAggregate(e.right),
         .is_check => |e| exprHasAggregate(e.left) or exprHasAggregate(e.right),
+        .is_truthy => |e| exprHasAggregate(e.value),
         .between => |b| exprHasAggregate(b.value) or exprHasAggregate(b.lo) or exprHasAggregate(b.hi),
         .in_list => |il| blk: {
             if (exprHasAggregate(il.value)) break :blk true;
@@ -158,6 +159,7 @@ fn collectInExpr(
             try collectInExpr(allocator, e.left, out);
             try collectInExpr(allocator, e.right, out);
         },
+        .is_truthy => |e| try collectInExpr(allocator, e.value, out),
         .between => |b| {
             try collectInExpr(allocator, b.value, out);
             try collectInExpr(allocator, b.lo, out);

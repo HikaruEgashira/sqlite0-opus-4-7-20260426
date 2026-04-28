@@ -97,6 +97,7 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .compare => |c| try evalCompare(ctx, c),
         .eq_check => |e| try evalEqCheck(ctx, e),
         .is_check => |e| try evalIsCheck(ctx, e),
+        .is_truthy => |e| try evalIsTruthy(ctx, e),
         .between => |b| try evalBetween(ctx, b),
         .in_list => |il| try evalInList(ctx, il),
         .logical_and => |b| try evalLogicalAnd(ctx, b),
@@ -215,6 +216,14 @@ fn evalIsCheck(ctx: EvalContext, e: Expr.IsCheck) Error!Value {
     const eq = ops.identicalValues(left, right);
     ops.freeValue(ctx.allocator, left);
     return ops.boolValue(if (e.negated) !eq else eq);
+}
+
+fn evalIsTruthy(ctx: EvalContext, e: Expr.IsTruthy) Error!Value {
+    const v = try evalExpr(ctx, e.value);
+    defer ops.freeValue(ctx.allocator, v);
+    const t = ops.truthy(v);
+    const matches = if (t) |b| b == e.expect_true else false;
+    return ops.boolValue(if (e.negated) !matches else matches);
 }
 
 fn evalBetween(ctx: EvalContext, b: Expr.Between) Error!Value {

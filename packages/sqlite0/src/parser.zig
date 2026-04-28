@@ -132,10 +132,20 @@ pub const Parser = struct {
                         try self.expect(.keyword_from);
                         has_distinct = true;
                     }
-                    const right = try self.parseComparison();
-                    errdefer right.deinit(self.allocator);
                     const negated = has_not != has_distinct;
-                    left = try ast.makeIsCheck(self.allocator, left, right, negated);
+                    // sqlite3 special-cases bare TRUE/FALSE on the RHS:
+                    // applies truthiness coercion instead of strict
+                    // identicalValues. Detect before parseComparison so
+                    // the keyword is not collapsed to INTEGER 1/0.
+                    if (self.cur.kind == .keyword_true or self.cur.kind == .keyword_false) {
+                        const expect_true = self.cur.kind == .keyword_true;
+                        self.advance();
+                        left = try ast.makeIsTruthy(self.allocator, left, expect_true, negated);
+                    } else {
+                        const right = try self.parseComparison();
+                        errdefer right.deinit(self.allocator);
+                        left = try ast.makeIsCheck(self.allocator, left, right, negated);
+                    }
                 },
                 .keyword_between => {
                     self.advance();
