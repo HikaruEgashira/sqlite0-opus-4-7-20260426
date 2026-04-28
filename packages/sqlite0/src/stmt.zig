@@ -351,6 +351,12 @@ pub const ParsedInsert = struct {
     table: []const u8,
     columns: ?[][]const u8,
     source: Source,
+    /// Iter31.AE — `RETURNING <items>` clause. Items reuse `select.SelectItem`
+    /// for shape parity with SELECT projections (`*` / `t.*` / `expr [AS
+    /// alias]`). Null = no RETURNING (the common path); engine returns just
+    /// the rowcount. Non-null = engine captures inserted rows and projects
+    /// the items over each.
+    returning: ?[]select.SelectItem = null,
 
     pub const Source = union(enum) {
         values: [][]Value,
@@ -373,18 +379,50 @@ pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
         try p.expect(.rparen);
     }
 
+    var source: ParsedInsert.Source = undefined;
+    errdefer freeInsertSource(p.allocator, source);
     switch (p.cur.kind) {
         .keyword_values => {
             p.advance();
             const rows = try parseValuesBody(p);
-            return .{ .table = table, .columns = columns, .source = .{ .values = rows } };
+            source = .{ .values = rows };
         },
         .keyword_select => {
             const ps = try parseSelectStatement(p);
-            return .{ .table = table, .columns = columns, .source = .{ .select = ps } };
+            source = .{ .select = ps };
         },
         else => return Error.SyntaxError,
     }
+    const returning = try parseOptionalReturning(p);
+    return .{ .table = table, .columns = columns, .source = source, .returning = returning };
+}
+
+fn freeInsertSource(alloc: std.mem.Allocator, src: ParsedInsert.Source) void {
+    switch (src) {
+        .values => |rows| {
+            for (rows) |row| {
+                for (row) |v| ops.freeValue(alloc, v);
+                alloc.free(row);
+            }
+            alloc.free(rows);
+        },
+        .select => |ps| freeParsedSelectFields(alloc, ps),
+    }
+}
+
+/// Iter31.AE — common helper used by all DML parsers (INSERT here,
+/// DELETE / UPDATE in stmt_dml.zig). Consumes `RETURNING <select-list>`
+/// when present and returns the parsed items; null when no RETURNING
+/// keyword. Reusing `select.parseSelectList` keeps `*` / `t.*` /
+/// `expr [AS alias]` shapes uniform with SELECT projections.
+pub fn parseOptionalReturning(p: *Parser) !?[]select.SelectItem {
+    if (p.cur.kind != .keyword_returning) return null;
+    p.advance();
+    return try select.parseSelectList(p);
+}
+
+pub fn freeReturning(alloc: std.mem.Allocator, items: ?[]select.SelectItem) void {
+    if (items) |xs| select.freeSelectList(alloc, xs);
 }
 
 fn parseInsertColumnList(p: *Parser) ![][]const u8 {

@@ -9,25 +9,32 @@ const std = @import("std");
 const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
+const stmt_mod = @import("stmt.zig");
+const select = @import("select.zig");
 
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
 
-/// `DELETE FROM <name> [WHERE <expr>]`. Without WHERE, every row in the
-/// table is removed (sqlite3 behavior).
+/// `DELETE FROM <name> [WHERE <expr>] [RETURNING ...]`. Without WHERE,
+/// every row in the table is removed (sqlite3 behavior). RETURNING
+/// captures the pre-deletion row state — see Iter31.AE.
 pub const ParsedDelete = struct {
     table: []const u8,
     where: ?*ast.Expr,
+    returning: ?[]select.SelectItem = null,
 };
 
-/// `UPDATE <name> SET <col> = <expr> [, <col> = <expr>]... [WHERE <expr>]`.
-/// `assignments` is a parallel array of column names + value expressions,
-/// in the order they appear in the SET clause. Duplicates are flagged at
-/// execute time (sqlite3 errors with "duplicate column name in SET" too).
+/// `UPDATE <name> SET <col> = <expr> [, <col> = <expr>]... [WHERE <expr>]
+/// [RETURNING ...]`. `assignments` is a parallel array of column names +
+/// value expressions, in the order they appear in the SET clause.
+/// Duplicates are flagged at execute time (sqlite3 errors with "duplicate
+/// column name in SET" too). RETURNING captures the post-update row
+/// state — see Iter31.AE.
 pub const ParsedUpdate = struct {
     table: []const u8,
     assignments: []Assignment,
     where: ?*ast.Expr,
+    returning: ?[]select.SelectItem = null,
 
     pub const Assignment = struct {
         column: []const u8,
@@ -48,7 +55,8 @@ pub fn parseDeleteStatement(p: *Parser) !ParsedDelete {
         p.advance();
         where_ast = try p.parseExpr();
     }
-    return .{ .table = table, .where = where_ast };
+    const returning = try stmt_mod.parseOptionalReturning(p);
+    return .{ .table = table, .where = where_ast, .returning = returning };
 }
 
 pub fn parseUpdateStatement(p: *Parser) !ParsedUpdate {
@@ -76,10 +84,12 @@ pub fn parseUpdateStatement(p: *Parser) !ParsedUpdate {
         p.advance();
         where_ast = try p.parseExpr();
     }
+    const returning = try stmt_mod.parseOptionalReturning(p);
     return .{
         .table = table,
         .assignments = try assignments.toOwnedSlice(p.allocator),
         .where = where_ast,
+        .returning = returning,
     };
 }
 

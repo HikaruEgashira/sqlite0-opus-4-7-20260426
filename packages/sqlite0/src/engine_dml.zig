@@ -26,30 +26,47 @@ const engine = @import("engine.zig");
 const func_util = @import("func_util.zig");
 const engine_dml_file = @import("engine_dml_file.zig");
 const engine_dml_insert_file = @import("engine_dml_insert_file.zig");
+const engine_returning = @import("engine_returning.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
 const Table = database.Table;
 const Error = ops.Error;
 
+/// Iter31.AE — internal DML result. `returning` lives in `arena`
+/// (per-statement) when non-null; dispatchOne deep-dupes to
+/// `db.allocator` before returning to the caller.
+pub const DmlInternal = struct {
+    rowcount: u64,
+    returning: ?[][]Value = null,
+};
+
 /// Remove rows from `parsed.table` for which the WHERE predicate is truthy
 /// (or all rows when WHERE is absent). Returns the count of deleted rows.
 /// Mutation is performed by building a survivor list, so partial WHERE
 /// failures leave the table unchanged (all-or-nothing — ADR-0003 §1).
-pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedDelete) !u64 {
+pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedDelete) !DmlInternal {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
     if (t.is_system) return Error.UnsupportedFeature; // Iter29.A
     // File-mode tables (root_page != 0) take the Pager + rebuild-page
     // path. The fork lives here so engine.dispatchOne stays oblivious
     // to backend choice — same shape as executeInsert.
     if (t.root_page != 0) {
-        return engine_dml_file.executeDeleteFile(db, t, parsed);
+        if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
+        const rc = try engine_dml_file.executeDeleteFile(db, t, parsed);
+        return .{ .rowcount = rc };
     }
     // Build the per-table-row qualifier vector once: each column is
     // qualified by the (unaliased) table name so correlated subqueries can
     // reference `<table>.<col>` from the WHERE predicate's outer frame.
     const dml_qualifiers = try arena.alloc([]const u8, t.columns.len);
     for (dml_qualifiers) |*q| q.* = parsed.table;
+
+    // Iter31.AE — accumulate projected RETURNING rows for each pre-delete
+    // row state. Lives in arena; dispatchOne dupes to long-lived memory.
+    var returning_rows: std.ArrayList([]Value) = .empty;
+    errdefer returning_rows.deinit(arena);
+
     if (parsed.where) |w_ast| {
         var survivors: std.ArrayList([]Value) = .empty;
         errdefer survivors.deinit(arena);
@@ -71,6 +88,10 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             const cond = try eval.evalExpr(ctx, w_ast);
             defer ops.freeValue(arena, cond);
             if (ops.truthy(cond) orelse false) {
+                if (parsed.returning) |items| {
+                    const projected = try engine_returning.projectRow(db, arena, items, row, parsed.table, t.columns, t.collations);
+                    try returning_rows.append(arena, projected);
+                }
                 try to_free.append(arena, row);
             } else {
                 try survivors.append(arena, row);
@@ -109,10 +130,21 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             for (row) |v| ops.freeValue(db.allocator, v);
             db.allocator.free(row);
         }
-        return to_free.items.len;
+        const ret_slice: ?[][]Value = if (parsed.returning != null)
+            try returning_rows.toOwnedSlice(arena)
+        else
+            null;
+        return .{ .rowcount = to_free.items.len, .returning = ret_slice };
     } else {
-        // DELETE without WHERE — drop everything.
+        // DELETE without WHERE — drop everything. Capture RETURNING
+        // rows over each row before tear-down.
         const count: u64 = t.rows.items.len;
+        if (parsed.returning) |items| {
+            for (t.rows.items) |row| {
+                const projected = try engine_returning.projectRow(db, arena, items, row, parsed.table, t.columns, t.collations);
+                try returning_rows.append(arena, projected);
+            }
+        }
         for (t.rows.items) |row| {
             for (row) |v| ops.freeValue(db.allocator, v);
             db.allocator.free(row);
@@ -121,7 +153,11 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         if (t.ipk_column == null) {
             t.rowids.clearAndFree(db.allocator);
         }
-        return count;
+        const ret_slice: ?[][]Value = if (parsed.returning != null)
+            try returning_rows.toOwnedSlice(arena)
+        else
+            null;
+        return .{ .rowcount = count, .returning = ret_slice };
     }
 }
 
@@ -130,7 +166,7 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
 /// scratch row is moved into place. Errors during evaluation leave the
 /// table unchanged for that row (and previously updated rows stay updated —
 /// matching sqlite3's per-row UPDATE behavior, not per-statement).
-pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedUpdate) !u64 {
+pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.ParsedUpdate) !DmlInternal {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
     if (t.is_system) return Error.UnsupportedFeature; // Iter29.A
 
@@ -144,11 +180,17 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     // (Iter26.A.2.b). The dispatch happens after column-index
     // validation so parse-time errors still surface uniformly.
     if (t.root_page != 0) {
-        return engine_dml_file.executeUpdateFile(db, t, parsed, indices);
+        if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
+        const rc = try engine_dml_file.executeUpdateFile(db, t, parsed, indices);
+        return .{ .rowcount = rc };
     }
 
     const dml_qualifiers = try arena.alloc([]const u8, t.columns.len);
     for (dml_qualifiers) |*q| q.* = parsed.table;
+
+    // Iter31.AE — RETURNING accumulator. Projected POST-update rows.
+    var returning_rows: std.ArrayList([]Value) = .empty;
+    errdefer returning_rows.deinit(arena);
 
     var changed: u64 = 0;
     for (t.rows.items) |*row_ptr| {
@@ -197,9 +239,18 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             row_ptr.*[col_idx] = duped;
         }
         for (new_values) |v| ops.freeValue(arena, v);
+        // Iter31.AE — capture POST-update row state for RETURNING.
+        if (parsed.returning) |items| {
+            const projected = try engine_returning.projectRow(db, arena, items, row_ptr.*, parsed.table, t.columns, t.collations);
+            try returning_rows.append(arena, projected);
+        }
         changed += 1;
     }
-    return changed;
+    const ret_slice: ?[][]Value = if (parsed.returning != null)
+        try returning_rows.toOwnedSlice(arena)
+    else
+        null;
+    return .{ .rowcount = changed, .returning = ret_slice };
 }
 
 /// Append rows from a parsed INSERT into the target table. Source rows come
@@ -211,7 +262,7 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
 /// not mentioned in the column list become NULL. Unknown column names or
 /// arity mismatches return `SyntaxError`/`ColumnCountMismatch` before any
 /// rows are appended (validation precedes mutation).
-pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.ParsedInsert) !u64 {
+pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.ParsedInsert) !DmlInternal {
     const t = try engine.lookupTable(db, db.allocator, parsed.table);
     // Iter29.A — sqlite_schema / sqlite_master are engine-managed.
     // Direct SQL mutation would corrupt page 1 (silent corruption);
@@ -234,7 +285,9 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     // append behaviour. The dispatch lives here so the caller-side
     // (engine.dispatchOne) doesn't need to know about the backend.
     if (t.root_page != 0) {
-        return engine_dml_insert_file.executeInsertFile(db, t, target_indices, source_rows);
+        if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
+        const rc = try engine_dml_insert_file.executeInsertFile(db, t, target_indices, source_rows);
+        return .{ .rowcount = rc };
     }
 
     try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);
@@ -313,7 +366,23 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     if (inserted > 0) {
         db.last_insert_rowid = last_rowid;
     }
-    return inserted;
+
+    // Iter31.AE — RETURNING projection over each newly-inserted row.
+    // Done after the loop so partial-failure rollback (errdefer above)
+    // doesn't leave behind rows whose RETURNING projection ran but
+    // whose insertion was rolled back.
+    var returning_rows: ?[][]Value = null;
+    if (parsed.returning) |items| {
+        const start_idx = t.rows.items.len - inserted;
+        const arr = try arena.alloc([]Value, inserted);
+        var i: usize = 0;
+        while (i < inserted) : (i += 1) {
+            const row = t.rows.items[start_idx + i];
+            arr[i] = try engine_returning.projectRow(db, arena, items, row, parsed.table, t.columns, t.collations);
+        }
+        returning_rows = arr;
+    }
+    return .{ .rowcount = inserted, .returning = returning_rows };
 }
 
 fn currentMaxImplicitRowid(t: *const Table) i64 {

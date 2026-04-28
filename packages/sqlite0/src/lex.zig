@@ -68,6 +68,7 @@ pub const TokenKind = enum {
     keyword_to,
     keyword_collate,
     keyword_with,
+    keyword_returning,
     plus,
     minus,
     star,

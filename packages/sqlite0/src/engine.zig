@@ -86,26 +86,25 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             return .create_table;
         },
         .keyword_insert => {
-            // executeInsert dispatches on db.pager (in-memory vs file).
             const parsed = try stmt_mod.parseInsertStatement(p);
-            const rowcount = try engine_dml.executeInsert(db, p.allocator, parsed);
-            db.last_changes = @intCast(rowcount);
-            db.total_changes += @intCast(rowcount);
-            return .{ .insert = .{ .rowcount = rowcount } };
+            const r = try engine_dml.executeInsert(db, p.allocator, parsed);
+            db.last_changes = @intCast(r.rowcount);
+            db.total_changes += @intCast(r.rowcount);
+            return .{ .insert = try buildDmlOutcome(db, r) };
         },
         .keyword_delete => {
             const parsed = try stmt_dml.parseDeleteStatement(p);
-            const rowcount = try engine_dml.executeDelete(db, p.allocator, parsed);
-            db.last_changes = @intCast(rowcount);
-            db.total_changes += @intCast(rowcount);
-            return .{ .delete = .{ .rowcount = rowcount } };
+            const r = try engine_dml.executeDelete(db, p.allocator, parsed);
+            db.last_changes = @intCast(r.rowcount);
+            db.total_changes += @intCast(r.rowcount);
+            return .{ .delete = try buildDmlOutcome(db, r) };
         },
         .keyword_update => {
             const parsed = try stmt_dml.parseUpdateStatement(p);
-            const rowcount = try engine_dml.executeUpdate(db, p.allocator, parsed);
-            db.last_changes = @intCast(rowcount);
-            db.total_changes += @intCast(rowcount);
-            return .{ .update = .{ .rowcount = rowcount } };
+            const r = try engine_dml.executeUpdate(db, p.allocator, parsed);
+            db.last_changes = @intCast(r.rowcount);
+            db.total_changes += @intCast(r.rowcount);
+            return .{ .update = try buildDmlOutcome(db, r) };
         },
         .keyword_pragma => {
             const parsed = try stmt_mod.parsePragmaStatement(p);
@@ -126,20 +125,14 @@ pub const SelectResult = struct {
     columns: [][]const u8,
 };
 
-/// Run a parsed SELECT and also derive the projected column names. Used by
-/// `engine_from.resolveSource` for `(SELECT ...)` subqueries; downstream
-/// row-binding (`executeWithFrom`) needs both rows and column names so
-/// `outer.col` can resolve into the subquery's projection.
+/// SELECT body + derived column names; used by FROM subquery resolution.
 pub fn executeSelectWithColumns(
     db: *Database,
     alloc: std.mem.Allocator,
     ps: stmt_mod.ParsedSelect,
 ) Error!SelectResult {
     const rows = try executeSelect(db, alloc, ps);
-    // For setop chains the leftmost SELECT's columns win (sqlite3 quirk:
-    // `SELECT 1 AS a UNION SELECT 2 AS b` projects column "a"). `ps` IS
-    // the leftmost SELECT — branches dangle off it — so just derive from
-    // ps.items.
+    // Setop chain: leftmost SELECT's columns win (sqlite3 quirk).
     const columns = try projectedColumnNames(db, alloc, ps);
     return .{ .rows = rows, .columns = columns };
 }
@@ -465,6 +458,16 @@ pub fn lookupTable(db: *Database, scratch: std.mem.Allocator, name: []const u8) 
     const lower = try database.lowerCaseDupe(scratch, name);
     defer scratch.free(lower);
     return db.tables.getPtr(lower) orelse Error.NoSuchTable;
+}
+
+/// Iter31.AE — bridge from internal DmlInternal (arena-backed
+/// returning rows) to the long-lived DmlOutcome the caller sees.
+fn buildDmlOutcome(db: *Database, r: engine_dml.DmlInternal) !database.DmlOutcome {
+    const long_returning: ?[][]Value = if (r.returning) |arena_rows|
+        try @import("engine_returning.zig").dupeRowsToLong(db.allocator, arena_rows)
+    else
+        null;
+    return .{ .rowcount = r.rowcount, .returning = long_returning };
 }
 
 /// Deep-copy `rows` from arena-backed memory into `long`. Each TEXT/BLOB

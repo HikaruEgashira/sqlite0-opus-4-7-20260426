@@ -604,3 +604,26 @@ WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n*2 FROM r WHERE n<10) SELECT 
 WITH RECURSIVE fib(a,b) AS (SELECT 0,1 UNION ALL SELECT b,a+b FROM fib WHERE b<20) SELECT a FROM fib;
 WITH RECURSIVE r(n) AS (SELECT 1 UNION SELECT n FROM r WHERE n<3) SELECT * FROM r;
 WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT sum(n) FROM r;
+
+# RETURNING clause for INSERT/UPDATE/DELETE (Iter31.AE):
+#  * sqlite3 added RETURNING in 3.35.0. The clause runs after the
+#    statement's row mutations — INSERT/UPDATE return post-state,
+#    DELETE returns pre-state. Items reuse the SELECT projection
+#    grammar (`*`, `t.*`, `expr [AS alias]`).
+#  * sqlite0 used to reject RETURNING with SyntaxError.
+#  * Implementation: parsers attach `returning: ?[]SelectItem` to
+#    each ParsedInsert/Delete/Update via the new `keyword_returning`
+#    token. engine_dml captures projected rows into the per-statement
+#    arena at the right moment, dispatchOne deep-dupes to long-lived
+#    memory through `engine_returning.dupeRowsToLong`. CLI prints
+#    returning rows like SELECT.
+#  * File-mode DML rejects RETURNING with UnsupportedFeature for now
+#    (deferred — fixtures here all use in-memory tables).
+CREATE TABLE t(a INT, b TEXT); INSERT INTO t VALUES(1,'x') RETURNING *;
+CREATE TABLE t(a INT, b TEXT); INSERT INTO t VALUES(1,'x'),(2,'y') RETURNING a;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(5) RETURNING a*2;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET a=a*10 RETURNING a;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE a>1 RETURNING a;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE a>100 RETURNING a;
+CREATE TABLE u(v INT); WITH src(x) AS (VALUES(1),(2)) INSERT INTO u SELECT x*10 FROM src RETURNING v;
+CREATE TABLE t(x INT, y INT); INSERT INTO t VALUES(1,2) RETURNING x+y, x*y AS prod;

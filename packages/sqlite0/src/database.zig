@@ -41,17 +41,28 @@ pub const StatementResult = union(enum) {
     select: [][]Value,
     values: [][]Value,
     create_table,
-    insert: struct { rowcount: u64 },
-    delete: struct { rowcount: u64 },
-    update: struct { rowcount: u64 },
+    insert: DmlOutcome,
+    delete: DmlOutcome,
+    update: DmlOutcome,
     transaction,
 
     pub fn deinit(self: StatementResult, allocator: std.mem.Allocator) void {
         switch (self) {
             .select, .values => |rows| freeRows(allocator, rows),
-            .create_table, .insert, .delete, .update, .transaction => {},
+            .insert, .delete, .update => |o| if (o.returning) |rows| freeRows(allocator, rows),
+            .create_table, .transaction => {},
         }
     }
+};
+
+/// Iter31.AE — DML outcome shape. `rowcount` is the count of affected
+/// rows (sqlite3 `changes()`); `returning` is the projected RETURNING
+/// rows when the statement carries the clause, otherwise null.
+/// `returning` rows are deep-duped to `db.allocator` (same lifetime as
+/// `select` rows).
+pub const DmlOutcome = struct {
+    rowcount: u64,
+    returning: ?[][]Value = null,
 };
 
 /// Table backed by either the in-memory `rows` ArrayList (CREATE TABLE
