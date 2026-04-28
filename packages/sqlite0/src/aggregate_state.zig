@@ -32,6 +32,12 @@ pub const Aggregator = struct {
     /// — TEXT pairs route through `collation.identicalValuesCollated` so
     /// `count(DISTINCT x COLLATE NOCASE)` folds 'A'/'a' into one bucket.
     distinct_kind: ast.CollationKind = .binary,
+    /// COLLATE kind for MIN/MAX comparison (Iter31.V). Captured the same
+    /// way as `distinct_kind` (explicit wrapper > column-ref column-default
+    /// > BINARY). Routes the TEXT-vs-TEXT compare through
+    /// `collation.compareValuesCollated` so `max(x)` over a NOCASE column
+    /// returns 'B' for {'a','B'} (NOCASE: 'a' < 'B'), not 'a' (BINARY).
+    compare_kind: ast.CollationKind = .binary,
     /// DISTINCT dedup set. Linear scan against `ops.identicalValues` (sqlite3
     /// "IS NOT DISTINCT FROM" semantics: NULL == NULL, INTEGER 1 == REAL 1.0,
     /// but '1' is its own group). Empty when `distinct == false`. TEXT/BLOB
@@ -73,8 +79,8 @@ pub const Aggregator = struct {
 
     pub const Kind = enum { count_star, count, sum, avg, min, max, total, group_concat };
 
-    pub fn init(kind: Kind, distinct: bool, distinct_kind: ast.CollationKind) Aggregator {
-        return .{ .kind = kind, .distinct = distinct, .distinct_kind = distinct_kind };
+    pub fn init(kind: Kind, distinct: bool, distinct_kind: ast.CollationKind, compare_kind: ast.CollationKind) Aggregator {
+        return .{ .kind = kind, .distinct = distinct, .distinct_kind = distinct_kind, .compare_kind = compare_kind };
     }
 
     /// Try to parse `bytes` as an i64. Returns null if the text isn't a
@@ -142,7 +148,7 @@ pub const Aggregator = struct {
             .min, .max => {
                 if (v == .null) return;
                 if (self.best) |current| {
-                    const order = ops.compareValues(current, v);
+                    const order = collation.compareValuesCollated(current, v, self.compare_kind);
                     const replace = switch (self.kind) {
                         .min => order == .gt,
                         .max => order == .lt,
@@ -256,5 +262,14 @@ pub fn aggregatorFromCall(
             .binary)
     else
         .binary;
-    return Aggregator.init(kind, fc.distinct, distinct_kind);
+    // Iter31.V: min/max comparison honours the same collation precedence
+    // ladder as DISTINCT — explicit COLLATE wrapper > column-ref column-
+    // default > BINARY. Other aggregates' compare_kind is irrelevant.
+    const compare_kind: ast.CollationKind = if ((kind == .min or kind == .max) and fc.args.len == 1)
+        (collation.peekKind(fc.args[0]) orelse
+            collation.columnDefault(fc.args[0], source_columns, source_qualifiers, source_collations) orelse
+            .binary)
+    else
+        .binary;
+    return Aggregator.init(kind, fc.distinct, distinct_kind, compare_kind);
 }

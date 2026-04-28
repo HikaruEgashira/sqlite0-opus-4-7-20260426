@@ -440,3 +440,22 @@ CREATE TABLE t(x TEXT); INSERT INTO t VALUES('A'),('B'); SELECT x FROM t UNION S
 CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(y TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'); SELECT x FROM t1 INTERSECT SELECT y FROM t2 ORDER BY x;
 CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(y TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'); SELECT x FROM t1 EXCEPT SELECT y FROM t2 ORDER BY x;
 CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(x TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'); SELECT * FROM t1 UNION SELECT * FROM t2 ORDER BY x;
+
+# max/min collated comparison (Iter31.V):
+#  * sqlite3 max(x) / min(x) honour the same collation precedence as
+#    DISTINCT — explicit COLLATE wrapper on the argument > column-ref's
+#    column-default > BINARY. Probe: `CREATE TABLE t(x TEXT COLLATE
+#    NOCASE); INSERT VALUES('a'),('B'); SELECT max(x), min(x) FROM t`
+#    yields 'B','a' under NOCASE (a < B), not 'a','B' under BINARY
+#    ('a'=97 > 'B'=66).
+#  * RTRIM column shifts the survivor when trailing spaces matter
+#    ('a   ' / 'a' tie under RTRIM; sqlite3 keeps insertion-first).
+#  * Explicit `max(x COLLATE NOCASE)` on a plain column applies NOCASE
+#    even when the column itself is BINARY.
+#  * Numeric (no-collation) MIN/MAX is unaffected — regression-lock.
+#  * GROUP BY + max per-group exercises the same compare_kind path.
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES('a'),('B'); SELECT max(x), min(x) FROM t;
+CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES('a   '),('a'),('b'); SELECT max(x), min(x) FROM t;
+SELECT max(x COLLATE NOCASE), min(x COLLATE NOCASE) FROM (SELECT 'a' AS x UNION ALL SELECT 'B');
+SELECT max(x), min(x) FROM (VALUES(1.5),(2),(0.5));
+CREATE TABLE t(g INT, x TEXT COLLATE NOCASE); INSERT INTO t VALUES(1,'a'),(1,'B'),(2,'C'),(2,'b'); SELECT g, max(x) FROM t GROUP BY g ORDER BY g;
