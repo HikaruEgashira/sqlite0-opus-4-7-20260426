@@ -1,10 +1,7 @@
-//! Statement parsing. Each `parse*Statement` consumes one statement and
-//! returns a `Parsed*` struct describing what was found — execution lives
-//! in `database.zig` Database.dispatchOne. On exit the cursor sits on
-//! `.semicolon` or `.eof`. VALUES inside FROM is eagerly evaluated at
-//! parse time (no outer-scope correlation in standard SQL); rows are
-//! arena-allocated and freed with the per-statement arena. Integration
-//! tests live in `database.zig` and `tests/differential/cases/*.txt`.
+//! Statement parsing. Each `parse*Statement` consumes one statement,
+//! returns a `Parsed*` struct, leaves the cursor on `.semicolon`/`.eof`.
+//! Execution lives in `engine.dispatchOne`. VALUES inside FROM is
+//! eagerly evaluated at parse time (no outer correlation in standard SQL).
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -14,6 +11,7 @@ const parser_mod = @import("parser.zig");
 const eval = @import("eval.zig");
 const select = @import("select.zig");
 const func_util = @import("func_util.zig");
+const collation = @import("collation.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -49,9 +47,8 @@ pub const ParsedSelect = struct {
     offset: ?*ast.Expr = null,
 };
 
-// Set-op types and the kind recogniser live in stmt_setop.zig (see Module
-// Splitting Rules). Re-exported so existing call sites that read
-// `stmt.SetopKind` / `stmt.SetopBranch` keep working.
+// Set-op types live in stmt_setop.zig; re-exported to keep call sites
+// reading `stmt.SetopKind` / `stmt.SetopBranch` working.
 const stmt_setop = @import("stmt_setop.zig");
 pub const SetopKind = stmt_setop.SetopKind;
 pub const SetopBranch = stmt_setop.SetopBranch;
@@ -63,10 +60,15 @@ pub const OrderTerm = struct {
     /// `position` non-null = 1-based SELECT-list column ref (sqlite3 quirk).
     /// `nulls_first` null = use direction default (ASC→true, DESC→false);
     /// non-null = explicit `NULLS FIRST` / `NULLS LAST` postfix.
+    /// `collation` is extracted from the expression's outermost
+    /// `Collate(...)` wrapper at parse time (Iter31.O); BINARY when the
+    /// expression has none. `expr` retains the wrapper so eval-time
+    /// callers (rare for ORDER BY) still see it.
     expr: *ast.Expr,
     position: ?usize = null,
     dir: OrderDirection,
     nulls_first: ?bool = null,
+    collation: ast.CollationKind = .binary,
 };
 
 pub const GroupByTerm = struct {
@@ -273,10 +275,12 @@ fn parseOrderBy(p: *Parser) ![]OrderTerm {
 
 fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
     const expr = try p.parseExpr();
-    // Bare positive integer literal = 1-based SELECT-list position
-    // (sqlite3 quirk). `1+0` keeps expression semantics.
+    // Peel any Collate wrapper(s) to find the inner literal/column-ref.
+    // Outermost wins for collation (sqlite3 chained-COLLATE rule); inner
+    // is what drives the bare-integer-position quirk.
+    const peeled = collation.peel(expr);
     var position: ?usize = null;
-    if (expr.* == .literal) switch (expr.*.literal) {
+    if (peeled.inner.* == .literal) switch (peeled.inner.literal) {
         .integer => |n| if (n > 0) { position = @intCast(n); },
         else => {},
     };
@@ -287,21 +291,18 @@ fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
         dir = .desc;
         p.advance();
     }
-    // sqlite3 grammar: `NULLS FIRST` / `NULLS LAST` postfix (SQL standard).
-    // None of these tokens are reserved keywords — peek as identifiers.
+    // `NULLS FIRST` / `NULLS LAST` postfix (SQL standard). None reserved.
     var nulls_first: ?bool = null;
     if (p.cur.kind == .identifier and func_util.eqlIgnoreCase(p.cur.slice(p.src), "nulls")) {
         p.advance();
         if (p.cur.kind != .identifier) return Error.SyntaxError;
         const w = p.cur.slice(p.src);
-        if (func_util.eqlIgnoreCase(w, "first")) {
-            nulls_first = true;
-        } else if (func_util.eqlIgnoreCase(w, "last")) {
-            nulls_first = false;
-        } else return Error.SyntaxError;
+        if (func_util.eqlIgnoreCase(w, "first")) nulls_first = true
+        else if (func_util.eqlIgnoreCase(w, "last")) nulls_first = false
+        else return Error.SyntaxError;
         p.advance();
     }
-    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir, .nulls_first = nulls_first });
+    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir, .nulls_first = nulls_first, .collation = peeled.kind });
 }
 
 pub fn freeOrderTerms(allocator: std.mem.Allocator, terms: []OrderTerm) void {

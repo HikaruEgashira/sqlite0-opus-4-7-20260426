@@ -16,6 +16,7 @@ const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 const database = @import("database.zig");
 const util = @import("func_util.zig");
+const collation = @import("collation.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -31,6 +32,10 @@ pub const OrderTerm = struct {
     /// default — sqlite3: ASC→true, DESC→false — when the parser saw no
     /// explicit `NULLS FIRST` / `NULLS LAST`).
     nulls_first: bool = true,
+    /// Iter31.O — collating sequence for TEXT-vs-TEXT key comparison.
+    /// `.binary` is the no-op default; the translation layer pulls the
+    /// outermost `Collate(...)` wrapper from the parsed expression.
+    collation: ast.CollationKind = .binary,
 };
 
 pub const PostProcess = struct {
@@ -136,9 +141,14 @@ fn valuesEqualForDistinct(a: Value, b: Value) bool {
     };
 }
 
-/// Stable sort of `rows` by parallel `keys`, applying per-term direction.
-/// Uses an indirection array so the (larger) projected rows aren't swapped
-/// during comparisons.
+/// Stable sort of `rows` by parallel `keys`, applying per-term direction
+/// and collation. Uses an indirection array so the (larger) projected
+/// rows aren't swapped during comparisons.
+///
+/// Stability matters under COLLATE: sqlite3 preserves input order on
+/// equal keys (verified `('A','a','B','b') ORDER BY column1 COLLATE
+/// NOCASE` returns the input verbatim). `std.sort.pdq` is unstable;
+/// `std.sort.block` is stable and the closest drop-in replacement.
 pub fn sortRowsByKeys(
     allocator: std.mem.Allocator,
     rows: [][]Value,
@@ -166,14 +176,14 @@ pub fn sortRowsByKeys(
                     // of the direction modifier on the same term.
                     return if (a_null) term.nulls_first else !term.nulls_first;
                 }
-                const cmp = compareValues(va, vb);
+                const cmp = compareValuesCollated(va, vb, term.collation);
                 if (cmp == 0) continue;
                 return if (term.descending) cmp > 0 else cmp < 0;
             }
             return false;
         }
     };
-    std.sort.pdq(usize, indices, Ctx{ .keys = keys, .terms = terms }, Ctx.lessThan);
+    std.sort.block(usize, indices, Ctx{ .keys = keys, .terms = terms }, Ctx.lessThan);
 
     const scratch = try allocator.alloc([]Value, rows.len);
     defer allocator.free(scratch);
@@ -255,8 +265,10 @@ pub fn applyLimitOffset(
 
 /// Compare two Values for ORDER BY using sqlite3 storage-class ordering:
 /// NULL < numeric (INTEGER/REAL coerced to f64) < TEXT < BLOB. Returns
-/// -1/0/1 (3-way).
-fn compareValues(a: Value, b: Value) i32 {
+/// -1/0/1 (3-way). `kind` selects the TEXT-vs-TEXT comparator —
+/// `.binary` is the default, `.nocase` / `.rtrim` activate when the
+/// per-term ORDER BY collation override is in effect (Iter31.O).
+fn compareValuesCollated(a: Value, b: Value, kind: ast.CollationKind) i32 {
     const ord_a = classOrder(a);
     const ord_b = classOrder(b);
     if (ord_a != ord_b) return if (ord_a < ord_b) -1 else 1;
@@ -277,7 +289,7 @@ fn compareValues(a: Value, b: Value) i32 {
             if (af > bf) return 1;
             return 0;
         },
-        2 => return switch (std.mem.order(u8, a.text, b.text)) {
+        2 => return switch (collation.compareTextCollated(a.text, b.text, kind)) {
             .lt => -1,
             .eq => 0,
             .gt => 1,

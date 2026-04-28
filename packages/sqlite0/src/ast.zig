@@ -24,6 +24,13 @@ pub const CompareOp = enum { lt, le, gt, ge };
 pub const EqOp = enum { eq, ne };
 pub const LikeOp = enum { like, glob };
 
+/// Iter31.O — collating sequence selected by an explicit `expr COLLATE name`
+/// postfix. sqlite3 ships three built-ins (BINARY/NOCASE/RTRIM); user-defined
+/// collations are deferred. The wrapper is a parse-time hint: at compare time
+/// the comparator peeks the outermost `Expr.collate` on each side ("left
+/// wins"), discarded for non-TEXT operands.
+pub const CollationKind = enum { binary, nocase, rtrim };
+
 pub const Expr = union(enum) {
     literal: Value,
     /// Column reference, possibly qualified by a table alias / name as
@@ -82,6 +89,11 @@ pub const Expr = union(enum) {
     /// integer truncates toward zero, text→int parses leading digits and
     /// returns 0 on failure, etc.
     cast: Cast,
+    /// `expr COLLATE <name>` — Iter31.O. Comparison-time hint; eval
+    /// unwraps transparently (typeof / value semantics unchanged).
+    /// Chained `a COLLATE X COLLATE Y` is left-associative postfix; the
+    /// outermost wrapper wins per side.
+    collate: Collate,
 
     pub const BinaryArith = struct { op: BinaryOp, left: *Expr, right: *Expr };
     pub const BinaryConcat = struct { left: *Expr, right: *Expr };
@@ -123,6 +135,7 @@ pub const Expr = union(enum) {
     /// 1:1 to a `Value` variant.
     pub const Affinity = enum { integer, real, text, blob, numeric };
     pub const Cast = struct { value: *Expr, target: Affinity };
+    pub const Collate = struct { value: *Expr, kind: CollationKind };
 
     pub fn deinit(self: *Expr, allocator: std.mem.Allocator) void {
         switch (self.*) {
@@ -199,6 +212,7 @@ pub const Expr = union(enum) {
                 allocator.destroy(sq);
             },
             .cast => |c| c.value.deinit(allocator),
+            .collate => |c| c.value.deinit(allocator),
         }
         allocator.destroy(self);
     }
@@ -381,6 +395,12 @@ pub fn makeExists(allocator: std.mem.Allocator, ps: stmt.ParsedSelect) !*Expr {
 pub fn makeCast(allocator: std.mem.Allocator, value: *Expr, target: Expr.Affinity) !*Expr {
     const node = try allocator.create(Expr);
     node.* = .{ .cast = .{ .value = value, .target = target } };
+    return node;
+}
+
+pub fn makeCollate(allocator: std.mem.Allocator, value: *Expr, kind: CollationKind) !*Expr {
+    const node = try allocator.create(Expr);
+    node.* = .{ .collate = .{ .value = value, .kind = kind } };
     return node;
 }
 

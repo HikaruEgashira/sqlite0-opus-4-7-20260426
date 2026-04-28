@@ -234,3 +234,54 @@ SELECT last FROM (SELECT 1 AS last)
 SELECT 1 ORDER BY 1 ASC NULLS FIRST
 SELECT * FROM (VALUES(1,'a'),(2,NULL),(NULL,'c')) ORDER BY 2 NULLS FIRST, 1
 SELECT * FROM (VALUES(1,'a'),(2,NULL),(NULL,'c')) ORDER BY 2 NULLS LAST, 1
+
+# COLLATE NOCASE/BINARY/RTRIM postfix (Iter31.O):
+#  * SQL standard postfix; sqlite3 ships three built-ins. Comparison-
+#    time hint that wraps the operand: `peekKind` extracts the outermost
+#    wrapper per side, "left wins" picks LHS over RHS over BINARY.
+#  * COLLATE binds tighter than `<`/`=`/etc — RHS of binary comparison
+#    catches it via parseUnary→parseCollatePostfix. Operators handled
+#    inside parseEquality (IN/IS/BETWEEN) miss the right operand path,
+#    so parseExpr has a trailing-COLLATE rescue (no-op on non-TEXT).
+#  * COLLATE is a fully reserved keyword — `SELECT collate` errors.
+#  * `BINARY` / `NOCASE` / `RTRIM` are case-insensitive identifier names.
+#  * Sort is stable: equal-under-collation rows preserve input order
+#    (verified `('A','a','B','b') ORDER BY col COLLATE NOCASE` returns
+#    input verbatim — switched select_post.sortRowsByKeys from pdq to
+#    block sort to honor this).
+SELECT 'A' COLLATE NOCASE = 'a'
+SELECT 'A' COLLATE BINARY = 'a'
+SELECT 'A' = 'a' COLLATE NOCASE
+SELECT 'a' COLLATE NOCASE = 'A' COLLATE BINARY
+SELECT 'A' COLLATE NOCASE = 'a' COLLATE BINARY
+SELECT 'A' COLLATE noCASE = 'a'
+SELECT 'a   ' COLLATE RTRIM = 'a'
+SELECT 'a' COLLATE RTRIM = 'a   '
+SELECT 'a  b' COLLATE RTRIM = 'a  b   '
+SELECT 1 COLLATE NOCASE = 1
+SELECT typeof('A' COLLATE NOCASE)
+SELECT NULL COLLATE NOCASE = 'a'
+SELECT NULL COLLATE NOCASE IS NULL
+SELECT 'A' COLLATE NOCASE IS 'a'
+SELECT 'A' COLLATE NOCASE IS NOT 'a'
+SELECT 'A' COLLATE NOCASE IS DISTINCT FROM 'a'
+SELECT 'A' COLLATE NOCASE BETWEEN 'a' AND 'z'
+SELECT 'A' BETWEEN 'a' COLLATE NOCASE AND 'z' COLLATE NOCASE
+SELECT 'A' COLLATE NOCASE IN ('a', 'b', 'c')
+SELECT 'A' IN ('a', 'b', 'c') COLLATE NOCASE
+SELECT 'A' COLLATE NOCASE NOT IN ('x', 'y')
+SELECT 'a' < 'B' COLLATE NOCASE
+SELECT -5 COLLATE NOCASE = -5
+SELECT abs(-5) COLLATE NOCASE = 5
+SELECT length('A' COLLATE NOCASE)
+SELECT 'A' COLLATE BOGUS = 'a'
+SELECT 'A' COLLATE = 'a'
+SELECT collate FROM (SELECT 1 AS collate)
+SELECT * FROM (VALUES('A'),('b'),('a'),('B')) ORDER BY column1 COLLATE NOCASE
+SELECT * FROM (VALUES('A'),('b'),('a'),('B')) ORDER BY column1 COLLATE NOCASE DESC
+SELECT * FROM (VALUES('a',1),('A',2),('b',3),('B',4)) ORDER BY column1 COLLATE NOCASE, column2
+SELECT * FROM (VALUES('A'),('a'),('B'),('b')) ORDER BY 1 COLLATE NOCASE
+SELECT * FROM (VALUES('a   '),('a'),('a  ')) ORDER BY column1 COLLATE RTRIM
+SELECT * FROM (VALUES(NULL),('A'),('a'),(1),(NULL)) ORDER BY column1 COLLATE NOCASE
+SELECT (('a' COLLATE BINARY) COLLATE NOCASE) = 'A'
+SELECT 'a' COLLATE NOCASE COLLATE BINARY = 'A'

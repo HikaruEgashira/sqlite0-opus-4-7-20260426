@@ -437,6 +437,7 @@ fn postProcessFromParsed(alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) !s
             .position = resolved_pos,
             .descending = descending,
             .nulls_first = term.nulls_first orelse !descending,
+            .collation = term.collation,
         };
     }
     return .{

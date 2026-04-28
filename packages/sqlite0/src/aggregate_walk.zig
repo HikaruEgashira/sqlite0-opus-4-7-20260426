@@ -108,6 +108,7 @@ fn exprHasAggregate(expr: *const ast.Expr) bool {
         .subquery, .exists => false,
         .in_subquery => |is| exprHasAggregate(is.value),
         .cast => |c| exprHasAggregate(c.value),
+        .collate => |c| exprHasAggregate(c.value),
     };
 }
 
@@ -208,5 +209,6 @@ fn collectInExpr(
         .subquery, .exists => {},
         .in_subquery => |is| try collectInExpr(allocator, is.value, out),
         .cast => |c| try collectInExpr(allocator, c.value, out),
+        .collate => |c| try collectInExpr(allocator, c.value, out),
     }
 }

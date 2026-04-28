@@ -9,6 +9,7 @@ const parser_cast = @import("parser_cast.zig");
 const parser_call = @import("parser_call.zig");
 const parser_literal = @import("parser_literal.zig");
 const database = @import("database.zig");
+const collation = @import("collation.zig");
 
 const hexDigitValue = parser_literal.hexDigitValue;
 const parseIntegerLiteralAsValue = parser_literal.parseIntegerLiteralAsValue;
@@ -21,17 +22,11 @@ const Value = value_mod.Value;
 const Error = ops.Error;
 const Database = database.Database;
 
-/// Recursive-descent SQL expression parser. Per ADR-0002 (Iter8.A → C) the
-/// entire expression grammar is now AST-driven: every `parse*` method
-/// returns `*ast.Expr`. The previous eager-evaluation paths are gone, and
-/// `eval.evalExpr` is the sole consumer that lowers an AST to a `Value`.
-/// Statement-level dispatch lives in `stmt.zig`.
-///
-/// `db` is the (optional) live `Database` for parser-time evaluation paths
-/// that need state access — currently only `VALUES` tuples, which sqlite3
-/// accepts subqueries inside (`INSERT INTO t VALUES ((SELECT ...))`). It's
-/// set in `engine.dispatchOne` for the duration of one statement; the
-/// REPL/CLI `Parser.init` leaves it null (those callers don't reach VALUES).
+/// Recursive-descent SQL expression parser (ADR-0002). Each `parse*` returns
+/// `*ast.Expr`; `eval.evalExpr` is the sole AST→Value lowering. Statement
+/// dispatch lives in `stmt.zig`. `db` is set by `engine.dispatchOne` so
+/// `VALUES (..)` tuples (eagerly evaluated at parse time) can resolve
+/// subqueries; left null on REPL `Parser.init` (no VALUES path there).
 pub const Parser = struct {
     src: []const u8,
     lx: lex.Lexer,
@@ -70,7 +65,23 @@ pub const Parser = struct {
     }
 
     pub fn parseExpr(self: *Parser) Error!*ast.Expr {
-        return self.parseOr();
+        var expr = try self.parseOr();
+        errdefer expr.deinit(self.allocator);
+        // Trailing-COLLATE rescue: sqlite3 accepts `'A' IN ('a','b') COLLATE
+        // NOCASE` and `1 < 2 COLLATE NOCASE` (parseEquality consumes the
+        // RHS without re-entering parseUnary, so the in-operand path
+        // missed it). COLLATE on a non-TEXT result is a no-op, but the
+        // parse must succeed.
+        while (self.cur.kind == .keyword_collate) expr = try self.consumeCollatePostfix(expr);
+        return expr;
+    }
+
+    fn consumeCollatePostfix(self: *Parser, expr: *ast.Expr) Error!*ast.Expr {
+        self.advance();
+        if (self.cur.kind != .identifier) return Error.SyntaxError;
+        const kind = collation.kindFromName(self.cur.slice(self.src)) orelse return Error.SyntaxError;
+        self.advance();
+        return ast.makeCollate(self.allocator, expr, kind);
     }
 
     fn parseOr(self: *Parser) Error!*ast.Expr {
@@ -133,10 +144,9 @@ pub const Parser = struct {
                         has_distinct = true;
                     }
                     const negated = has_not != has_distinct;
-                    // sqlite3 special-cases bare TRUE/FALSE on the RHS:
-                    // applies truthiness coercion instead of strict
-                    // identicalValues. Detect before parseComparison so
-                    // the keyword is not collapsed to INTEGER 1/0.
+                    // sqlite3 quirk: bare TRUE/FALSE on RHS uses truthiness
+                    // coercion (not strict identicalValues). Catch before
+                    // parseComparison so the keyword stays as a keyword.
                     if (self.cur.kind == .keyword_true or self.cur.kind == .keyword_false) {
                         const expect_true = self.cur.kind == .keyword_true;
                         self.advance();
@@ -261,9 +271,7 @@ pub const Parser = struct {
         return left;
     }
 
-    /// `||` string concatenation. Sits between *,/,% and unary +,- in the
-    /// precedence chain (see SQLite "Operators, expressions, and parsed
-    /// elements" docs § 3 Order of Operations). Left-associative.
+    /// `||` left-assoc, between */% and unary +,- in precedence chain.
     fn parseConcat(self: *Parser) Error!*ast.Expr {
         var left = try self.parseUnary();
         errdefer left.deinit(self.allocator);
@@ -279,12 +287,10 @@ pub const Parser = struct {
     fn parseUnary(self: *Parser) Error!*ast.Expr {
         if (self.cur.kind == .minus) {
             self.advance();
-            // i64.min materialization: `-9223372036854775808` is exactly
-            // LLONG_MIN, but the positive form `9223372036854775808`
-            // overflows i64. Sign-fold here so the resulting literal
-            // stays INTEGER (sqlite3 3.51 confirmed). Hex literals are
-            // sign-folded too — `-0x8000000000000000` is the one u64
-            // value whose negation overflows i64, and sqlite3 errors
+            // Sign-fold `-<int-literal>`: `-9223372036854775808` is exactly
+            // LLONG_MIN but the positive form overflows i64; fold here so
+            // the literal stays INTEGER. `-0x8000000000000000` is the one
+            // u64 whose negation overflows i64 — sqlite3 errors there
             // ("hex literal too big") rather than promoting to REAL.
             if (self.cur.kind == .integer) {
                 const itext = self.cur.slice(self.src);
@@ -292,23 +298,18 @@ pub const Parser = struct {
                 if (is_hex) {
                     const u = std.fmt.parseInt(u64, itext[2..], 16) catch return Error.InvalidNumber;
                     const llong_min_mag: u64 = @as(u64, 1) << 63;
-                    if (u == llong_min_mag) {
-                        // Mirrors sqlite3 codeInteger() fallback for
-                        // `negFlag && value==SMALLEST_INT64` on hex.
-                        return Error.SyntaxError;
-                    }
-                    const i_val: i64 = -@as(i64, @bitCast(u));
+                    if (u == llong_min_mag) return Error.SyntaxError;
                     self.advance();
-                    return ast.makeLiteral(self.allocator, Value{ .integer = i_val });
+                    const lit = try ast.makeLiteral(self.allocator, Value{ .integer = -@as(i64, @bitCast(u)) });
+                    return self.collateTail(lit);
                 }
                 if (parseNegatedDecimalI64(itext)) |neg_i| {
                     self.advance();
-                    return ast.makeLiteral(self.allocator, Value{ .integer = neg_i });
+                    const lit = try ast.makeLiteral(self.allocator, Value{ .integer = neg_i });
+                    return self.collateTail(lit);
                 } else |_| {
-                    // Operand exceeds LLONG_MIN — fall through. The
-                    // positive literal will be parsed as REAL by
-                    // `parseIntegerLiteralAsValue`, then negated at
-                    // eval time (REAL → REAL).
+                    // Overflows LLONG_MIN — fall through. Positive literal
+                    // parses as REAL, then eval-time negate keeps REAL.
                 }
             }
             const inner = try self.parseUnary();
@@ -325,7 +326,24 @@ pub const Parser = struct {
             errdefer inner.deinit(self.allocator);
             return ast.makeUnaryBitNot(self.allocator, inner);
         }
-        return self.parsePrimary();
+        return self.parseCollatePostfix();
+    }
+
+    /// `expr COLLATE <name>` postfix. Sits below parseUnary so COLLATE
+    /// binds tighter than `-`/`+`/`~`. Left-associative — chained
+    /// `COLLATE A COLLATE B` outermost (B) wins at compare time per
+    /// sqlite3. Unknown name → SyntaxError ("no such collation sequence").
+    fn parseCollatePostfix(self: *Parser) Error!*ast.Expr {
+        return self.collateTail(try self.parsePrimary());
+    }
+
+    /// Attach any postfix `COLLATE <name>` chain to an already-parsed expr.
+    /// Used by parseCollatePostfix and the `-<int-literal>` sign-fold path.
+    fn collateTail(self: *Parser, base: *ast.Expr) Error!*ast.Expr {
+        var expr = base;
+        errdefer expr.deinit(self.allocator);
+        while (self.cur.kind == .keyword_collate) expr = try self.consumeCollatePostfix(expr);
+        return expr;
     }
 
     fn parsePrimary(self: *Parser) Error!*ast.Expr {
@@ -381,12 +399,9 @@ pub const Parser = struct {
             },
             .keyword_true => {
                 // sqlite3 collapses TRUE/FALSE to INTEGER 1/0 (typeof =
-                // 'integer'); no boolean type. The lexer always emits
-                // keyword_true/keyword_false here, so a column literally
-                // named `true`/`false` can't shadow the literal — sqlite3
-                // resolves it to the column when one is in scope; we
-                // deferred that edge case (would need lexer two-mode or
-                // identifier-fallback in parser).
+                // 'integer'). Lexer always emits keyword_true/false so a
+                // same-named column can't shadow the literal — sqlite3
+                // resolves to the column when one is in scope; deferred.
                 self.advance();
                 return ast.makeLiteral(self.allocator, Value{ .integer = 1 });
             },
@@ -395,13 +410,9 @@ pub const Parser = struct {
                 return ast.makeLiteral(self.allocator, Value{ .integer = 0 });
             },
             .keyword_like, .keyword_glob => {
-                // sqlite3's grammar treats `LIKE` / `GLOB` as fallback
-                // keywords: when they appear in expression-start position
-                // followed by `(`, they are scalar function calls
-                // (`like(pattern, text)` / `glob(pattern, text)`). In any
-                // other position they are operator-only — we don't
-                // synthesize an identifier here, only the call form, so
-                // a bare `SELECT like` still errors.
+                // sqlite3 fallback-keyword: in expression-start followed
+                // by `(`, LIKE/GLOB act as scalar function calls. Bare
+                // `SELECT like` still errors (we synthesize call only).
                 const fname_tok = self.cur;
                 self.advance();
                 if (self.cur.kind != .lparen) return Error.SyntaxError;

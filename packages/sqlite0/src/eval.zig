@@ -1,14 +1,6 @@
-//! AST evaluator (ADR-0002).
-//!
-//! `evalExpr` walks an `ast.Expr` and produces a `Value` allocated from
-//! `ctx.allocator`. The AST itself is read-only; ownership of literal text
-//! bytes stays with the AST until the caller invokes `expr.deinit`. We dupe
-//! TEXT/BLOB bytes during evaluation so the resulting Value survives AST
-//! teardown.
-//!
-//! `current_row` is the placeholder for Iter8.D's column-reference
-//! resolution (`SELECT x FROM (VALUES ...)`). It is unused while the
-//! grammar has no `column_ref` node.
+//! AST evaluator (ADR-0002). `evalExpr` walks an `ast.Expr` and produces a
+//! `Value` allocated from `ctx.allocator`. AST is read-only; we dupe
+//! TEXT/BLOB bytes so returned Values outlive `expr.deinit`.
 
 const std = @import("std");
 const ast = @import("ast.zig");
@@ -22,6 +14,7 @@ const eval_match = @import("eval_match.zig");
 const eval_subquery = @import("eval_subquery.zig");
 const eval_column = @import("eval_column.zig");
 const eval_cast = @import("eval_cast.zig");
+const collation = @import("collation.zig");
 
 const Value = value_mod.Value;
 const Expr = ast.Expr;
@@ -29,53 +22,37 @@ const Error = ops.Error;
 
 pub const EvalContext = struct {
     allocator: std.mem.Allocator,
-    /// Values for the row the expression is evaluated against. Empty for
-    /// FROM-less SELECT. Bytes here are owned by the row producer (the
-    /// FROM-clause materialised rows in `stmt.zig`); `evalExpr` dupes
-    /// TEXT/BLOB column refs so the returned `Value` outlives the row.
+    /// Source-row Values (positional). Bytes owned by the row producer;
+    /// `evalExpr` dupes TEXT/BLOB column refs to outlive the row.
     current_row: []const Value = &.{},
-    /// Column names matching `current_row` positionally (same length).
-    /// Borrowed from the SQL source string. Empty for FROM-less SELECT.
+    /// Column names parallel to `current_row`. Borrowed from SQL source.
     columns: []const []const u8 = &.{},
-    /// Optional per-column qualifier (table alias or table name), parallel
-    /// to `columns`. When non-empty, qualified refs (`t.x`) match against
-    /// these and bare refs are subjected to ambiguity checking. Empty for
-    /// FROM-less queries and for source paths that have not yet been
-    /// updated to populate qualifier metadata.
+    /// Per-column qualifier (table alias / name) parallel to `columns`.
+    /// Drives qualified-ref match and ambiguity checks; empty when FROM
+    /// is absent or the source path didn't populate qualifiers.
     column_qualifiers: []const []const u8 = &.{},
-    /// Per-group aggregate-call substitution table. When evaluating SELECT
-    /// items / HAVING / ORDER BY for an aggregated query, the
-    /// `aggregate.zig` driver pre-computes each aggregate call's value for
-    /// the current group, then puts a `*const Expr → Value` mapping here.
-    /// `evalFuncCall` looks up the func_call AST pointer; on hit it returns
-    /// the precomputed value (duped) instead of dispatching to scalar
-    /// `funcs.call`. Null (the default) means "no aggregate substitution"
-    /// — the normal scalar path runs.
+    /// Per-group aggregate-call substitution map. `aggregate.zig`
+    /// pre-computes each aggregate's value for the current group then
+    /// puts pointer→Value pairs here; `evalFuncCall` returns a duped
+    /// value on hit, skipping arg eval entirely (essential — count(x)
+    /// must not re-resolve `x` in per-group scope). Null = scalar path.
     agg_values: ?*const AggregateValues = null,
-    /// Database handle — non-null whenever the expression is evaluated as
-    /// part of a query running through `engine.dispatchOne`. Iter22.A
-    /// threads this through every SELECT/DML expression-evaluation path so
-    /// Iter22.B can dispatch scalar subqueries (`(SELECT ...)`) to
-    /// `engine.executeSelect` without the eval module taking a runtime
-    /// dependency on engine. Null only on the parse-time VALUES tuple
-    /// path (`stmt.parseValuesTuple`); subqueries there will surface a
-    /// runtime error in 22.B.
+    /// Live Database handle for paths that need state — set by
+    /// `engine.dispatchOne` for every SELECT/DML expression eval so
+    /// scalar subqueries dispatch back through `engine.executeSelect`
+    /// without eval depending on engine. Null only on the parse-time
+    /// `VALUES (..)` tuple path; subqueries there surface a runtime error.
     db: ?*database.Database = null,
-    /// Stack of enclosing-SELECT frames for correlated subqueries (Iter22.D).
-    /// Innermost outer is `outer_frames[outer_frames.len - 1]`. Empty for
-    /// non-correlated paths. `evalColumnRef` falls back here when neither
-    /// `current_row`/`columns` resolve a name. `eval_subquery.*` extends
-    /// this slice (current frame is appended) when dispatching into an
-    /// inner SELECT, so an arbitrarily-nested correlated query sees every
-    /// enclosing scope from innermost out.
+    /// Enclosing-SELECT frames for correlated subqueries. Innermost outer
+    /// is the last entry. `evalColumnRef` falls back here when local
+    /// `columns` don't resolve. `eval_subquery.*` appends the current
+    /// frame when descending so any-depth correlation sees every scope.
     outer_frames: []const OuterFrame = &.{},
 };
 
-/// One enclosing-SELECT frame snapshot. Mirrors the per-row fields of
-/// `EvalContext` so `evalColumnRef` can apply the same resolution rules
-/// (qualified-match by alias, bare-name match, ambiguity check). Bytes
-/// inside `current_row` are borrowed from the outer frame's row producer
-/// — same lifetime contract as `EvalContext.current_row`.
+/// One enclosing-SELECT frame snapshot. Mirrors the per-row EvalContext
+/// fields so `evalColumnRef` applies the same resolution rules; bytes in
+/// `current_row` borrow from the outer frame's row producer.
 pub const OuterFrame = struct {
     current_row: []const Value = &.{},
     columns: []const []const u8 = &.{},
@@ -110,6 +87,11 @@ pub fn evalExpr(ctx: EvalContext, expr: *const Expr) Error!Value {
         .in_subquery => |is| try eval_subquery.evalInSubquery(ctx, is),
         .exists => |sq| try eval_subquery.evalExists(ctx, sq),
         .cast => |c| try evalCast(ctx, c),
+        // COLLATE is a parse-time hint; the value flows through unchanged.
+        // Comparison sites peek the wrapper at the AST layer (see
+        // `evalCompare` / `evalEqCheck` / `evalIsCheck` / `evalBetween` /
+        // `evalInList`).
+        .collate => |c| try evalExpr(ctx, c.value),
     };
 }
 
@@ -179,6 +161,7 @@ fn evalUnaryBitNot(ctx: EvalContext, operand: *Expr) Error!Value {
 }
 
 fn evalCompare(ctx: EvalContext, c: Expr.Compare) Error!Value {
+    const kind = collation.pick(c.left, c.right);
     const left = try evalExpr(ctx, c.left);
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, c.right);
@@ -189,12 +172,13 @@ fn evalCompare(ctx: EvalContext, c: Expr.Compare) Error!Value {
         .gt => .gt,
         .ge => .ge,
     };
-    const out = ops.applyComparison(tok_op, left, right);
+    const out = collation.applyComparisonCollated(tok_op, left, right, kind);
     ops.freeValue(ctx.allocator, left);
     return out;
 }
 
 fn evalEqCheck(ctx: EvalContext, e: Expr.EqCheck) Error!Value {
+    const kind = collation.pick(e.left, e.right);
     const left = try evalExpr(ctx, e.left);
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, e.right);
@@ -203,17 +187,18 @@ fn evalEqCheck(ctx: EvalContext, e: Expr.EqCheck) Error!Value {
         .eq => .eq,
         .ne => .ne,
     };
-    const out = ops.applyEquality(tok_op, left, right);
+    const out = collation.applyEqualityCollated(tok_op, left, right, kind);
     ops.freeValue(ctx.allocator, left);
     return out;
 }
 
 fn evalIsCheck(ctx: EvalContext, e: Expr.IsCheck) Error!Value {
+    const kind = collation.pick(e.left, e.right);
     const left = try evalExpr(ctx, e.left);
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, e.right);
     defer ops.freeValue(ctx.allocator, right);
-    const eq = ops.identicalValues(left, right);
+    const eq = collation.identicalValuesCollated(left, right, kind);
     ops.freeValue(ctx.allocator, left);
     return ops.boolValue(if (e.negated) !eq else eq);
 }
@@ -227,19 +212,30 @@ fn evalIsTruthy(ctx: EvalContext, e: Expr.IsTruthy) Error!Value {
 }
 
 fn evalBetween(ctx: EvalContext, b: Expr.Between) Error!Value {
+    // BETWEEN inherits collation from the value expression first, falling
+    // back to lo (sqlite3 quirk: lo is checked before hi). This matches
+    // `'A' COLLATE NOCASE BETWEEN 'a' AND 'z'` → 1 and
+    // `'A' BETWEEN 'a' COLLATE NOCASE AND 'z' COLLATE NOCASE` → 1.
+    const lo_kind = collation.pick(b.value, b.lo);
+    const hi_kind = collation.pick(b.value, b.hi);
     const value = try evalExpr(ctx, b.value);
     defer ops.freeValue(ctx.allocator, value);
     const lo = try evalExpr(ctx, b.lo);
     defer ops.freeValue(ctx.allocator, lo);
     const hi = try evalExpr(ctx, b.hi);
     defer ops.freeValue(ctx.allocator, hi);
-    const ge = ops.applyComparison(.ge, value, lo);
-    const le = ops.applyComparison(.le, value, hi);
+    const ge = collation.applyComparisonCollated(.ge, value, lo, lo_kind);
+    const le = collation.applyComparisonCollated(.le, value, hi, hi_kind);
     const conj = ops.logicalAnd(ge, le);
     return if (b.negated) ops.logicalNot(conj) else conj;
 }
 
 fn evalInList(ctx: EvalContext, il: Expr.InList) Error!Value {
+    // IN list: collation propagates from the value side only — sqlite3
+    // does NOT honor per-item collation overrides. Verified
+    // `'A' COLLATE NOCASE IN ('a', 'b', 'c')` → 1 vs.
+    // `'A' IN ('a' COLLATE NOCASE, ...)` → 0.
+    const kind = collation.peekKind(il.value) orelse .binary;
     const value = try evalExpr(ctx, il.value);
     defer ops.freeValue(ctx.allocator, value);
     var items: std.ArrayList(Value) = .empty;
@@ -251,7 +247,7 @@ fn evalInList(ctx: EvalContext, il: Expr.InList) Error!Value {
     for (il.items) |item_expr| {
         items.appendAssumeCapacity(try evalExpr(ctx, item_expr));
     }
-    const result = ops.applyIn(value, items.items);
+    const result = collation.applyInCollated(value, items.items, kind);
     return if (il.negated) ops.logicalNot(result) else result;
 }
 

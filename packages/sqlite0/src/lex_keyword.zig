@@ -70,5 +70,6 @@ pub fn keywordKind(text: []const u8) ?TokenKind {
     if (eq(text, "savepoint")) return .keyword_savepoint;
     if (eq(text, "release")) return .keyword_release;
     if (eq(text, "to")) return .keyword_to;
+    if (eq(text, "collate")) return .keyword_collate;
     return null;
 }
