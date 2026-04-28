@@ -158,3 +158,24 @@ CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'orig'),(2,'tw
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT OR REPLACE INTO t VALUES(NULL,'auto'); SELECT * FROM t ORDER BY id;
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT OR ABORT INTO t VALUES(1,'a'); INSERT OR ABORT INTO t VALUES(1,'b');
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT OR FAIL INTO t VALUES(1,'a'); INSERT OR FAIL INTO t VALUES(1,'b'); SELECT * FROM t;
+
+# UPDATE OR IGNORE / OR REPLACE conflict resolution (Iter31.AH):
+#  * Sibling of Iter31.AG. sqlite3 supports `UPDATE OR <action> <table>
+#    SET ...` where action is the same five-element enum.
+#  * IGNORE: skip the row's assignments on either UNIQUE or NOT NULL
+#    violation; previously-updated rows stay updated.
+#  * REPLACE: on UNIQUE conflict (target IPK already held by another
+#    row), delete the offender then apply the assignment to the
+#    current row. NOT NULL still errors.
+#  * Implementation: rewrote engine_dml.executeUpdate's for-loop as a
+#    while-loop with explicit index `i`. orderedRemove(cj) shifts the
+#    current row from i to i-1 when cj < i. Added file-mode rejection
+#    of non-abort actions (deferred).
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR IGNORE t SET id=2 WHERE x='a'; SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR REPLACE t SET id=2 WHERE x='a'; SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'),(3,'c'); UPDATE OR REPLACE t SET id=2 WHERE id=1; SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x NOT NULL); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR IGNORE t SET x=NULL WHERE id=1; SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x NOT NULL); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR REPLACE t SET x=NULL WHERE id=1;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR IGNORE t SET id=id+1; SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR ABORT t SET id=2 WHERE x='a';
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR REPLACE t SET id=99 WHERE id=1; SELECT * FROM t ORDER BY id;

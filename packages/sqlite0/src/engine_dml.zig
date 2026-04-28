@@ -179,6 +179,7 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     // validation so parse-time errors still surface uniformly.
     if (t.root_page != 0) {
         if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
+        if (parsed.conflict_action != .abort) return Error.UnsupportedFeature; // Iter31.AH deferred (file)
         const rc = try engine_dml_file.executeUpdateFile(db, t, parsed, indices);
         return .{ .rowcount = rc };
     }
@@ -199,12 +200,17 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         break :blk null;
     } else null;
 
+    // Iter31.AH — manual while-loop because `OR REPLACE` can orderedRemove
+    // a different row mid-iteration (deleting the offender so the splice can
+    // proceed). `i` is adjusted when the removed row sat before the current
+    // one. For-each over `t.rows.items` would invalidate captured slices.
     var changed: u64 = 0;
-    for (t.rows.items, 0..) |*row_ptr, row_idx| {
+    var i: usize = 0;
+    while (i < t.rows.items.len) {
         if (parsed.where) |w_ast| {
             const ctx = eval.EvalContext{
                 .allocator = arena,
-                .current_row = row_ptr.*,
+                .current_row = t.rows.items[i],
                 .columns = t.columns,
                 .column_qualifiers = dml_qualifiers,
                 .column_collations = t.collations,
@@ -212,11 +218,14 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             };
             const cond = try eval.evalExpr(ctx, w_ast);
             defer ops.freeValue(arena, cond);
-            if (!(ops.truthy(cond) orelse false)) continue;
+            if (!(ops.truthy(cond) orelse false)) {
+                i += 1;
+                continue;
+            }
         }
         const ctx = eval.EvalContext{
             .allocator = arena,
-            .current_row = row_ptr.*,
+            .current_row = t.rows.items[i],
             .columns = t.columns,
             .column_qualifiers = dml_qualifiers,
             .column_collations = t.collations,
@@ -230,47 +239,77 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         while (produced < parsed.assignments.len) : (produced += 1) {
             new_values[produced] = try eval.evalExpr(ctx, parsed.assignments[produced].value);
         }
-        // Iter29.B — NOT NULL check on the projected post-assignment
-        // value of every NOT NULL column. Assignments can only land
-        // NULL into the indices listed in `indices`; columns not in
-        // `indices` keep their pre-UPDATE value (already valid). The
-        // errdefer above frees the partially-populated `new_values`.
+        // Iter29.B — NOT NULL check. IGNORE swallows; REPLACE still errors
+        // (no DEFAULTs to substitute). Errdefer frees `new_values`.
+        var nn_violation = false;
         for (indices, new_values) |col_idx, new_v| {
             if (t.not_null[col_idx] and new_v == .null) {
-                return Error.ConstraintNotNull;
+                nn_violation = true;
+                break;
+            }
+        }
+        if (nn_violation) {
+            switch (parsed.conflict_action) {
+                .ignore => {
+                    for (new_values) |v| ops.freeValue(arena, v);
+                    i += 1;
+                    continue;
+                },
+                else => return Error.ConstraintNotNull,
             }
         }
         // Iter31.AF — IPK UNIQUE check. Self-update (new == old) is fine;
         // otherwise scan every other row for the new IPK value.
+        var conflict_j: ?usize = null;
         if (ipk_assignment_slot) |ai| {
             const ipk = t.ipk_column.?;
             const new_ipk_v = new_values[ai];
             if (new_ipk_v == .integer) {
                 const new_ipk = new_ipk_v.integer;
-                const cur_ipk_v = row_ptr.*[ipk];
+                const cur_ipk_v = t.rows.items[i][ipk];
                 const same_as_self = cur_ipk_v == .integer and cur_ipk_v.integer == new_ipk;
                 if (!same_as_self) {
                     for (t.rows.items, 0..) |other_row, j| {
-                        if (j == row_idx) continue;
+                        if (j == i) continue;
                         if (other_row[ipk] == .integer and other_row[ipk].integer == new_ipk) {
-                            return Error.UniqueConstraint;
+                            conflict_j = j;
+                            break;
                         }
                     }
                 }
             }
         }
+        if (conflict_j) |cj| switch (parsed.conflict_action) {
+            .ignore => {
+                for (new_values) |v| ops.freeValue(arena, v);
+                i += 1;
+                continue;
+            },
+            .replace => {
+                // Iter31.AH — drop the offender. orderedRemove shifts elements
+                // [cj+1..end] down by 1; if cj < i, our row moves from i to
+                // i-1 too. The replaced row is NOT restored on later error.
+                const old = t.rows.orderedRemove(cj);
+                for (old) |v| ops.freeValue(db.allocator, v);
+                db.allocator.free(old);
+                if (cj < i) i -= 1;
+            },
+            .abort, .fail, .rollback => return Error.UniqueConstraint,
+        };
+        // Splice into the (possibly shifted) row at index `i`.
         for (indices, new_values) |col_idx, new_v| {
             const duped = try func_util.dupeValue(db.allocator, new_v);
-            ops.freeValue(db.allocator, row_ptr.*[col_idx]);
-            row_ptr.*[col_idx] = duped;
+            ops.freeValue(db.allocator, t.rows.items[i][col_idx]);
+            t.rows.items[i][col_idx] = duped;
         }
         for (new_values) |v| ops.freeValue(arena, v);
         // Iter31.AE — capture POST-update row state for RETURNING.
         if (parsed.returning) |items| {
-            const projected = try engine_returning.projectRow(db, arena, items, row_ptr.*, parsed.table, t.columns, t.collations);
+            const projected = try engine_returning.projectRow(db, arena, items, t.rows.items[i], parsed.table, t.columns, t.collations);
             try returning_rows.append(arena, projected);
         }
         changed += 1;
+        i += 1;
     }
     const ret_slice: ?[][]Value = if (parsed.returning != null)
         try returning_rows.toOwnedSlice(arena)

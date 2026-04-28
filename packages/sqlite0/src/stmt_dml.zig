@@ -11,6 +11,7 @@ const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
 const stmt_mod = @import("stmt.zig");
 const select = @import("select.zig");
+const func_util = @import("func_util.zig");
 
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
@@ -35,6 +36,9 @@ pub const ParsedUpdate = struct {
     assignments: []Assignment,
     where: ?*ast.Expr,
     returning: ?[]select.SelectItem = null,
+    /// Iter31.AH — `UPDATE OR <action>` conflict resolution. Default `.abort`
+    /// preserves prior behavior. Action enum is shared with `ParsedInsert`.
+    conflict_action: stmt_mod.ParsedInsert.ConflictAction = .abort,
 
     pub const Assignment = struct {
         column: []const u8,
@@ -61,6 +65,33 @@ pub fn parseDeleteStatement(p: *Parser) !ParsedDelete {
 
 pub fn parseUpdateStatement(p: *Parser) !ParsedUpdate {
     try p.expect(.keyword_update);
+    // Iter31.AH — optional `OR <action>` between UPDATE and the table name.
+    // Mirrors INSERT's parser (Iter31.AG); the action names are not reserved
+    // in sqlite3 so we identifier-match case-insensitively.
+    var conflict_action: stmt_mod.ParsedInsert.ConflictAction = .abort;
+    if (p.cur.kind == .keyword_or) {
+        p.advance();
+        const action_text = switch (p.cur.kind) {
+            .identifier => p.cur.slice(p.src),
+            .keyword_rollback => "rollback",
+            else => return Error.SyntaxError,
+        };
+        const eq = func_util.eqlIgnoreCase;
+        if (eq(action_text, "ignore")) {
+            conflict_action = .ignore;
+        } else if (eq(action_text, "replace")) {
+            conflict_action = .replace;
+        } else if (eq(action_text, "abort")) {
+            conflict_action = .abort;
+        } else if (eq(action_text, "fail")) {
+            conflict_action = .fail;
+        } else if (eq(action_text, "rollback")) {
+            conflict_action = .rollback;
+        } else {
+            return Error.SyntaxError;
+        }
+        p.advance();
+    }
     if (p.cur.kind != .identifier) return Error.SyntaxError;
     const table = p.cur.slice(p.src);
     p.advance();
@@ -90,6 +121,7 @@ pub fn parseUpdateStatement(p: *Parser) !ParsedUpdate {
         .assignments = try assignments.toOwnedSlice(p.allocator),
         .where = where_ast,
         .returning = returning,
+        .conflict_action = conflict_action,
     };
 }
 
