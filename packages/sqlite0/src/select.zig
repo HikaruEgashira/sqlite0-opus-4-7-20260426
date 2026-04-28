@@ -254,7 +254,12 @@ pub fn executeWithFrom(
     }
 
     var all_rows = try rows.toOwnedSlice(allocator);
-    if (pp.distinct) all_rows = post.dedupeRows(allocator, all_rows);
+    if (pp.distinct) {
+        const arity = if (all_rows.len > 0) all_rows[0].len else 0;
+        const kinds = try post.extractDistinctCollations(allocator, items, arity);
+        defer allocator.free(kinds);
+        all_rows = post.dedupeRows(allocator, all_rows, kinds);
+    }
     return post.applyLimitOffset(allocator, db, all_rows, pp, outer_frames);
 }
 

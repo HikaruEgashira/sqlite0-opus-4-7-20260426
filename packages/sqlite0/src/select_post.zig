@@ -46,18 +46,17 @@ pub const PostProcess = struct {
 };
 
 /// In-place deduplication of `rows` by projected-row equality, keeping the
-/// first occurrence (so behavior is stable when called after `sortRowsByKeys`
-/// or unsorted). Frees dropped rows. Returns a slice into `rows[0..kept]`.
-///
-/// Equality is sqlite3 DISTINCT semantics: NULL == NULL, all other classes
-/// require same class + bytewise/numeric equality.
-pub fn dedupeRows(allocator: std.mem.Allocator, rows: [][]Value) [][]Value {
+/// first occurrence. Frees dropped rows. Returns a slice into `rows[0..kept]`.
+/// `kinds` (Iter31.Q) is parallel to row columns; empty slice = all BINARY.
+/// Equality is sqlite3 DISTINCT semantics: NULL == NULL, INTEGER and REAL
+/// numerically equal, TEXT under per-column collation, BLOB bytewise.
+pub fn dedupeRows(allocator: std.mem.Allocator, rows: [][]Value, kinds: []const ast.CollationKind) [][]Value {
     if (rows.len <= 1) return rows;
     var kept: usize = 1;
     var i: usize = 1;
     while (i < rows.len) : (i += 1) {
         const candidate = rows[i];
-        if (rowsContains(rows[0..kept], candidate)) {
+        if (rowsContains(rows[0..kept], candidate, kinds)) {
             for (candidate) |v| ops.freeValue(allocator, v);
             allocator.free(candidate);
         } else {
@@ -70,11 +69,13 @@ pub fn dedupeRows(allocator: std.mem.Allocator, rows: [][]Value) [][]Value {
 
 /// Variant of `dedupeRows` for set operators (UNION/INTERSECT/EXCEPT). When
 /// a duplicate is encountered, the earlier slot's row content is freed and
-/// replaced by the new occurrence's row. Position is determined by FIRST
-/// occurrence; content is the LAST. This matches sqlite3's UNION dedup
-/// (verified against 3.51.0: `SELECT 1 UNION SELECT 1.0` returns `1.0`,
-/// `SELECT 1.0 UNION SELECT 1` returns `1` — last seen wins).
-pub fn dedupeRowsKeepLast(allocator: std.mem.Allocator, rows: [][]Value) [][]Value {
+/// replaced by the new occurrence's row. Position = FIRST occurrence; content
+/// = LAST. Matches sqlite3 UNION dedup (3.51.0: `SELECT 1 UNION SELECT 1.0`
+/// returns `1.0`, `SELECT 1.0 UNION SELECT 1` returns `1` — last seen wins).
+/// `kinds` (Iter31.Q) is parallel to row columns — set-op dedup picks the
+/// "left-collated wins" kind across branches (computed by the engine before
+/// each combine() call); empty slice falls back to BINARY.
+pub fn dedupeRowsKeepLast(allocator: std.mem.Allocator, rows: [][]Value, kinds: []const ast.CollationKind) [][]Value {
     if (rows.len == 0) return rows;
     var kept: usize = 0;
     var i: usize = 0;
@@ -82,7 +83,7 @@ pub fn dedupeRowsKeepLast(allocator: std.mem.Allocator, rows: [][]Value) [][]Val
         const candidate = rows[i];
         var matched_at: ?usize = null;
         for (rows[0..kept], 0..) |existing, idx| {
-            if (rowsEqual(existing, candidate)) {
+            if (rowsEqual(existing, candidate, kinds)) {
                 matched_at = idx;
                 break;
             }
@@ -99,25 +100,27 @@ pub fn dedupeRowsKeepLast(allocator: std.mem.Allocator, rows: [][]Value) [][]Val
     return rows[0..kept];
 }
 
-fn rowsContains(rows: []const []Value, candidate: []const Value) bool {
+fn rowsContains(rows: []const []Value, candidate: []const Value, kinds: []const ast.CollationKind) bool {
     for (rows) |row| {
-        if (rowsEqual(row, candidate)) return true;
+        if (rowsEqual(row, candidate, kinds)) return true;
     }
     return false;
 }
 
 /// True when `a` and `b` would compare equal under sqlite3 DISTINCT / UNION
-/// semantics: NULL matches NULL, INTEGER and REAL are compared numerically
-/// (1 == 1.0), TEXT/BLOB by exact bytes, mixed types never match.
-pub fn rowsEqual(a: []const Value, b: []const Value) bool {
+/// semantics: NULL matches NULL, INTEGER/REAL numerically (1 == 1.0), TEXT
+/// under `kinds[i]` (or BINARY when `kinds` is empty / shorter), BLOB
+/// bytewise, mixed types never match.
+pub fn rowsEqual(a: []const Value, b: []const Value, kinds: []const ast.CollationKind) bool {
     if (a.len != b.len) return false;
-    for (a, b) |va, vb| {
-        if (!valuesEqualForDistinct(va, vb)) return false;
+    for (a, b, 0..) |va, vb, i| {
+        const kind = if (i < kinds.len) kinds[i] else .binary;
+        if (!valuesEqualForDistinct(va, vb, kind)) return false;
     }
     return true;
 }
 
-fn valuesEqualForDistinct(a: Value, b: Value) bool {
+fn valuesEqualForDistinct(a: Value, b: Value, kind: ast.CollationKind) bool {
     return switch (a) {
         .null => b == .null,
         .integer => |ai| switch (b) {
@@ -131,7 +134,7 @@ fn valuesEqualForDistinct(a: Value, b: Value) bool {
             else => false,
         },
         .text => |at| switch (b) {
-            .text => |bt| std.mem.eql(u8, at, bt),
+            .text => |bt| collation.compareTextCollated(at, bt, kind) == .eq,
             else => false,
         },
         .blob => |ab| switch (b) {
@@ -139,6 +142,24 @@ fn valuesEqualForDistinct(a: Value, b: Value) bool {
             else => false,
         },
     };
+}
+
+/// Build per-column kinds from SELECT items. Returns empty (= BINARY fallback)
+/// when items contains `*` (star expansion arity is dynamic) or when items
+/// length doesn't match row arity (mismatch shape; safer to skip than guess).
+/// Caller owns the returned slice.
+pub fn extractDistinctCollations(
+    allocator: std.mem.Allocator,
+    items: []const @import("select.zig").SelectItem,
+    row_arity: usize,
+) ![]ast.CollationKind {
+    for (items) |item| if (item == .star) return &.{};
+    if (items.len != row_arity) return &.{};
+    const out = try allocator.alloc(ast.CollationKind, items.len);
+    for (items, out) |item, *o| {
+        o.* = collation.peekKind(item.expr.expr) orelse .binary;
+    }
+    return out;
 }
 
 /// Stable sort of `rows` by parallel `keys`, applying per-term direction

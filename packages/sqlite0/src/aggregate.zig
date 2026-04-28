@@ -385,7 +385,12 @@ fn finaliseGroups(
     }
 
     var all_rows = try rows.toOwnedSlice(alloc);
-    if (pp.distinct) all_rows = select_post.dedupeRows(alloc, all_rows);
+    if (pp.distinct) {
+        const arity = if (all_rows.len > 0) all_rows[0].len else 0;
+        const kinds = try select_post.extractDistinctCollations(alloc, items, arity);
+        defer alloc.free(kinds);
+        all_rows = select_post.dedupeRows(alloc, all_rows, kinds);
+    }
     return select_post.applyLimitOffset(alloc, db, all_rows, pp, outer_frames);
 }
 

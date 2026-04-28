@@ -12,6 +12,7 @@ const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const func_util = @import("func_util.zig");
+const collation = @import("collation.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -26,6 +27,11 @@ pub const Aggregator = struct {
     /// running the underlying accumulation. NULL is always skipped (matches
     /// the non-DISTINCT non-COUNT-star path).
     distinct: bool = false,
+    /// COLLATE kind extracted from the DISTINCT argument's outermost
+    /// `Collate(...)` wrapper at parse time (Iter31.Q). `.binary` when none
+    /// — TEXT pairs route through `collation.identicalValuesCollated` so
+    /// `count(DISTINCT x COLLATE NOCASE)` folds 'A'/'a' into one bucket.
+    distinct_kind: ast.CollationKind = .binary,
     /// DISTINCT dedup set. Linear scan against `ops.identicalValues` (sqlite3
     /// "IS NOT DISTINCT FROM" semantics: NULL == NULL, INTEGER 1 == REAL 1.0,
     /// but '1' is its own group). Empty when `distinct == false`. TEXT/BLOB
@@ -67,8 +73,8 @@ pub const Aggregator = struct {
 
     pub const Kind = enum { count_star, count, sum, avg, min, max, total, group_concat };
 
-    pub fn init(kind: Kind, distinct: bool) Aggregator {
-        return .{ .kind = kind, .distinct = distinct };
+    pub fn init(kind: Kind, distinct: bool, distinct_kind: ast.CollationKind) Aggregator {
+        return .{ .kind = kind, .distinct = distinct, .distinct_kind = distinct_kind };
     }
 
     /// Try to parse `bytes` as an i64. Returns null if the text isn't a
@@ -93,11 +99,10 @@ pub const Aggregator = struct {
         if (self.distinct) {
             // DISTINCT skips NULL (consistent with non-aggregate-NULL handling
             // for sum/avg/min/max/count(col)) and skips already-seen values.
-            // count_star is excluded at validation time so we don't need to
-            // handle "DISTINCT of *" here.
+            // TEXT equality routes through `distinct_kind` (Iter31.Q).
             if (v == .null) return;
             for (self.seen.items) |prior| {
-                if (ops.identicalValues(prior, v)) return;
+                if (collation.identicalValuesCollated(prior, v, self.distinct_kind)) return;
             }
             try self.seen.append(arena, try dupeArena(arena, v));
         }
@@ -237,5 +242,9 @@ pub fn aggregatorFromCall(fc: ast.Expr.FuncCall) Aggregator {
     else if (func_util.eqlIgnoreCase(fc.name, "group_concat") or
         func_util.eqlIgnoreCase(fc.name, "string_agg")) .group_concat
     else unreachable;
-    return Aggregator.init(kind, fc.distinct);
+    const distinct_kind: ast.CollationKind = if (fc.distinct and fc.args.len == 1)
+        (collation.peekKind(fc.args[0]) orelse .binary)
+    else
+        .binary;
+    return Aggregator.init(kind, fc.distinct, distinct_kind);
 }

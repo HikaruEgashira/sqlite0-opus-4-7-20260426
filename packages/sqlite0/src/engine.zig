@@ -253,13 +253,18 @@ pub fn executeSelectWithOuter(
     // through (`SELECT DISTINCT x ... UNION ...`).
     var current = try executeOneSelect(db, alloc, ps, postProcessForBranch(ps), outer_frames);
     var left_arity = arityOf(ps, current);
+    // Per-column set-op dedup collation (Iter31.Q): see engine_setop.SetopKinds.
+    var kinds: engine_setop.SetopKinds = .{};
+    if (left_arity) |a| try kinds.seed(alloc, ps.items, a);
     for (ps.branches) |branch| {
         const right = try executeOneSelect(db, alloc, branch.select, postProcessForBranch(branch.select), outer_frames);
         const right_arity = arityOf(branch.select, right);
         if (left_arity != null and right_arity != null and left_arity.? != right_arity.?) {
             return Error.ColumnCountMismatch;
         }
-        current = try engine_setop.combine(alloc, branch.kind, current, right);
+        if (right_arity) |a| try kinds.merge(alloc, branch.select.items, a);
+        const resolved = try kinds.resolve(alloc);
+        current = try engine_setop.combine(alloc, branch.kind, current, right, resolved);
         if (left_arity == null) left_arity = right_arity;
     }
     // ORDER BY <name> in a setop chain resolves against the leftmost branch's
@@ -355,10 +360,8 @@ fn validateStarExpansion(
     };
 }
 
-/// PostProcess for one branch of a setop chain: keep the per-branch DISTINCT
-/// but drop ORDER BY/LIMIT/OFFSET (those attach at chain level). The branch
-/// shouldn't have any of those anyway — the parser rejects them via the
-/// `allow_post = false` recursion guard — but we strip them defensively.
+/// PostProcess for one branch of a setop chain: per-branch DISTINCT survives,
+/// chain-level ORDER BY/LIMIT/OFFSET don't (those bind to the combined result).
 fn postProcessForBranch(ps: stmt_mod.ParsedSelect) select_mod.PostProcess {
     return .{ .distinct = ps.distinct, .order_by = &.{}, .limit = null, .offset = null };
 }
@@ -394,11 +397,9 @@ fn projectedColumnCount(items: []const select_mod.SelectItem, cart_cols: usize) 
     return n;
 }
 
-/// sqlite3 `resolveOrderGroupBy` rejects bare integer literals in ORDER BY
-/// or GROUP BY when the value is outside `[1, projected_count]`
-/// ("ORDER BY term out of range — should be between 1 and N"). `1+0` keeps
-/// expression semantics so escapes the check. We collapse to SyntaxError —
-/// differential harness treats `<error>` symmetrically.
+/// Reject bare integer literals in ORDER BY/GROUP BY outside [1, items_len]
+/// (sqlite3 `resolveOrderGroupBy`). `1+0` escapes — only literal INTEGER
+/// nodes resolve positionally. Collapsed to SyntaxError.
 fn validateLiteralPositions(
     items_len: usize,
     order_by: []const stmt_mod.OrderTerm,

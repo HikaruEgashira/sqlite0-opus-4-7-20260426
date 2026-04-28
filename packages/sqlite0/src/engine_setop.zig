@@ -11,7 +11,9 @@ const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const stmt_mod = @import("stmt.zig");
+const select_mod = @import("select.zig");
 const select_post = @import("select_post.zig");
+const collation = @import("collation.zig");
 const database = @import("database.zig");
 const eval = @import("eval.zig");
 const func_util = @import("func_util.zig");
@@ -21,17 +23,64 @@ const SetopKind = stmt_mod.SetopKind;
 const Error = ops.Error;
 const Database = database.Database;
 
+/// Per-column dedup collation tracker for a set-op chain (Iter31.Q).
+/// Implements sqlite3's "leftmost branch with ANY explicit COLLATE wins"
+/// precedence: explicit BINARY (some(.binary)) locks the column out of
+/// later-branch upgrades, while no wrapper (null) yields to the next
+/// branch's choice. `resolve` snapshots the current state into a
+/// `[]CollationKind` (defaulting null → .binary) for `combine`.
+pub const SetopKinds = struct {
+    opt: []?ast.CollationKind = &.{},
+
+    pub fn seed(self: *SetopKinds, alloc: std.mem.Allocator, items: []const select_mod.SelectItem, arity: usize) !void {
+        if (self.opt.len > 0) return;
+        self.opt = try extractItemKindsOpt(alloc, items, arity);
+    }
+
+    pub fn merge(self: *SetopKinds, alloc: std.mem.Allocator, items: []const select_mod.SelectItem, arity: usize) !void {
+        if (self.opt.len == 0) {
+            self.opt = try extractItemKindsOpt(alloc, items, arity);
+            return;
+        }
+        const right = try extractItemKindsOpt(alloc, items, arity);
+        for (self.opt, 0..) |k, i| {
+            if (k == null and i < right.len) self.opt[i] = right[i];
+        }
+    }
+
+    pub fn resolve(self: *const SetopKinds, alloc: std.mem.Allocator) ![]ast.CollationKind {
+        const out = try alloc.alloc(ast.CollationKind, self.opt.len);
+        for (self.opt, out) |k, *r| r.* = k orelse .binary;
+        return out;
+    }
+};
+
+fn extractItemKindsOpt(
+    alloc: std.mem.Allocator,
+    items: []const select_mod.SelectItem,
+    row_arity: usize,
+) ![]?ast.CollationKind {
+    for (items) |item| if (item == .star) return &.{};
+    if (items.len != row_arity) return &.{};
+    const out = try alloc.alloc(?ast.CollationKind, items.len);
+    for (items, out) |item, *o| {
+        o.* = collation.peekKind(item.expr.expr);
+    }
+    return out;
+}
+
 pub fn combine(
     arena: std.mem.Allocator,
     op: SetopKind,
     left: [][]Value,
     right: [][]Value,
+    kinds: []const ast.CollationKind,
 ) Error![][]Value {
     return switch (op) {
         .union_all => concat(arena, left, right),
-        .union_distinct => select_post.dedupeRowsKeepLast(arena, try concat(arena, left, right)),
-        .intersect => filterByMembership(arena, left, right, true),
-        .except => filterByMembership(arena, left, right, false),
+        .union_distinct => select_post.dedupeRowsKeepLast(arena, try concat(arena, left, right), kinds),
+        .intersect => filterByMembership(arena, left, right, true, kinds),
+        .except => filterByMembership(arena, left, right, false, kinds),
     };
 }
 
@@ -47,16 +96,17 @@ fn filterByMembership(
     left: [][]Value,
     right: [][]Value,
     keep_when_member: bool,
+    kinds: []const ast.CollationKind,
 ) Error![][]Value {
     // Both sides are dedup-replace-last first so identical-value rows on
     // either side don't multiply the result. (Verified against sqlite3:
     // `(VALUES (1), (1)) INTERSECT (VALUES (1))` yields a single row.)
-    const left_dedup = select_post.dedupeRowsKeepLast(arena, left);
-    const right_dedup = select_post.dedupeRowsKeepLast(arena, right);
+    const left_dedup = select_post.dedupeRowsKeepLast(arena, left, kinds);
+    const right_dedup = select_post.dedupeRowsKeepLast(arena, right, kinds);
 
     var kept: usize = 0;
     for (left_dedup) |row| {
-        const member = rowExistsIn(right_dedup, row);
+        const member = rowExistsIn(right_dedup, row, kinds);
         if (member == keep_when_member) {
             left_dedup[kept] = row;
             kept += 1;
@@ -72,9 +122,9 @@ fn filterByMembership(
     return left_dedup[0..kept];
 }
 
-fn rowExistsIn(set: []const []Value, row: []const Value) bool {
+fn rowExistsIn(set: []const []Value, row: []const Value, kinds: []const ast.CollationKind) bool {
     for (set) |existing| {
-        if (select_post.rowsEqual(existing, row)) return true;
+        if (select_post.rowsEqual(existing, row, kinds)) return true;
     }
     return false;
 }
