@@ -388,3 +388,21 @@ CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT 
 CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM t GROUP BY x) WHERE x = 'a';
 CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM t UNION SELECT 'B') WHERE x = 'a';
 CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM (SELECT x FROM t)) WHERE x = 'a';
+
+# DISTINCT runs BEFORE ORDER BY (Iter31.S):
+#  * sqlite3 dedups under DISTINCT collation FIRST (keep insertion-first
+#    representative), then sorts under ORDER BY collation. sqlite0 used
+#    to sort-then-dedup; the surviving representative was the post-sort
+#    first one, divergent when DISTINCT and ORDER BY differ in collation.
+#  * Probe: COLLATE NOCASE column + ORDER BY x COLLATE BINARY — sqlite3
+#    keeps {B,a} (NOCASE classes B/b and a/A; insertion order picks B
+#    and a), then BINARY-sorts to B,a. RTRIM column + ORDER BY BINARY:
+#    keeps 'a   ' (first in {a,a   } RTRIM-equivalent class), then sorts.
+#  * Single-collation case is unaffected (sort and dedup commute when
+#    they use the same equivalence) — covered for regression-locking.
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT x FROM (SELECT DISTINCT x FROM t ORDER BY x COLLATE BINARY);
+CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES ('a   '),('a'),('b'); SELECT x FROM (SELECT DISTINCT x FROM t ORDER BY x COLLATE BINARY);
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT x FROM (SELECT DISTINCT x FROM t ORDER BY x);
+CREATE TABLE t(x); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT DISTINCT x COLLATE NOCASE FROM t ORDER BY x COLLATE BINARY;
+SELECT DISTINCT x COLLATE NOCASE FROM (SELECT 'B' AS x UNION ALL SELECT 'a' UNION ALL SELECT 'A' UNION ALL SELECT 'b') ORDER BY x COLLATE BINARY;
+CREATE TABLE t(x TEXT COLLATE NOCASE, y INT); INSERT INTO t VALUES ('B',1),('a',2),('A',3),('b',4); SELECT DISTINCT x, sum(y) FROM t GROUP BY x ORDER BY x COLLATE BINARY;

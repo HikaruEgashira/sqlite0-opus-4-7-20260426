@@ -70,6 +70,41 @@ pub fn dedupeRows(allocator: std.mem.Allocator, rows: [][]Value, kinds: []const 
     return rows[0..kept];
 }
 
+/// Iter31.S — dedup rows AND parallel sort_keys in lockstep, keeping first
+/// occurrence. Used when DISTINCT and ORDER BY are both present so the
+/// surviving sort key matches the surviving row (sqlite3 semantics:
+/// dedup-keep-first runs BEFORE sort, so the kept representative is the
+/// insertion-first one, not the post-sort first one). When `keys` is empty
+/// the helper degenerates to plain `dedupeRows`.
+pub const DedupResult = struct { rows: [][]Value, keys: [][]Value };
+pub fn dedupeRowsAndKeys(
+    allocator: std.mem.Allocator,
+    rows: [][]Value,
+    keys: [][]Value,
+    kinds: []const ast.CollationKind,
+) DedupResult {
+    if (keys.len == 0) return .{ .rows = dedupeRows(allocator, rows, kinds), .keys = keys };
+    if (rows.len <= 1) return .{ .rows = rows, .keys = keys };
+    std.debug.assert(rows.len == keys.len);
+    var kept: usize = 1;
+    var i: usize = 1;
+    while (i < rows.len) : (i += 1) {
+        const candidate_row = rows[i];
+        const candidate_key = keys[i];
+        if (rowsContains(rows[0..kept], candidate_row, kinds)) {
+            for (candidate_row) |v| ops.freeValue(allocator, v);
+            allocator.free(candidate_row);
+            for (candidate_key) |v| ops.freeValue(allocator, v);
+            allocator.free(candidate_key);
+        } else {
+            rows[kept] = candidate_row;
+            keys[kept] = candidate_key;
+            kept += 1;
+        }
+    }
+    return .{ .rows = rows[0..kept], .keys = keys[0..kept] };
+}
+
 /// Variant of `dedupeRows` for set operators (UNION/INTERSECT/EXCEPT). When
 /// a duplicate is encountered, the earlier slot's row content is freed and
 /// replaced by the new occurrence's row. Position = FIRST occurrence; content

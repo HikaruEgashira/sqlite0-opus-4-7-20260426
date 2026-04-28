@@ -247,23 +247,46 @@ pub fn executeWithFrom(
         }
     }
 
-    if (pp.order_by.len > 0) {
-        try post.sortRowsByKeys(allocator, rows.items, sort_keys.items, pp.order_by, source_columns, source_qualifiers, source_collations);
-        for (sort_keys.items) |key| {
+    var all_rows = try rows.toOwnedSlice(allocator);
+    var rows_owned = true;
+    errdefer if (rows_owned) {
+        for (all_rows) |row| {
+            for (row) |v| ops.freeValue(allocator, v);
+            allocator.free(row);
+        }
+        allocator.free(all_rows);
+    };
+    var all_keys = try sort_keys.toOwnedSlice(allocator);
+    errdefer {
+        for (all_keys) |key| {
             for (key) |v| ops.freeValue(allocator, v);
             allocator.free(key);
         }
-        sort_keys.deinit(allocator);
-        sort_keys = .empty;
+        allocator.free(all_keys);
     }
 
-    var all_rows = try rows.toOwnedSlice(allocator);
+    // Iter31.S: DISTINCT runs BEFORE ORDER BY (dedup-keep-first preserves
+    // insertion-first reps; sqlite3 semantics differ from sort-then-dedup
+    // when DISTINCT collation differs from ORDER BY's).
     if (pp.distinct) {
         const arity = if (all_rows.len > 0) all_rows[0].len else 0;
         const kinds = try post.extractDistinctCollations(allocator, items, arity, source_columns, source_qualifiers, source_collations);
         defer allocator.free(kinds);
-        all_rows = post.dedupeRows(allocator, all_rows, kinds);
+        const dr = post.dedupeRowsAndKeys(allocator, all_rows, all_keys, kinds);
+        all_rows = dr.rows;
+        all_keys = dr.keys;
     }
+
+    if (pp.order_by.len > 0) {
+        try post.sortRowsByKeys(allocator, all_rows, all_keys, pp.order_by, source_columns, source_qualifiers, source_collations);
+    }
+    for (all_keys) |key| {
+        for (key) |v| ops.freeValue(allocator, v);
+        allocator.free(key);
+    }
+    allocator.free(all_keys);
+    all_keys = &.{};
+    rows_owned = false;
     return post.applyLimitOffset(allocator, db, all_rows, pp, outer_frames);
 }
 

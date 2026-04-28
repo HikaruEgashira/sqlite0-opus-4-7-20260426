@@ -407,23 +407,44 @@ fn finaliseGroups(
         }
     }
 
-    if (pp.order_by.len > 0) {
-        try select_post.sortRowsByKeys(alloc, rows.items, sort_keys.items, pp.order_by, source_columns, source_qualifiers, source_collations);
-        for (sort_keys.items) |k| {
+    var all_rows = try rows.toOwnedSlice(alloc);
+    var rows_owned = true;
+    errdefer if (rows_owned) {
+        for (all_rows) |row| {
+            for (row) |v| ops.freeValue(alloc, v);
+            alloc.free(row);
+        }
+        alloc.free(all_rows);
+    };
+    var all_keys = try sort_keys.toOwnedSlice(alloc);
+    errdefer {
+        for (all_keys) |k| {
             for (k) |v| ops.freeValue(alloc, v);
             alloc.free(k);
         }
-        sort_keys.deinit(alloc);
-        sort_keys = .empty;
+        alloc.free(all_keys);
     }
 
-    var all_rows = try rows.toOwnedSlice(alloc);
+    // Iter31.S: dedup-then-sort (see select.zig sibling).
     if (pp.distinct) {
         const arity = if (all_rows.len > 0) all_rows[0].len else 0;
         const kinds = try select_post.extractDistinctCollations(alloc, items, arity, source_columns, source_qualifiers, source_collations);
         defer alloc.free(kinds);
-        all_rows = select_post.dedupeRows(alloc, all_rows, kinds);
+        const dr = select_post.dedupeRowsAndKeys(alloc, all_rows, all_keys, kinds);
+        all_rows = dr.rows;
+        all_keys = dr.keys;
     }
+
+    if (pp.order_by.len > 0) {
+        try select_post.sortRowsByKeys(alloc, all_rows, all_keys, pp.order_by, source_columns, source_qualifiers, source_collations);
+    }
+    for (all_keys) |k| {
+        for (k) |v| ops.freeValue(alloc, v);
+        alloc.free(k);
+    }
+    alloc.free(all_keys);
+    all_keys = &.{};
+    rows_owned = false;
     return select_post.applyLimitOffset(alloc, db, all_rows, pp, outer_frames);
 }
 
