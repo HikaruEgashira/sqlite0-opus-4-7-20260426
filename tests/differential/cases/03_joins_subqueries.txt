@@ -1,0 +1,450 @@
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT *, * FROM a19d
+# accepted: distinct qualifiers via aliases on same table
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT * FROM a19d a, a19d b
+# strftime modifiers (Iter9.D): date math + start-of
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+5 days')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '-5 days')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 12:00:00', '+90 minutes')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 month')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 year')
+SELECT strftime('%Y-%m-%d', '2024-01-15', 'start of month')
+SELECT strftime('%Y-%m-%d', '2024-01-15', 'start of year')
+SELECT strftime('%H:%M:%S', '2024-01-15 12:34:56', 'start of day')
+# day overflow renormalises (Feb is 29 in 2024 → adding 31 days flows into Mar)
+SELECT strftime('%Y-%m-%d', '2024-01-31', '+1 month')
+# chained modifiers (left-to-right)
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 days', '-2 days')
+SELECT strftime('%Y-%m-%d', '2024-01-31', '+1 month', '-1 day')
+# leap-year flow on `+1 year` from Feb 29
+SELECT strftime('%Y-%m-%d', '2024-02-29', '+1 year')
+# midnight crossing on hour/minute deltas
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 23:30:00', '+60 minutes')
+SELECT strftime('%H:%M:%S', '2024-01-15', '+12 hours')
+# fractional day
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1.5 days')
+# year boundary
+SELECT strftime('%Y-%m-%d', '2024-12-31', '+1 day')
+# unknown / NULL / no-sign / surrounding-space modifier semantics
+SELECT strftime('%Y-%m-%d', '2024-01-15', 'invalid modifier')
+SELECT strftime('%Y-%m-%d', '2024-01-15', NULL)
+SELECT strftime('%Y-%m-%d', NULL, '+1 day')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '1 day')
+SELECT strftime('%Y-%m-%d', '2024-01-15', ' +1 day')
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1 day ')
+# multi-space between number and unit is OK
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+1  day')
+# fractional month/year: integer part bumps the field, residue × 30 (or 365) days carries
+SELECT strftime('%Y-%m-%d', '2024-01-15', '+0.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '+1.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '-0.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '-1.5 month')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-01 00:00:00', '+0.1 year')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-03-15 00:00:00', '-0.1 year')
+# tiny fractional month → minutes/hours offset
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2024-01-15 00:00:00', '+0.001 month')
+# Iter22.E: subqueries inside VALUES tuples (INSERT and top-level)
+CREATE TABLE t22e_t(x); CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(42); INSERT INTO t22e_t VALUES ((SELECT y FROM t22e_u)); SELECT * FROM t22e_t
+CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(42); VALUES ((SELECT y FROM t22e_u))
+# subquery as part of an arithmetic expression in a VALUES tuple
+CREATE TABLE t22e_t(x); CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(10); INSERT INTO t22e_t VALUES ((SELECT y FROM t22e_u) + 5); SELECT * FROM t22e_t
+# multiple aggregate subqueries in one tuple, plus multi-tuple INSERT
+CREATE TABLE t22e_t(x,y); CREATE TABLE t22e_u(z); INSERT INTO t22e_u VALUES(1),(2),(3); INSERT INTO t22e_t VALUES ((SELECT min(z) FROM t22e_u), (SELECT max(z) FROM t22e_u)); SELECT * FROM t22e_t
+CREATE TABLE t22e_t(x); CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(1),(2); INSERT INTO t22e_t VALUES ((SELECT count(*) FROM t22e_u)),((SELECT sum(y) FROM t22e_u)); SELECT x FROM t22e_t ORDER BY x
+# mixed literal + subquery in one tuple (top-level VALUES)
+CREATE TABLE t22e_u(y); INSERT INTO t22e_u VALUES(7); VALUES (1, (SELECT y FROM t22e_u))
+# Iter21.B: expression columns in subquery-FROM use source-text names
+# (sqlite3 quirk: `SELECT 1+2` projects column "1+2" not "column1"). Visible
+# difference: a bare-name reference like `col1` in the outer query no longer
+# spuriously resolves to a `columnN` synthetic name.
+SELECT col1 FROM (SELECT 1+2)
+SELECT * FROM (SELECT 1+2)
+SELECT * FROM (SELECT 1 + 2, 3*4)
+# Iter22.F: correlated FROM-clause subquery — sqlite3 has no LATERAL, so
+# both engines reject 'a.x' inside an inline subquery sharing the FROM list.
+CREATE TABLE a22f(x); INSERT INTO a22f VALUES(1),(2),(3); SELECT a22f.x, t.y FROM a22f, (SELECT a22f.x+10 AS y) t
+# Iter23: CAST(<expr> AS <type-name>)
+# integer affinity: leading-digit parse, 0 on no digits, truncate REAL toward zero
+SELECT CAST('123' AS INTEGER)
+SELECT CAST('123abc' AS INTEGER)
+SELECT CAST('abc' AS INTEGER)
+SELECT CAST('  -42  ' AS INTEGER)
+SELECT CAST(3.7 AS INTEGER)
+SELECT CAST(-3.7 AS INTEGER)
+SELECT CAST(NULL AS INTEGER)
+# overflow saturates to i64 min/max (matches sqlite3 atoi64)
+SELECT CAST('99999999999999999999' AS INTEGER)
+SELECT CAST('-99999999999999999999' AS INTEGER)
+# real affinity: lenient parseFloat, 0.0 on bad input
+SELECT CAST('1.5e2' AS REAL)
+SELECT CAST('abc' AS REAL)
+# text affinity: numbers stringify, blob bytes copy in
+SELECT CAST(123 AS TEXT)
+SELECT CAST(1.5 AS TEXT)
+# blob affinity: text bytes copy in
+SELECT CAST('xyz' AS BLOB)
+# NUMERIC: integer if integer-valued, else real; preserves source REAL
+SELECT CAST(123 AS NUMERIC)
+SELECT CAST('1.5' AS NUMERIC)
+SELECT CAST(1.0 AS NUMERIC)
+# type-name affinity rules: substring match (INT, CHAR/CLOB/TEXT, BLOB, REAL/FLOA/DOUB)
+SELECT CAST(1.5 AS INT)
+SELECT CAST(2.5 AS BIGINT)
+SELECT CAST('1' AS DOUBLE PRECISION)
+SELECT CAST(100 AS DECIMAL)
+SELECT CAST('hello' AS varchar(10))
+# typeof reports the post-CAST storage class
+SELECT typeof(CAST(123 AS INTEGER))
+SELECT typeof(CAST(3 AS NUMERIC))
+SELECT typeof(CAST(3.0 AS NUMERIC))
+# CAST in FROM-row context with NULL pass-through
+CREATE TABLE t23(x); INSERT INTO t23 VALUES('42'),('abc'),(NULL); SELECT CAST(x AS INTEGER) FROM t23
+
+# Iter28.fix — in-memory INTEGER PRIMARY KEY auto-rowid. Mirrors the
+# Iter28 file-mode chooseRowid: omitted IPK column receives the next
+# rowid (max(IPK) + 1, starting at 1 for an empty table). Explicit
+# IPK values bump the watermark forward.
+CREATE TABLE ipk1(id INTEGER PRIMARY KEY, x); INSERT INTO ipk1(x) VALUES('a'),('b'); SELECT * FROM ipk1
+CREATE TABLE ipk2(id INTEGER PRIMARY KEY, x); INSERT INTO ipk2 VALUES(5,'a'); INSERT INTO ipk2(x) VALUES('b'); SELECT * FROM ipk2 ORDER BY id
+CREATE TABLE ipk3(id INTEGER PRIMARY KEY, x); INSERT INTO ipk3 VALUES(99,'a'); INSERT INTO ipk3(x) VALUES('b'),('c'); SELECT * FROM ipk3 ORDER BY id
+CREATE TABLE ipk4(id INTEGER PRIMARY KEY, x); INSERT INTO ipk4(x) VALUES('a'); INSERT INTO ipk4(x) VALUES('b'); INSERT INTO ipk4 VALUES(50,'c'); INSERT INTO ipk4(x) VALUES('d'); SELECT * FROM ipk4 ORDER BY id
+
+# Iter29.B — in-memory NOT NULL constraint enforcement. Same shapes
+# as the file-mode fixtures in file_cases.txt but exercising the
+# in-memory `engine_dml.executeInsert/Update` path. Reject cases
+# rely on the run.sh harness collapsing non-zero exit to "<error>"
+# on both sides.
+CREATE TABLE nn1(a NOT NULL, b); INSERT INTO nn1(b) VALUES(1)
+CREATE TABLE nn2(a NOT NULL, b); INSERT INTO nn2 VALUES(NULL, 1)
+CREATE TABLE nn3(a NOT NULL, b); INSERT INTO nn3 VALUES(1, 2); UPDATE nn3 SET a = NULL WHERE b = 2
+CREATE TABLE nn4(a NOT NULL, b); INSERT INTO nn4 VALUES(1, 'first'), (NULL, 'second'); SELECT count(*) FROM nn4
+# Success path: NOT NULL with non-NULL value → byte-equal SELECT.
+CREATE TABLE nn5(a NOT NULL, b); INSERT INTO nn5 VALUES(1, 'x'), (2, NULL); SELECT * FROM nn5 ORDER BY a
+# IPK + NOT NULL: omitted IPK auto-fills with rowid → constraint OK.
+CREATE TABLE nn6(a INTEGER PRIMARY KEY NOT NULL, b NOT NULL); INSERT INTO nn6(b) VALUES('hello'); SELECT * FROM nn6
+
+# Iter29.C — iif(cond, a, b) ≡ CASE WHEN cond THEN a ELSE b END.
+# Eager 3-arg evaluation; both branches always materialised.
+SELECT iif(1=1, 'yes', 'no')
+SELECT iif(0, 'a', 'b')
+SELECT iif(NULL, 'a', 'b')
+SELECT iif('hello', 'a', 'b')
+SELECT iif(0.0, 'a', 'b')
+SELECT iif(0.5, 'a', 'b')
+CREATE TABLE iif1(x); INSERT INTO iif1 VALUES(1),(5),(10); SELECT iif(x>=5, 'big', 'small') FROM iif1 ORDER BY x
+
+# Iter29.C — date()/time()/datetime() shorthand wrappers around
+# strftime. The 0-arg form (current time via 'now') is deferred until
+# std.Io plumbing lands; both engines reject 0-arg the same way as
+# 1-arg-non-string here.
+SELECT date('2024-01-15')
+SELECT date('2024-01-15', '+1 day')
+SELECT date('2024-12-31', '+1 day')
+SELECT time('14:30:45')
+SELECT time('14:30:45', '+30 minutes')
+SELECT datetime('2024-01-15')
+SELECT datetime('2024-01-15 14:30:45')
+SELECT datetime('2024-01-15 14:30:45', '+1 hour')
+# NULL / invalid input → NULL (rendered as empty in CLI). Discriminating:
+# strict parseDateTime rejects what sqlite3 accepts loosely (e.g.
+# '2024' alone), so only the parses we handle are exercised.
+SELECT date(NULL)
+SELECT date('invalid')
+SELECT time(NULL)
+
+# Iter29.D — julianday(timestring, [modifier]*) returns REAL (vs %J's
+# TEXT). Discriminating: 12:00:00 UTC of 2024-01-01 → 2460311.0 (REAL
+# trailing .0) where strftime('%J') would yield "2460311" without it.
+SELECT julianday('2024-01-01')
+SELECT julianday('1970-01-01')
+SELECT julianday('2024-01-01 12:00:00')
+SELECT julianday('2024-01-01 06:00:00')
+SELECT julianday('2024-12-31 23:59:59')
+SELECT julianday('2024-01-01', '+1 day')
+SELECT julianday('2024-01-31', 'start of month')
+SELECT julianday(NULL)
+SELECT julianday('invalid')
+
+# Iter29.D — lenient day-overflow normalisation. sqlite3 accepts
+# day∈1..=31 literally then renormalises forward via Julian round-trip
+# when day > daysInMonth. month=0/13 and day=0/32 remain rejected.
+SELECT date('2023-02-29')
+SELECT date('2023-02-30')
+SELECT date('2023-02-31')
+SELECT date('2023-04-31')
+SELECT datetime('2023-02-29 12:34:56')
+SELECT julianday('2023-02-29')
+SELECT date('2023-02-29', '+1 day')
+SELECT date('2023-13-01')
+SELECT date('2023-00-01')
+SELECT date('2023-01-32')
+SELECT date('2023-01-00')
+SELECT strftime('%j', '2023-02-29')
+SELECT strftime('%w', '2023-02-29')
+SELECT strftime('%Y-%m-%d %H:%M:%S', '2023-02-29 23:00:00')
+
+# Iter29.E — sqlite3 blob literal `x'<hex>'` / `X'<hex>'`. Lexer
+# produces a single blob_lit token only when `x`/`X` is immediately
+# followed by `'` — bare `x` as a column name is unaffected (regression
+# guard). Hex span must be even-length and `[0-9a-fA-F]+`; sqlite3 rejects
+# `x'A'`, `x'GG'`, and unterminated `x'AB`.
+SELECT typeof(x'AABB')
+SELECT length(x'AABB')
+SELECT hex(x'AABB')
+SELECT hex(X'cafe')
+SELECT typeof(x'')
+SELECT length(x'')
+SELECT x'AABB'
+SELECT x'A'
+SELECT x'GG'
+CREATE TABLE blob1(x); INSERT INTO blob1 VALUES(1); SELECT x FROM blob1
+CREATE TABLE blob2(b BLOB); INSERT INTO blob2 VALUES(x'DEADBEEF'); SELECT hex(b), typeof(b), length(b) FROM blob2
+# WHERE-side blob comparison (advisor verification)
+CREATE TABLE blob3(b BLOB); INSERT INTO blob3 VALUES(x'DEADBEEF'),(x'CAFE'); SELECT hex(b) FROM blob3 WHERE b = x'CAFE'
+
+# Iter29.F — sqlite3 math extension functions. All return REAL on
+# valid input or NULL on NaN/domain-error. exp() overflow → ±Inf
+# passes through (sqlite3 only collapses domain errors). sign() is
+# the only one returning INTEGER (-1/0/1/NULL).
+SELECT pi()
+SELECT sqrt(16)
+SELECT sqrt(0)
+SELECT sqrt(-1)
+# log(x) is base-10, NOT natural log (sqlite3 quirk). ln(x) is natural.
+SELECT log(10)
+SELECT log(100)
+SELECT log(0)
+SELECT log(-1)
+SELECT ln(1)
+SELECT ln(10)
+SELECT log10(100)
+SELECT log2(8)
+# log(b, x) is log_b(x). 1.0 base → NULL.
+SELECT log(2, 8)
+SELECT log(10, 1000)
+SELECT log(1, 5)
+SELECT exp(0)
+SELECT exp(1)
+SELECT exp(1000)
+SELECT exp(-1000)
+SELECT pow(2, 10)
+SELECT pow(0, 0)
+SELECT pow(-1, 0.5)
+SELECT power(2, 3)
+SELECT pow(NULL, 2)
+SELECT pow(2, NULL)
+# Trig — input is radians.
+SELECT sin(0)
+SELECT cos(0)
+SELECT tan(0)
+SELECT sin(pi() / 2)
+SELECT atan2(1, 1)
+SELECT atan2(0, 0)
+SELECT acos(2)
+SELECT asin(2)
+SELECT atan(0)
+# Hyperbolic.
+SELECT sinh(0)
+SELECT cosh(0)
+SELECT tanh(0)
+SELECT acosh(1)
+SELECT asinh(0)
+SELECT atanh(0)
+SELECT acosh(0)
+SELECT atanh(2)
+# Rounding.
+SELECT ceil(1.5)
+SELECT ceiling(-1.5)
+SELECT floor(1.5)
+SELECT floor(-1.5)
+SELECT trunc(1.7)
+SELECT trunc(-1.7)
+# sign(x) — INTEGER -1/0/1/NULL.
+SELECT sign(-5)
+SELECT sign(5)
+SELECT sign(0)
+SELECT sign(0.0)
+SELECT sign(NULL)
+SELECT typeof(sign(5))
+# Conversions.
+SELECT degrees(pi())
+SELECT radians(180)
+# mod — fmod-style.
+SELECT mod(10, 3)
+SELECT mod(-10, 3)
+SELECT mod(10, -3)
+SELECT mod(7.5, 2.5)
+SELECT mod(10, 0)
+# Irrational-result formatter check (advisor)
+SELECT pow(2, 0.5)
+SELECT sqrt(2)
+
+# Iter29.G — zeroblob(N) / randomblob(N). zeroblob(N) returns N zero
+# bytes (clamps N<0 / NULL / unparsable TEXT to 0). randomblob(N)
+# returns max(N, 1) random bytes (sqlite3 quirk: even N=0 yields a
+# 1-byte blob). Direct BLOB output is excluded from fixtures because
+# sqlite3 CLI truncates at first NUL — length/typeof/hex give a
+# stable byte-equal comparison.
+SELECT length(zeroblob(8))
+SELECT typeof(zeroblob(8))
+SELECT hex(zeroblob(0))
+SELECT hex(zeroblob(3))
+SELECT length(zeroblob(0))
+SELECT length(zeroblob(-5))
+SELECT length(zeroblob(NULL))
+SELECT length(zeroblob('5'))
+SELECT length(zeroblob('foo'))
+SELECT length(randomblob(16))
+SELECT typeof(randomblob(16))
+SELECT length(randomblob(0))
+SELECT length(randomblob(-3))
+SELECT length(randomblob(NULL))
+
+# Iter29.H — CLI NUL-truncation. sqlite3 default `list` mode prints
+# TEXT/BLOB values via `printf("%s")` so output stops at the first
+# NUL. Match this byte-equal so direct blob output (zeroblob,
+# embedded-NUL strings, x'00...') compares cleanly.
+SELECT zeroblob(5)
+SELECT zeroblob(0)
+SELECT 'a' || char(0) || 'b'
+SELECT x'00AA'
+SELECT x'AA00BB'
+SELECT 'foo' || char(0) || 'bar'
+SELECT char(0)
+
+# Iter29.J — bitwise operators &, |, <<, >>, ~. SQLite quirks:
+#  - Coerce to i64 first (REAL truncates toward zero, TEXT lenient parse).
+#  - NULL on either side -> NULL.
+#  - Shift by negative amount flips direction (8 >> -2 == 8 << 2).
+#  - Shift by >=64: left -> 0; right -> sign-extend (-1 if negative).
+#  - Left shift uses unsigned wrap (1 << 63 == -9223372036854775808).
+#  - Precedence: bitwise sits between + - and < <= >.
+SELECT 1 << 2
+SELECT 8 >> 1
+SELECT 5 & 3
+SELECT 5 | 3
+SELECT ~0
+SELECT ~3
+SELECT ~3.7
+SELECT ~'foo'
+SELECT ~NULL
+SELECT 1 << 64
+SELECT 1 << 63
+SELECT 8 >> 64
+SELECT -1 >> 1
+SELECT -1 >> 64
+SELECT -1 << 1
+SELECT 1 << -1
+SELECT 8 >> -2
+SELECT 5 & 3.7
+SELECT '5' & 3
+SELECT NULL & 3
+SELECT 5 & NULL
+SELECT 9223372036854775807 << 1
+SELECT 1 << 100
+SELECT 1 + 2 << 1
+SELECT 4 << 1 + 1
+SELECT 4 & 7 = 4
+SELECT (4 & 7) = 4
+SELECT typeof(5 & 3)
+SELECT typeof(~5)
+SELECT (1e308*10) & 5
+SELECT (1e308*10) | 0
+SELECT ~(1e308*10)
+SELECT (-1e308*10) & -1
+SELECT (1.0/0.0) & 5
+CREATE TABLE bits(x); INSERT INTO bits VALUES(5),(7),(12); SELECT x FROM bits WHERE x & 1 ORDER BY x
+
+# Iter29.L — hex integer literals (`0x...` / `0X...`). SQLite quirks:
+#  - Result is i64; values > LLONG_MAX wrap (`0xFFFFFFFFFFFFFFFF` -> -1).
+#  - Trailing alphanumeric / `_` is rejected (`0x10g` parses as one bad token).
+#  - Lexes as a single integer token, fixing the pre-existing
+#    `5 | 0xa` silent-accept bug where `0` `xa` (id) was the parse.
+SELECT 0x10
+SELECT 0xa
+SELECT 0xA
+SELECT 0XFF
+SELECT 0xff
+SELECT typeof(0x10)
+SELECT 0x10 + 1
+SELECT 0x10 * 2
+SELECT 0x10 = 16
+SELECT 5 | 0xa
+SELECT 0xFFFFFFFFFFFFFFFF
+SELECT 0x7FFFFFFFFFFFFFFF
+SELECT 0x8000000000000000
+SELECT 0x10 + 0.5
+SELECT typeof(0x10 + 0.5)
+SELECT 0x
+SELECT 0xg
+SELECT 0x10g
+
+# Iter29.M — `_` digit separator (decimal/hex/real) + decimal
+# trailing-identifier silent-accept fix. SQLite 3.51 accepts a single
+# `_` only between two digits (same digit class), never adjacent to
+# `.`/`e`/sign or at start/end. Embedded in the exponent digits is OK.
+SELECT 1_000_000
+SELECT 0xff_ff
+SELECT 1.5_5
+SELECT 1e1_0
+SELECT 9_223_372_036_854_775_807
+SELECT typeof(1_000_000)
+SELECT 1_000 + 2_000
+SELECT 1_000.5_5e1_0
+SELECT 1__0
+SELECT 1_
+SELECT 0x_ff
+SELECT 0xff_
+SELECT 1_.5
+SELECT 1._5
+SELECT 1e_10
+SELECT 1_e10
+SELECT 1e
+SELECT 1.5g
+SELECT 1e10g
+SELECT 1.e5
+SELECT 1.e
+
+# Iter29.N — integer arithmetic overflow promotes to REAL. SQLite quirks:
+#  - `LLONG_MAX + 1` -> 9.22e+18 (REAL), not silent wrap.
+#  - Same for -, *, and the lone /-overflow case `LLONG_MIN / -1`.
+#  - Operations that fit in i64 stay INTEGER.
+#  - TEXT coercion paths see the same promotion.
+SELECT 9223372036854775807 + 1
+SELECT typeof(9223372036854775807 + 1)
+SELECT 9223372036854775807 - -1
+SELECT 9223372036854775807 * 2
+SELECT typeof(9223372036854775807 * 2)
+SELECT 5000000000 * 5
+SELECT typeof(5000000000 * 5)
+SELECT '9223372036854775807' + 1
+SELECT typeof('9223372036854775807' + 1)
+SELECT 9223372036854775807 + 0
+SELECT typeof(9223372036854775807 + 0)
+SELECT 1 + 1
+SELECT typeof(1 + 1)
+SELECT -9223372036854775807 - 1
+SELECT typeof(-9223372036854775807 - 1)
+SELECT (-9223372036854775807 - 1) / -1
+SELECT typeof((-9223372036854775807 - 1) / -1)
+SELECT -(-9223372036854775807 - 1)
+SELECT typeof(-(-9223372036854775807 - 1))
+
+# Iter29.O: i64.min literal parsing + decimal overflow → REAL.
+# sqlite3 quirks (parse-time, not eval-time):
+#  - Positive decimal literal > LLONG_MAX → REAL.
+#    `9223372036854775808` → 9.22e+18 REAL.
+#  - `-<text>` is sign-folded into one literal so LLONG_MIN is
+#    representable as INTEGER. `-9223372036854775808` → INTEGER.
+#  - `-<text>` where `<text>` > LLONG_MAX+1 → still falls through
+#    to unary-negate(REAL) → REAL.
+#  - Adjacent `-` `-` (with whitespace) re-enter parseUnary; the
+#    inner negate path materializes LLONG_MIN, the outer path
+#    re-promotes via Iter29.N negateValue → REAL.
+SELECT 9223372036854775808
+SELECT typeof(9223372036854775808)
+SELECT -9223372036854775808
+SELECT typeof(-9223372036854775808)
+SELECT -9223372036854775809
+SELECT typeof(-9223372036854775809)
+SELECT 99999999999999999999
+SELECT typeof(99999999999999999999)

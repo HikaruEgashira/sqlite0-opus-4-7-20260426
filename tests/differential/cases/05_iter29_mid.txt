@@ -1,0 +1,450 @@
+SELECT glob()
+SELECT glob('a')
+SELECT glob('a','b','c')
+
+# Iter29.Z: printf SQL-quoting specs `%q` / `%Q` / `%w`. sqlite3 quirks:
+# `%q` doubles single-quotes (escape for SQL string literal body), `%Q`
+# additionally wraps in single quotes (full SQL string literal — and emits
+# the bare keyword `NULL` for SQL NULL, NOT `''`). `%w` doubles double-quotes
+# for SQL identifier quoting. NULL → `(NULL)` for q/w (parens included), and
+# bare `NULL` for Q. Precision applies to the *raw* input chars BEFORE
+# doubling. C-string convention truncates at embedded NUL byte.
+SELECT printf('%q','it''s')
+SELECT printf('%q','no quotes')
+SELECT printf('%q','')
+SELECT printf('%q',123)
+SELECT printf('%q',1.5)
+SELECT printf('%q',NULL)
+SELECT printf('%Q','it''s')
+SELECT printf('%Q','x')
+SELECT printf('%Q','')
+SELECT printf('%Q',123)
+SELECT printf('%Q',NULL)
+SELECT printf('%w','a"b')
+SELECT printf('%w','x')
+SELECT printf('%w','')
+SELECT printf('%w',NULL)
+SELECT printf('%w',x'4142')
+SELECT printf('%5q','a''b')
+SELECT printf('%-5q|','a')
+SELECT printf('%5Q','x')
+SELECT printf('%-5Q|','x')
+SELECT printf('%5w','a"b')
+SELECT printf('%.3q','abcdefg')
+SELECT printf('%.3q','ab''cdef')
+SELECT printf('%.0q','abc')
+SELECT printf('%.0Q','abc')
+SELECT printf('%5.3q','abcdefg')
+SELECT printf('%05q','a')
+SELECT printf('%10q',NULL)
+SELECT printf('%10Q',NULL)
+SELECT printf('%10w',NULL)
+SELECT printf('%-10q|',NULL)
+SELECT printf('%-10Q|',NULL)
+SELECT printf('%.4q',NULL)
+SELECT printf('%.4Q',NULL)
+SELECT printf('|%q|',NULL)
+SELECT printf('|%Q|',NULL)
+SELECT printf('|%w|',NULL)
+SELECT length(printf('%q', cast(x'27270027' as text)))
+SELECT hex(printf('%Q', cast(x'27270027' as text)))
+# Iter29.AA: printf unknown-spec abort. sqlite3 PRINTF_SQLFUNC stops at the
+# first unimplemented spec; bytes already produced are returned as TEXT, an
+# empty accumulator becomes NULL. We treat %e/%E/%g/%G as unimplemented for
+# now (Ryu vs dtoa byte-divergence on tied f64 values).
+SELECT printf('%j', 1)
+SELECT typeof(printf('%j', 1))
+SELECT printf('a%j', 1)
+SELECT printf(' %j', 1)
+SELECT printf('%5d %j', 1, 2)
+SELECT printf('%j%5d', 1, 2)
+SELECT printf('hello %a world', 1)
+# Iter29.AB: printf %s/%c NUL-truncate (sqlite3 C-string convention).
+# %s and %c argument bytes stop at the first 0x00; precision counts only
+# pre-NUL bytes; width pads against the truncated length; BLOB and TEXT
+# follow the same rule. NULL still maps to empty string (no NUL byte).
+SELECT printf('%s|', cast(x'6162006364' as text))
+SELECT length(printf('%s', cast(x'6162006364' as text)))
+SELECT printf('%.10s', cast(x'6162006364' as text))
+SELECT printf('%5s|', cast(x'6162006364' as text))
+SELECT printf('%-5s|', cast(x'6162006364' as text))
+SELECT printf('a%sb', cast(x'636400' as text))
+SELECT printf('%s|', x'006162')
+SELECT length(printf('%s', x'006162'))
+SELECT length(printf('%s', cast(x'00' as text)))
+SELECT typeof(printf('%c', cast(x'00' as text)))
+SELECT printf('%c', cast(x'4100' as text))
+SELECT typeof(printf(''))
+SELECT typeof(printf('%s', NULL))
+SELECT printf('%s|', NULL)
+SELECT typeof(printf('%s|', NULL))
+# Iter29.AC: length() on TEXT honors C-string NUL-truncation (count up to
+# first NUL); octet_length stays raw byte count. BLOB length is unaffected.
+SELECT length(cast(x'410042' as text))
+SELECT length(cast(x'00' as text))
+SELECT length(cast(x'4142' as text))
+SELECT length(cast(x'E38182004142' as text))
+SELECT length(cast(x'4142E38182' as text))
+SELECT length(printf('%c', cast(x'00' as text)))
+SELECT length(printf('%c', x'00'))
+SELECT octet_length(cast(x'410042' as text))
+SELECT octet_length(cast(x'00' as text))
+SELECT octet_length(printf('%c', cast(x'00' as text)))
+SELECT length(cast(x'410042' as blob))
+# Iter29.AD: round(x, n) sqlite3-compatible rounding via add-half-then-truncate
+# instead of @round(x*factor)/factor. Tied IEEE 754 values like 2.55 (which is
+# 2.5499...) round DOWN under sqlite3's algorithm but UP under the naive form.
+SELECT round(2.55, 1)
+SELECT round(2.65, 1)
+SELECT round(-2.55, 1)
+SELECT round(2.45, 1)
+SELECT round(2.75, 1)
+SELECT round(1.005, 2)
+SELECT round(0.99, 1)
+SELECT round(2.5, 0)
+SELECT round(-2.5, 0)
+SELECT round(125, -1)
+SELECT round(155, -2)
+SELECT round(0.5)
+SELECT round(0.05, 1)
+SELECT round(1234.5)
+# Iter29.AE: printf alt-form `#` flag for radix specs. %#o prepends '0' to
+# non-zero octal, %#x/%#X prepends '0x'/'0X' to non-zero hex. Value 0 is a
+# sqlite3 quirk: NO prefix is added (C printf would emit '0x0').
+SELECT printf('%#o', 0)
+SELECT printf('%#o', 8)
+SELECT printf('%#o', -8)
+SELECT printf('%#o', -1)
+SELECT printf('%#x', 0)
+SELECT printf('%#x', 255)
+SELECT printf('%#X', 255)
+SELECT printf('%#x', -1)
+SELECT printf('%#X', -1)
+SELECT printf('%#5x', 15)
+SELECT printf('%#5x', 0)
+SELECT printf('%#-5x|', 15)
+SELECT printf('%#10x', 15)
+SELECT length(printf('%#x', 0))
+SELECT typeof(printf('%#x', 0))
+SELECT printf('%#d', 42)
+SELECT printf('%#u', 42)
+# Iter29.AF: char() out-of-range → U+FFFD; surrogate codepoints → WTF-8.
+# sqlite3 quirks: char(0x110000) and char(-1) emit replacement char (EFBFBD)
+# instead of empty; surrogates 0xD800-0xDFFF emit literal 3-byte sequences.
+SELECT hex(char(0x110000))
+SELECT hex(char(-1))
+SELECT hex(char(65, 0x110000, 66))
+SELECT hex(char(0xD800))
+SELECT hex(char(0xDFFF))
+SELECT hex(char(0xFFFD))
+SELECT length(char(0x110000))
+SELECT typeof(char(0x110000))
+SELECT hex(char(0))
+SELECT hex(char(0x80))
+SELECT hex(char(0x10000))
+# Iter29.AG: printf integer `0` flag wins over `-` and explicit precision.
+# sqlite3 quirk (printf.c::etRADIX): `0` flag forces effective precision to
+# `width - sign_len`, so left-justify becomes a no-op when content fills width
+# and a too-small explicit precision gets boosted. The alt-form `0x`/`0X`/`0`
+# prefix is added AFTER zero-padding, so `%-#05x` of 255 produces 7 bytes.
+SELECT '[' || printf('%-05d', 42) || ']'
+SELECT '[' || printf('%-05d', -42) || ']'
+SELECT '[' || printf('%-+05d', 42) || ']'
+SELECT '[' || printf('%-+05d', -42) || ']'
+SELECT '[' || printf('%- 05d', 42) || ']'
+SELECT '[' || printf('%05.0d', 0) || ']'
+SELECT '[' || printf('%05.3d', 0) || ']'
+SELECT '[' || printf('%05.3d', 42) || ']'
+SELECT '[' || printf('%-05.3d', 42) || ']'
+SELECT '[' || printf('%-#05x', 255) || ']'
+SELECT '[' || printf('%-#06x', 255) || ']'
+SELECT '[' || printf('%-#08x', 255) || ']'
+SELECT '[' || printf('%-#05X', 255) || ']'
+SELECT '[' || printf('%-08o', 7) || ']'
+SELECT '[' || printf('%-05x', 255) || ']'
+SELECT '[' || printf('%-05o', 7) || ']'
+SELECT '[' || printf('%05.10d', 42) || ']'
+# Iter29.AH: unicode() lenient UTF-8 + C-string convention + INTEGER/REAL coercion.
+# sqlite3's unicodeFunc coerces all input to TEXT (sqlite3_value_text) and uses
+# sqlite3Utf8Read which: (1) returns raw byte for lead < 0xC0, (2) consumes max
+# continuation run regardless of nominal length, (3) substitutes U+FFFD for
+# overlong (<0x80), surrogate (D800..DFFF), or non-character (FFFE/FFFF) results.
+# Empty TEXT and TEXT-with-leading-NUL both yield SQL NULL.
+SELECT unicode(x'ff')
+SELECT unicode(x'fe')
+SELECT unicode(x'fc')
+SELECT unicode(x'c0')
+SELECT unicode(x'e0')
+SELECT unicode(x'e0a0')
+SELECT unicode(x'f0')
+SELECT unicode(x'f0a0')
+SELECT unicode(x'f0a080')
+SELECT unicode(x'f0a08080')
+SELECT unicode(x'eda080')
+SELECT unicode(x'edbfbf')
+SELECT unicode(x'efbfbd')
+SELECT unicode(cast(x'00' as text))
+SELECT typeof(unicode(cast(x'00' as text)))
+SELECT unicode(cast(x'00' as blob))
+SELECT typeof(unicode(cast(x'00' as blob)))
+SELECT unicode(cast(x'4100' as text))
+SELECT unicode(1)
+SELECT unicode(1.5)
+SELECT typeof(unicode(1))
+SELECT unicode(x'80')
+SELECT unicode(x'c280')
+# Iter29.AI: substr() UTF-8 char counting + BLOB type preservation.
+# sqlite3 substrFunc: TEXT path counts UTF-8 chars (not bytes) for both P and N,
+# stops at first NUL (C-string convention). BLOB path uses byte indices and
+# returns BLOB type. INTEGER/REAL coerce via valueToOwnedText then use TEXT path
+# (numeric canonical forms are ASCII so chars==bytes). Multibyte chars cross
+# byte boundaries: substr('Hあhi', 2, 1) → 'あ' (3 bytes, 1 char).
+SELECT substr('Hあhi', 2, 1)
+SELECT substr('Hあhi', 2, 2)
+SELECT substr('Hあhi', 3, 1)
+SELECT substr('Hあhi', 1, 3)
+SELECT substr('Hあhi', -3, 2)
+SELECT substr('あ', 1, 1)
+SELECT substr('あ', 2, 1)
+SELECT hex(substr('Hあhi', 1, 2))
+SELECT hex(substr('Hあhi', 2, 1))
+SELECT hex(substr(cast(x'E38182' as text), 1, 1))
+SELECT substr(cast(x'48E38182686900' as text), 2, 1)
+SELECT substring('Hあhi', 2, 1)
+SELECT typeof(substr(x'4142', 1, 1))
+SELECT hex(substr(cast(x'4142' as blob), 1, 1))
+SELECT substr('Hあhi', 0, 3)
+SELECT substr(cast(x'410042' as text), -2, 5)
+# Iter29.AJ: TEXT→numeric coercion in CAST AS REAL and arithmetic.
+# sqlite3 sqlite3AtoF / computeNumericType: parses leading numeric prefix,
+# rejects literal NaN/Inf (no digit prefix), tags as REAL only if prefix has
+# '.' or 'e'/'E' syntax. CAST AS REAL: partial-prefix accepted, no NaN/Inf.
+# Arithmetic: '1abc' → INT 1, '1.5xyz' → REAL 1.5, 'NaN' → INT 0.
+SELECT CAST('NaN' AS REAL)
+SELECT CAST('Inf' AS REAL)
+SELECT CAST('1.5xyz' AS REAL)
+SELECT CAST('1.5e+2x' AS REAL)
+SELECT CAST('1e' AS REAL)
+SELECT CAST('1e+' AS REAL)
+SELECT CAST('123.45abc' AS REAL)
+SELECT CAST('  1.5xyz  ' AS REAL)
+SELECT 1+'NaN'
+SELECT 1+'Inf'
+SELECT 1+'1.5xyz'
+SELECT 0+'1abc'
+SELECT typeof(0+'1abc')
+SELECT 0+'1e3xyz'
+SELECT typeof(0+'1e3xyz')
+SELECT 0+'.5xyz'
+SELECT typeof(0+'.5xyz')
+SELECT 0+'1.xyz'
+SELECT typeof(0+'1.xyz')
+SELECT 0+'1.5e2x'
+SELECT typeof(0+'NaN')
+SELECT abs('NaN')
+SELECT abs('Inf')
+SELECT abs('1.5xyz')
+# Iter29.AK: `==` operator (sqlite3 quirk: equivalent to `=`).
+# sqlite3 lexer treats `==` and `=` as the same TK_EQ token. sqlite0 was
+# rejecting `==` with SyntaxError because the lexer only consumed one `=`.
+SELECT 1==1
+SELECT 1==2
+SELECT 1=='1'
+SELECT '1'==1
+SELECT 1==1.0
+SELECT NULL==NULL
+SELECT NULL==1
+SELECT typeof(1==1)
+SELECT typeof(NULL==1)
+SELECT 1=='abc'
+# Iter29.AL: unixepoch() — Unix timestamp from date-string (sqlite3 datefunc.c).
+# Returns INTEGER seconds since 1970-01-01 UTC. Same modifier pipeline as
+# date()/datetime()/julianday(): timestring, then optional modifiers. Invalid
+# input → NULL. 0-arg form needs 'now' resolution (deferred — std.Io plumbing).
+SELECT unixepoch('2024-01-01')
+SELECT unixepoch('1970-01-01')
+SELECT unixepoch('2024-01-01 12:00:00')
+SELECT unixepoch('2024-06-15 12:34:56')
+SELECT unixepoch('2000-01-01')
+SELECT unixepoch('2024-12-31 23:59:59')
+SELECT typeof(unixepoch('2024-01-01'))
+SELECT unixepoch('not a date')
+SELECT unixepoch('2024-01-31', '+1 day')
+SELECT unixepoch('2024-01-01', '+1 hour')
+# Iter29.AM: strftime spec letters %R %T %e %I %p %P %u (sqlite3 datefunc.c).
+# Composite specs: %R = %H:%M, %T = %H:%M:%S. Day padding: %e is space-padded
+# (` 5` for 5th, vs %d zero-padded `05`). 12-hour clock: %I is 1..12 with
+# midnight/noon mapped to 12 (`hh % 12 ? hh % 12 : 12`). AM/PM: %p uppercase
+# (AM before noon, PM at-or-after), %P lowercase. ISO weekday %u is Mon=1
+# through Sun=7 (vs %w which is Sun=0 through Sat=6).
+SELECT strftime('%R', '2024-01-01 12:34:56')
+SELECT strftime('%T', '2024-01-01 12:34:56')
+SELECT strftime('%e', '2024-01-05')
+SELECT strftime('%e', '2024-01-15')
+SELECT strftime('%I', '2024-01-01 00:00:00')
+SELECT strftime('%I', '2024-01-01 12:00:00')
+SELECT strftime('%I', '2024-01-01 23:00:00')
+SELECT strftime('%I', '2024-01-01 13:34:56')
+SELECT strftime('%p', '2024-01-01 11:59:59')
+SELECT strftime('%p', '2024-01-01 12:00:00')
+SELECT strftime('%p', '2024-01-01 00:00:00')
+SELECT strftime('%P', '2024-01-01 13:34:56')
+SELECT strftime('%P', '2024-01-01 09:00:00')
+SELECT strftime('%u', '2024-01-15')
+SELECT strftime('%u', '2024-01-21')
+SELECT strftime('%u %d', '2024-01-15')
+SELECT strftime('%f', '2024-01-01 12:34:56')
+SELECT strftime('%f', '2024-01-01 12:34:56.000')
+SELECT strftime('%f', '2024-01-01 12:34:56.5')
+SELECT strftime('%f', '2024-01-01 12:34:56.78')
+SELECT strftime('%f', '2024-01-01 12:34:56.789')
+SELECT strftime('%f', '2024-01-01 12:34:56.7891')
+SELECT strftime('%f', '2024-01-01 12:34:56.78912345')
+SELECT strftime('%f', '2024-01-01 12:34:56.0001')
+SELECT strftime('%f', '2024-01-01 12:34:56.0005')
+SELECT strftime('%f', '2024-01-01 12:34:56.0009')
+SELECT strftime('%f', '2024-01-01 12:34:56.9994')
+SELECT strftime('%f', '2024-01-01 12:34:56.9995')
+SELECT strftime('%f', '2024-01-01 12:34:56.9999')
+SELECT strftime('%f', '2024-01-01 12:34:56.50050')
+SELECT strftime('%H:%M:%f', '2024-01-01 12:34:56.789')
+SELECT strftime('%Y-%m-%d %H:%M:%f', '2024-01-01 12:34:56.789')
+SELECT strftime('%S.%f', '2024-01-01 12:34:56.789')
+SELECT strftime('%T %f', '2024-01-01 12:34:56.789')
+SELECT strftime('%f', '2024-01-01T12:34:56.789')
+SELECT strftime('%f', '12:34:56.789')
+SELECT strftime('%f', '12:34:56.5')
+SELECT strftime('%f', '2024-01-01 12:34:56.7Z')
+SELECT strftime('%f', '2024-01-01 12:34:56Z')
+SELECT julianday('2024-01-01 12:34:56.789')
+SELECT julianday('2024-01-01 12:34:56')
+SELECT julianday('2000-01-01 00:00:00.500')
+SELECT julianday('2000-01-01 00:00:00.001')
+SELECT julianday('12:34:56.789')
+SELECT unixepoch('2024-01-01 12:34:56.789')
+SELECT strftime('%f', '2024-01-01 12:34:56.789', '+1 day')
+SELECT strftime('%f', '2024-01-01 12:34:56.500', '+0.5 seconds')
+SELECT strftime('%f', '2024-01-01 12:34:56.789', '-0.001 seconds')
+SELECT strftime('%f', '2024-01-01 12:34:56', '+0.5 seconds')
+SELECT strftime('%f', '2024-01-01 23:59:59.999', '+1 second')
+SELECT strftime('%f', '2024-01-01 12:34:56.789', '+1 month')
+SELECT strftime('%f', '2024-01-01 12:34:56.789', 'start of day')
+SELECT strftime('%f', '2024-01-01 12:34:56.789', 'start of month')
+SELECT datetime('2024-01-01 12:34:56xxxxx')
+SELECT datetime('2024-01-01 12:34:56.5xxxxx')
+SELECT datetime('2024-01-01 12:34:56.')
+SELECT datetime('2024-01-01 12:34:56.7abc')
+SELECT printf('%g', 1)
+SELECT printf('%g', 1.5)
+SELECT printf('%g', 100.5)
+SELECT printf('%g', 0.0001)
+SELECT printf('%g', 0.00001)
+SELECT printf('%g', 1.5e100)
+SELECT printf('%g', 1.5e7)
+SELECT printf('%g', 999999)
+SELECT printf('%g', 1000000)
+SELECT printf('%g', 0)
+SELECT printf('%g', -1.5)
+SELECT printf('%g', 'abc')
+SELECT printf('%G', 1.5e100)
+SELECT printf('%.3g', 123456)
+SELECT printf('%.10g', 3.14159265358979)
+SELECT printf('%10g', 1.5)
+SELECT printf('%-10g|', 1.5)
+SELECT printf('%+g', 1.5)
+SELECT printf('%015g', 1.5)
+SELECT printf('%g', 1e-300)
+SELECT printf('%g', 1e-4)
+SELECT printf('%g', 9.99999e-5)
+SELECT printf('%#g', 1.5)
+SELECT printf('%#g', 100.0)
+SELECT printf('%#.3g', 1.0)
+SELECT printf('%.5g', 99999.9)
+SELECT printf('%g', 9.9999e5)
+SELECT printf('%g', NULL)
+SELECT printf('%e', 1.5)
+SELECT printf('%.3e', 1.5)
+SELECT printf('%E', 1.5)
+SELECT printf('%020e', 1.5)
+SELECT printf('%e', 9.9999)
+SELECT printf('%e', 0)
+SELECT printf('%.0e', 1.5)
+SELECT printf('%e', NULL)
+SELECT datetime(0, 'unixepoch')
+SELECT datetime(1704067200, 'unixepoch')
+SELECT datetime('1704067200', 'unixepoch')
+SELECT datetime(1.5, 'unixepoch')
+SELECT datetime(1704067200.5, 'unixepoch')
+SELECT datetime(-1, 'unixepoch')
+SELECT date(1704067200, 'unixepoch')
+SELECT time(1704067200, 'unixepoch')
+SELECT julianday(0, 'unixepoch')
+SELECT julianday(1704067200, 'unixepoch')
+SELECT strftime('%Y', 0, 'unixepoch')
+SELECT strftime('%Y-%m-%d %H:%M:%S', 1704067200, 'unixepoch')
+SELECT strftime('%f', 1704067200.789, 'unixepoch')
+SELECT datetime(1704067200, 'unixepoch', '+1 day')
+SELECT datetime(1704067200, '+1 day', 'unixepoch')
+SELECT datetime('not a number', 'unixepoch')
+SELECT datetime(NULL, 'unixepoch')
+SELECT datetime('1704067200xxx', 'unixepoch')
+SELECT unixepoch(0, 'unixepoch')
+SELECT datetime(2147483647, 'unixepoch')
+SELECT datetime(253402300799, 'unixepoch')
+SELECT datetime(253402300800, 'unixepoch')
+SELECT strftime('%W', '2024-01-01')
+SELECT strftime('%W', '2024-01-07')
+SELECT strftime('%W', '2024-01-08')
+SELECT strftime('%W', '2024-12-31')
+SELECT strftime('%W', '2025-01-01')
+SELECT strftime('%W', '2025-01-06')
+SELECT strftime('%W', '2023-01-01')
+SELECT strftime('%W', '2023-01-02')
+SELECT strftime('%V', '2024-01-01')
+SELECT strftime('%V', '2024-12-30')
+SELECT strftime('%V', '2024-12-31')
+SELECT strftime('%V', '2023-01-01')
+SELECT strftime('%V', '2023-12-31')
+SELECT strftime('%G', '2024-12-30')
+SELECT strftime('%G', '2024-12-31')
+SELECT strftime('%G', '2023-01-01')
+SELECT strftime('%G', '2024-01-01')
+SELECT strftime('%G %V %Y', '2024-12-31')
+SELECT strftime('%G %V %Y', '2023-01-01')
+SELECT strftime('%V %W', '2020-01-01')
+SELECT strftime('%V %W', '2020-12-31')
+SELECT strftime('%U', '2024-01-01')
+SELECT strftime('%U', '2024-01-07')
+SELECT strftime('%U', '2025-01-05')
+SELECT strftime('%U', '2024-12-31')
+SELECT strftime('%U', '2023-01-01')
+SELECT strftime('%g', '2024-12-30')
+SELECT strftime('%g', '2023-01-01')
+SELECT strftime('%g', '2024-01-01')
+SELECT strftime('%U %W', '2024-01-01')
+SELECT strftime('%g %G', '2024-12-31')
+SELECT unixepoch('2024-01-01 12:34:56.789', 'subsec')
+SELECT unixepoch('2024-01-01 12:34:56.789', 'subsecond')
+SELECT unixepoch('2024-01-01 12:34:56', 'subsec')
+SELECT unixepoch('2024-01-01', 'subsec')
+SELECT typeof(unixepoch('2024-01-01 12:34:56.789', 'subsec'))
+SELECT typeof(unixepoch('2024-01-01 12:34:56', 'subsec'))
+SELECT datetime('2024-01-01 12:34:56.789', 'subsec')
+SELECT date('2024-01-01 12:34:56.789', 'subsec')
+SELECT time('2024-01-01 12:34:56.789', 'subsec')
+SELECT julianday('2024-01-01 12:34:56.789', 'subsec')
+SELECT typeof(julianday('2024-01-01 12:34:56', 'subsec'))
+SELECT datetime(2460310.5, 'julianday')
+SELECT date(2460310.5, 'julianday')
+SELECT unixepoch(2460310.5, 'julianday')
+SELECT julianday(2460310.5, 'julianday')
+SELECT datetime(2460310.5, 'julianday', '+1 day')
+SELECT datetime(2460311.524259, 'julianday')
+SELECT date('not a number', 'julianday')
+SELECT datetime(2440587.5, 'auto')
+SELECT datetime(2460310.5, 'auto')
+SELECT datetime(5373484, 'auto')
+SELECT datetime(5373485, 'auto')
+SELECT datetime(1.5e9, 'auto')
+SELECT datetime('1704067200', 'auto')
+SELECT datetime('2024-01-01', 'auto')

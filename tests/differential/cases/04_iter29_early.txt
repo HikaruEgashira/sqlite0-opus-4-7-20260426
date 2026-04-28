@@ -1,0 +1,450 @@
+SELECT -99999999999999999999
+SELECT typeof(-99999999999999999999)
+SELECT -(-9223372036854775808)
+SELECT typeof(-(-9223372036854775808))
+SELECT - -9223372036854775808
+SELECT - -9223372036854775807
+SELECT 9223372036854775807
+SELECT typeof(9223372036854775807)
+SELECT -9223372036854775807
+SELECT typeof(-9223372036854775807)
+SELECT 9223372036854775808 + 0
+SELECT typeof(9223372036854775808 + 0)
+SELECT -9223372036854775808 + 0
+SELECT typeof(-9223372036854775808 + 0)
+SELECT -9223372036854775808 + 1
+
+# Iter29.P: REAL `%` truncates both operands to i64 first.
+# sqlite3 (vdbe.c OP_Remainder fp_math): `iA = (i64)rA; iB = (i64)rB`
+# then `iB % iA` returned as REAL. So `1.5 % 1` is `1 % 1 = 0` returned
+# as `0.0` (not f64 fmod which would give 0.5).
+#  - both INTEGER stays INTEGER (regression guard).
+#  - either side REAL truncates → REAL result.
+#  - divisor truncates to 0 → NULL (e.g. `7.5 % 0.3` since 0.3 → 0).
+#  - divisor -1 → result 0 (or 0.0 in REAL form).
+SELECT 1.5 % 1
+SELECT typeof(1.5 % 1)
+SELECT 7.5 % 2
+SELECT typeof(7.5 % 2)
+SELECT 7 % 2.5
+SELECT typeof(7 % 2.5)
+SELECT 7.0 % 2.5
+SELECT typeof(7.0 % 2.5)
+SELECT -7.5 % 2
+SELECT 7.5 % -2
+SELECT 7.5 % 0
+SELECT 7.5 % 0.3
+SELECT 7.5 % 0.5
+SELECT '5.5' % 2
+SELECT typeof('5.5' % 2)
+SELECT '7' % 2
+SELECT typeof('7' % 2)
+SELECT 'foo' % 2
+SELECT typeof('foo' % 2)
+SELECT NULL % 2
+SELECT 2 % NULL
+SELECT 7 % -1
+SELECT typeof(7 % -1)
+SELECT 7.5 % -1
+SELECT typeof(7.5 % -1)
+SELECT 1e20 % 3
+SELECT typeof(1e20 % 3)
+SELECT 7 % 0
+
+# Iter29.Q: CAST(TEXT/BLOB AS NUMERIC) collapses to INTEGER when the
+# parsed REAL is exactly i64-representable. sqlite3 quirks:
+#  - TEXT 'foo' / '' / non-numeric → INTEGER 0 (not REAL 0.0).
+#  - TEXT '5.0' / '1.5e2' (integer-valued REAL) → INTEGER.
+#  - TEXT '5.5' / '-1.5' / '1.5e-2' (true REAL) → REAL.
+#  - TEXT '1e20' (integer-valued but out of i64 range) → REAL.
+#  - TEXT '5abc' / ' 5 ' (leading-int + trailing junk) → INTEGER via
+#    the leading-i64 fast path (no fractional syntax).
+#  - REAL source 5.0 (NOT via TEXT) → REAL — sqlite3 doesn't collapse
+#    direct REALs in this version.
+#  - BLOB x'AB' → 0 INTEGER (lenient parseFloat returns 0.0, collapses).
+SELECT cast('foo' AS NUMERIC)
+SELECT typeof(cast('foo' AS NUMERIC))
+SELECT cast('' AS NUMERIC)
+SELECT typeof(cast('' AS NUMERIC))
+SELECT cast('5' AS NUMERIC)
+SELECT typeof(cast('5' AS NUMERIC))
+SELECT cast(' 5 ' AS NUMERIC)
+SELECT typeof(cast(' 5 ' AS NUMERIC))
+SELECT cast('5abc' AS NUMERIC)
+SELECT typeof(cast('5abc' AS NUMERIC))
+SELECT cast('5.0' AS NUMERIC)
+SELECT typeof(cast('5.0' AS NUMERIC))
+SELECT cast('5.5' AS NUMERIC)
+SELECT typeof(cast('5.5' AS NUMERIC))
+SELECT cast('-1.5' AS NUMERIC)
+SELECT typeof(cast('-1.5' AS NUMERIC))
+SELECT cast('1.5e2' AS NUMERIC)
+SELECT typeof(cast('1.5e2' AS NUMERIC))
+SELECT cast('1.5e-2' AS NUMERIC)
+SELECT typeof(cast('1.5e-2' AS NUMERIC))
+SELECT cast('1e10' AS NUMERIC)
+SELECT typeof(cast('1e10' AS NUMERIC))
+SELECT cast('1e20' AS NUMERIC)
+SELECT typeof(cast('1e20' AS NUMERIC))
+SELECT cast('1e308' AS NUMERIC)
+SELECT typeof(cast('1e308' AS NUMERIC))
+SELECT cast(5 AS NUMERIC)
+SELECT typeof(cast(5 AS NUMERIC))
+SELECT cast(5.0 AS NUMERIC)
+SELECT typeof(cast(5.0 AS NUMERIC))
+SELECT cast(5.5 AS NUMERIC)
+SELECT typeof(cast(5.5 AS NUMERIC))
+SELECT cast(NULL AS NUMERIC)
+SELECT typeof(cast(NULL AS NUMERIC))
+SELECT cast(x'AB' AS NUMERIC)
+SELECT typeof(cast(x'AB' AS NUMERIC))
+SELECT cast('99999999999999999999' AS NUMERIC)
+SELECT typeof(cast('99999999999999999999' AS NUMERIC))
+SELECT cast('-99999999999999999999' AS NUMERIC)
+SELECT typeof(cast('-99999999999999999999' AS NUMERIC))
+SELECT cast('99999999999999999999' AS INTEGER)
+SELECT typeof(cast('99999999999999999999' AS INTEGER))
+SELECT cast('-5.0' AS NUMERIC)
+SELECT typeof(cast('-5.0' AS NUMERIC))
+SELECT cast('-100' AS NUMERIC)
+SELECT typeof(cast('-100' AS NUMERIC))
+
+# Iter29.R: hex unary `-` sign-fold + LLONG_MIN error.
+# sqlite3 quirk: `-<hex>` is sign-folded into one literal at codegen
+# time. The u64 magnitude bit-casts to i64 then negates. The single
+# value `-0x8000000000000000` (i.e. negate of LLONG_MIN) overflows
+# i64 — sqlite3 errors with "hex literal too big" rather than
+# REAL-promoting (`vdbe.c::codeInteger`: `negFlag && value==SMALLEST_INT64`
+# fallback for hex). All other hex unary-`-` paths INTEGER-fold:
+#  - `-0x7F..` (LLONG_MAX) → -LLONG_MAX (= LLONG_MIN+1) INTEGER.
+#  - `-0xFF..` (= -1) → 1 INTEGER (`-(-1)`).
+#  - `-0xFFFFFFFFFFFFFFFE` (= -2) → 2 INTEGER.
+#  - `-0x1` → -1 INTEGER.
+#  - `-0x0` → 0 INTEGER.
+SELECT -0x7FFFFFFFFFFFFFFF
+SELECT typeof(-0x7FFFFFFFFFFFFFFF)
+SELECT -0xFFFFFFFFFFFFFFFF
+SELECT typeof(-0xFFFFFFFFFFFFFFFF)
+SELECT -0xFFFFFFFFFFFFFFFE
+SELECT typeof(-0xFFFFFFFFFFFFFFFE)
+SELECT -0x1
+SELECT typeof(-0x1)
+SELECT -0x0
+SELECT typeof(-0x0)
+SELECT 0xFFFFFFFFFFFFFFFF
+SELECT typeof(0xFFFFFFFFFFFFFFFF)
+SELECT 0x8000000000000000
+SELECT typeof(0x8000000000000000)
+SELECT -0x8000000000000000
+SELECT -0x10000000000000000
+
+# Iter29.S: state-aware functions changes() / total_changes() /
+# last_insert_rowid(). Each test runs in its own connection so the
+# state baseline is consistent. Multi-statement strings let us
+# exercise INSERT → state-read pairs in one shot.
+#  - Fresh connection: all three return 0.
+#  - Wrong arg count: error on both engines.
+#  - INSERT 1 row → last_insert_rowid = 1, changes = 1, total = 1.
+#  - INSERT 3 rows in one VALUES → last_insert_rowid = 3, changes = 3.
+#  - IPK explicit value sets last_insert_rowid to that value.
+#  - DELETE/UPDATE bump changes/total but NOT last_insert_rowid.
+SELECT changes()
+SELECT total_changes()
+SELECT last_insert_rowid()
+SELECT typeof(changes())
+SELECT typeof(last_insert_rowid())
+SELECT changes(1)
+SELECT last_insert_rowid(1)
+CREATE TABLE t(x); INSERT INTO t VALUES(10); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(10); SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(10),(20),(30); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(10),(20),(30); SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(10),(20),(30); SELECT total_changes();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(5, 'a'); SELECT last_insert_rowid();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(5, 'a'); INSERT INTO t VALUES(NULL, 'b'); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; SELECT total_changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1); INSERT INTO t VALUES(2); SELECT total_changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT changes(); SELECT changes();
+CREATE TABLE t(x); INSERT INTO t VALUES(1); BEGIN; INSERT INTO t VALUES(2); ROLLBACK; SELECT last_insert_rowid();
+
+# Iter29.T: in-memory non-IPK rowid uses max(rowid)+1 algorithm.
+# Replaces the Iter29.S monotonic counter that diverged from sqlite3
+# after DELETE-from-end (counter advanced past max). Discriminating
+# fixtures for the corrected behaviour:
+#  - DELETE-from-end → next INSERT reuses the freed rowid.
+#  - DELETE-all → next INSERT starts at 1.
+#  - DELETE-from-middle → max unchanged (regression guard for the
+#    Iter29.S existing fixture which already locked this).
+#  - UPDATE doesn't shift the rowid sequence.
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=3; INSERT INTO t VALUES(4); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t; INSERT INTO t VALUES(99); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=2; INSERT INTO t VALUES(4); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); DELETE FROM t; INSERT INTO t VALUES(10),(20); DELETE FROM t WHERE x=20; INSERT INTO t VALUES(30); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET x=x*10; INSERT INTO t VALUES(99); SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE x=3; SELECT last_insert_rowid();
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t; SELECT last_insert_rowid();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(NULL,'a'),(NULL,'b'),(NULL,'c'); DELETE FROM t WHERE x=3; INSERT INTO t VALUES(NULL,'d'); SELECT last_insert_rowid();
+CREATE TABLE t(x INTEGER PRIMARY KEY, y); INSERT INTO t VALUES(NULL,'a'),(NULL,'b'),(NULL,'c'); DELETE FROM t; INSERT INTO t VALUES(NULL,'d'); SELECT last_insert_rowid();
+
+# Iter29.U: JSON1 constructor subset (json_array / json_object /
+# json_quote). Serializer-only — full JSON parser ('json' canonicalizer,
+# 'json_extract' path queries) is a follow-up iteration. Fixtures cover:
+#  - empty / typeof / int / real / text / null / nesting (text repr).
+#  - REAL formatter passthrough (matches sqlite3's shortest round-trip).
+#  - JSON string escaping: " \ control chars (0x00-0x1F).
+#  - 0x7F passes through unescaped (sqlite3 quirk, not strict JSON).
+#  - object: even-arg invariant + non-text-key rejection.
+#  - BLOB → error on either engine.
+SELECT json_array()
+SELECT json_array(1)
+SELECT json_array(1, 2, 3)
+SELECT json_array(1, 2.5, 'three', NULL)
+SELECT json_array('hello')
+SELECT typeof(json_array(1, 2))
+SELECT length(json_array(1, 2, 3))
+SELECT json_array('a"b')
+SELECT json_array('a\b')
+SELECT json_array(char(10))
+SELECT json_array(char(9))
+SELECT json_array(char(8))
+SELECT json_array(char(1))
+SELECT json_array(char(127))
+SELECT json_array(1.0)
+SELECT json_array(2.5)
+SELECT json_array(1e10)
+SELECT json_array(1e-5)
+SELECT json_array(0.1+0.2)
+SELECT json_object()
+SELECT json_object('a', 1)
+SELECT json_object('a', 1, 'b', 'two', 'c', NULL)
+SELECT typeof(json_object('a', 1))
+SELECT json_object('a')
+SELECT json_object(1, 'a')
+SELECT json_object(NULL, 'a')
+SELECT json_quote(42)
+SELECT json_quote(3.14)
+SELECT json_quote('hello')
+SELECT json_quote(NULL)
+SELECT json_quote('a"b')
+SELECT typeof(json_quote(42))
+SELECT json_quote()
+SELECT json_quote(1, 2)
+SELECT json_array(x'AA')
+SELECT json_object('a', x'AA')
+SELECT json_array(1e308 * 10)
+SELECT json_array(-1e308 * 10)
+SELECT json_array(0.0/0.0)
+SELECT json_array(1.0/0.0)
+
+# Iter29.V: group_concat(x [, sep]) aggregate. Per-group string accumulator
+# with NULL-skipping semantics. Coverage:
+#  - default separator ',', custom sep, empty sep, NULL sep (treated as "").
+#  - dynamic per-row separator: char(43+x) yields '+'/'.'/'-' between rows.
+#  - NULL-skip: a NULL contributor doesn't increment count and doesn't
+#    inject a separator either (so '1, NULL, 3' still emits "1,3").
+#  - all-NULL group → result is NULL (typeof = 'null'). Empty source table
+#    follows the implicit-group rule and returns the same NULL.
+#  - DISTINCT only valid for the 1-arg form; 2-arg DISTINCT raises
+#    "DISTINCT aggregates must have exactly one argument" in sqlite3,
+#    matched as <error> on sqlite0 (SyntaxError exit).
+#  - GROUP BY emits one concat per group; WHERE filters before grouping.
+#  - BLOB contributors are appended as raw bytes (no quoting).
+#  - REAL contributors render via the shortest-round-trip formatter.
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, '-') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, '') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, NULL) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT group_concat(x, char(43+x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(NULL),(3); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT typeof(group_concat(x)) FROM t
+CREATE TABLE t(x); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); SELECT typeof(group_concat(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES('hello'); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1.5),(2.5),(3.5); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(2),(3); SELECT group_concat(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(NULL),(2),(NULL); SELECT group_concat(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT group_concat(DISTINCT x, '|') FROM t
+CREATE TABLE t(g,v); INSERT INTO t VALUES(1,'a'),(1,'b'),(2,'c'),(2,'d'); SELECT g, group_concat(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g,v); INSERT INTO t VALUES(1,'a'),(2,'b'),(1,'c'); SELECT group_concat(v) FROM t WHERE g=1
+CREATE TABLE t(x); INSERT INTO t VALUES(x'AB'),(x'CD'); SELECT group_concat(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT length(group_concat(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT typeof(group_concat(x)) FROM t
+SELECT group_concat()
+SELECT group_concat(1, 2, 3)
+
+# Iter29.W: byte-aware string functions.
+#  - length(TEXT) is now UTF-8 character count (was byte count). The
+#    rule mirrors sqlite3's `SQLITE_SKIP_UTF8`: count every byte that
+#    is not a continuation byte (0x80-0xBF). Lone-leader inputs like
+#    x'C2C2C2' get counted as 3 separate "characters".
+#  - octet_length(X) returns the raw byte count for TEXT/BLOB and the
+#    rendered text length for INTEGER/REAL — the byte-level peer to
+#    length(). NULL stays NULL.
+#  - unhex(text [, ignore]) decodes hex into a BLOB. The optional
+#    second arg is a byte-set; characters in it are dropped before
+#    the hex check (case-sensitive). Returns NULL on any
+#    malformed/odd input or on NULL args. Empty inputs decode to an
+#    empty BLOB.
+SELECT length('hello')
+SELECT length('aあ')
+SELECT length('日本語')
+SELECT length(cast(x'C2C2C2' AS TEXT))
+SELECT length(123)
+SELECT length(1.5e308)
+SELECT length(x'AABBCC')
+SELECT length(NULL)
+SELECT octet_length('hello')
+SELECT octet_length('aあ')
+SELECT octet_length('日本語')
+SELECT octet_length(123)
+SELECT octet_length(1.5e308)
+SELECT octet_length(x'AABBCC')
+SELECT octet_length(NULL)
+SELECT typeof(octet_length('a'))
+SELECT octet_length()
+SELECT octet_length('a','b')
+SELECT unhex('4142')
+SELECT typeof(unhex('4142'))
+SELECT unhex('')
+SELECT typeof(unhex(''))
+SELECT unhex('41')
+SELECT unhex('414')
+SELECT unhex('41 42')
+SELECT typeof(unhex('41 42'))
+SELECT unhex('41 42', ' ')
+SELECT typeof(unhex('41 42', ' '))
+SELECT unhex('  4142  ')
+SELECT unhex('  4142  ', ' ')
+SELECT unhex('414g')
+SELECT unhex('41x42','x')
+SELECT unhex('41X42','x')
+SELECT unhex(NULL)
+SELECT unhex(NULL, ' ')
+SELECT unhex('41', NULL)
+SELECT unhex('','')
+SELECT typeof(unhex('',''))
+SELECT length(unhex('414243'))
+SELECT octet_length(unhex('414243'))
+SELECT unhex(4142)
+SELECT unhex(x'4142')
+SELECT unhex(1.5)
+SELECT unhex()
+SELECT unhex('1','2','3')
+
+# Iter29.X: concat / concat_ws / string_agg.
+#  - concat(args...) joins all non-NULL arguments as text. Even an
+#    all-NULL call returns an empty TEXT (not NULL). REAL/INTEGER
+#    coerce via the %g-style renderer, BLOB passes raw bytes.
+#  - concat_ws(sep, args...) NULL-propagates only on a NULL separator.
+#    NULL values among args[1..] are skipped from the join, so
+#    concat_ws('-','a',NULL,'b') is 'a-b' not 'a--b'.
+#  - string_agg(x, sep) is a strict-2-arg aggregate alias for
+#    group_concat(x, sep). The 1-arg form (no default ',') errors,
+#    matching sqlite3's "wrong number of arguments". DISTINCT 2-arg
+#    inherits the existing "DISTINCT aggregates must have exactly one
+#    argument" rejection from the generic aggregate check.
+SELECT concat('a','b','c')
+SELECT concat('hello')
+SELECT concat('a',NULL,'c')
+SELECT concat(NULL,NULL)
+SELECT typeof(concat(NULL,NULL))
+SELECT concat(1,2,3)
+SELECT concat(1.5,2.5)
+SELECT concat('a',x'42')
+SELECT typeof(concat('a','b'))
+SELECT concat()
+SELECT concat_ws('-','a','b','c')
+SELECT concat_ws('-','a',NULL,'b')
+SELECT concat_ws(NULL,'a','b')
+SELECT typeof(concat_ws(NULL,'a','b'))
+SELECT concat_ws('-',NULL,NULL)
+SELECT typeof(concat_ws('-',NULL,NULL))
+SELECT concat_ws(',',1,2,3)
+SELECT concat_ws()
+SELECT concat_ws('-')
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT string_agg(x,',') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES('a'),('b'),('c'); SELECT string_agg(x,'-') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(NULL),(3); SELECT string_agg(x,',') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT string_agg(x,',') FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(NULL),(NULL); SELECT typeof(string_agg(x,',')) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT string_agg(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2); SELECT string_agg(DISTINCT x,',') FROM t
+SELECT concat_ws(123,'a','b')
+
+# Iter29.Y: SQL boolean literals TRUE / FALSE.
+# sqlite3 maps TRUE → INTEGER 1, FALSE → INTEGER 0 (case-insensitive),
+# typeof = 'integer'. They participate in arithmetic, comparisons, and
+# the three-valued logic of NULL/AND/OR/NOT just like 1 and 0 do.
+# (sqlite3 also resolves `true` to a same-named column when one is in
+# scope — that edge case is deferred; sqlite0's lexer always tokenises
+# the bare word as keyword_true.)
+SELECT TRUE
+SELECT FALSE
+SELECT true
+SELECT false
+SELECT True, FaLsE
+SELECT typeof(TRUE)
+SELECT typeof(FALSE)
+SELECT TRUE + 1
+SELECT FALSE + 1
+SELECT TRUE * 2
+SELECT TRUE = 1
+SELECT FALSE = 0
+SELECT TRUE = TRUE
+SELECT TRUE = FALSE
+SELECT NOT TRUE
+SELECT NOT FALSE
+SELECT TRUE AND FALSE
+SELECT TRUE OR FALSE
+SELECT TRUE AND TRUE
+SELECT FALSE OR FALSE
+SELECT NULL OR TRUE
+SELECT NULL OR FALSE
+SELECT NULL AND TRUE
+SELECT NULL AND FALSE
+SELECT CASE WHEN TRUE THEN 'yes' ELSE 'no' END
+SELECT CASE WHEN FALSE THEN 'yes' ELSE 'no' END
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t WHERE TRUE
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT * FROM t WHERE FALSE
+CREATE TABLE t(x); INSERT INTO t VALUES(1),(2),(3); SELECT count(*) FROM t WHERE TRUE
+
+# Iter29.Z: scalar `like(pattern, text [, escape])` and `glob(pattern, text)`
+# functions. sqlite3 exposes these as fallback-keyword call forms with
+# *pattern first* (opposite of the binary `text LIKE pattern` operator).
+# Any NULL arg → NULL (escape included). 3-arg `like` requires the escape to
+# be a single UTF-8 character; multi-char escape is a runtime error. Bare
+# `like` / `glob` (no parens, no operator) is still a syntax error.
+SELECT like('a%','abc')
+SELECT like('A%','abc')
+SELECT like('a_c','abc')
+SELECT like('a%c','adc')
+SELECT like('a','b')
+SELECT like('','')
+SELECT like('','abc')
+SELECT typeof(like('a','a'))
+SELECT like(NULL,'a')
+SELECT like('a',NULL)
+SELECT like('a%','abc','b')
+SELECT like('100%','100','%')
+SELECT like('100\%','100%','\')
+SELECT like('a','b',NULL)
+SELECT like('a','b','XY')
+SELECT like('a','b','あ')
+SELECT like('foo!','foo','!')
+SELECT 'foo' LIKE 'foo!' ESCAPE '!'
+SELECT like()
+SELECT like('a')
+SELECT like('a','b','c','d')
+SELECT glob('a*','abc')
+SELECT glob('A*','abc')
+SELECT glob('a?c','abc')
+SELECT glob('[abc]','b')
+SELECT glob('[^abc]','d')
+SELECT typeof(glob('a','a'))
+SELECT glob(NULL,'a')
+SELECT glob('a',NULL)

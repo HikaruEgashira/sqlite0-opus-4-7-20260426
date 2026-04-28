@@ -1,0 +1,362 @@
+SELECT timediff('0001-01-01', '-0001-12-31')
+
+# printf alt-form (`%#`) and width quirks (Iter30.L). sqlite3 quirks that
+# C printf already does but Zig's stdlib formatters don't:
+#   * `%%` honors width — `printf('%5%')` → `'    %'`.
+#   * `%c` precision = repeat count — `printf('%.3c', 'A')` → `'AAA'`.
+#     Precision 0 or absent → 1 byte (sqlite3 etCharLit min 1).
+#   * `%#f` / `%#e` / `%#g` with precision 0 keep the trailing decimal
+#     point (`printf('%#.0f', 1.0)` → `'1.'`).
+#   * `%#g` forces a visible decimal point even when rounding collapsed
+#     the value to a single significant digit (`printf('%#.0g', 1.5)`
+#     → `'2.'`).
+SELECT printf('%5%')
+SELECT printf('%-5%')
+SELECT printf('%10%')
+SELECT printf('%.3c', 'A')
+SELECT printf('%5.3c', 'A')
+SELECT printf('%-5.3c', 'A')
+SELECT printf('%.0c', 'A')
+SELECT printf('%.10c', 'A')
+SELECT printf('%.5c', 65)
+SELECT printf('%#.0f', 1.0)
+SELECT printf('%#.0f', 1.5)
+SELECT printf('%#.0f', -2.5)
+SELECT printf('%#.0e', 1.0)
+SELECT printf('%#.0e', 1.5e10)
+SELECT printf('%#.0E', 1.0)
+SELECT printf('%#.0g', 1.5)
+SELECT printf('%#.0g', 1.0)
+SELECT printf('%#.5g', 1.0)
+SELECT printf('%#g', 1.5)
+SELECT printf('%#g', 1.0)
+SELECT printf('%#G', 1e10)
+
+# Date / time / iif / min-max ties (Iter30.M).
+#  * `24:MM:SS[.fff]` accepted as midnight of next day; renders unchanged
+#    via `datetime()`/`time()` (sqlite3 datefunc.c quirk). hour=25 still
+#    rejected. minute/second remain strict ≤59.
+#  * `min(a,b,...)` ties go RIGHT (last-tied wins); `max` ties go LEFT
+#    (first-tied wins). Verified: `min(1,1.0)`→`1.0`, `max(1,1.0)`→`1`.
+#  * `iif()` variadic (sqlite3 3.46+): scan args in pairs, return `vN`
+#    on first truthy `cN`. Odd `args.len` → last is default; even → NULL.
+SELECT datetime('2024-01-01 24:00:00')
+SELECT datetime('2024-01-01 24:30:00')
+SELECT datetime('2024-01-01 24:59:59')
+SELECT datetime('2024-01-01 24:00:00.500')
+SELECT datetime('2024-01-01 25:00:00')
+SELECT datetime('2024-01-01 24:60:00')
+SELECT datetime('2024-01-01 24:59:60')
+SELECT julianday('2024-01-01 24:00:00')
+SELECT time('24:00:00')
+SELECT date('2024-01-01 24:00:00')
+SELECT datetime('2024-01-01 24:00:00','+1 hour')
+SELECT min(1, 1.0)
+SELECT max(1, 1.0)
+SELECT min(1.0, 1)
+SELECT max(1.0, 1)
+SELECT min(1, 1.0, '1')
+SELECT max(1, 1.0, 1.5)
+SELECT max(1.5, 1, 1.0)
+SELECT min(1.0, 1.5, 1.0)
+SELECT iif(1, 'a')
+SELECT iif(0, 'a')
+SELECT iif(1, 'a', 'b')
+SELECT iif(0, 'a', 'b')
+SELECT iif(0, 'a', 1, 'b')
+SELECT iif(0, 'a', 0, 'b')
+SELECT iif(0, 'a', 0, 'b', 'def')
+SELECT iif(0, 'a', 1, 'b', 'unreached')
+SELECT iif(0, 'a', 'b', 'c')
+
+# printf length modifier `l` / `ll` (Iter30.N): sqlite3's printf accepts
+# 1 or 2 `l`'s before the conversion char and silently ignores them
+# (internal storage is uniformly i64/f64). 3+ `l`'s, `h`, `hh`, `j`, `t`,
+# `L` are NOT accepted and fall through to the unknown-spec NULL.
+SELECT printf('%lld', 1)
+SELECT printf('%5lld', 1)
+SELECT printf('%llu', 1)
+SELECT printf('%llx', 255)
+SELECT printf('%llX', 255)
+SELECT printf('%llo', 8)
+SELECT printf('%-5lld', 1)
+SELECT printf('%05lld', 1)
+SELECT printf('%+lld', 5)
+SELECT printf('%ld', 1)
+SELECT printf('%lf', 1.5)
+SELECT printf('%llf', 1.5)
+SELECT printf('%.3lf', 1.5)
+SELECT printf('%le', 1.5)
+SELECT printf('%lg', 1.5)
+SELECT printf('%lld %lld', 1, 2)
+SELECT printf('%5.3lld', 1)
+
+# UTF-8 char count via SKIP_UTF8 semantics (Iter30.O). sqlite3 always
+# advances by ≥1 byte per char and skips continuation bytes only after
+# a multi-byte lead (≥0xC0). This makes orphan continuation bytes
+# (0x80-0xBF alone) and bare leads (0xC0-0xFF without continuation)
+# count as 1 char each — matching `length(cast(x'AB' as text))` = 1.
+SELECT length(cast(x'AB' as text))
+SELECT length(cast(x'AB80' as text))
+SELECT length(cast(x'80AB' as text))
+SELECT length(cast(x'C3' as text))
+SELECT length(cast(x'C382' as text))
+SELECT length(cast(x'C3A0' as text))
+SELECT length(cast(x'E697A5' as text))
+SELECT length(cast(x'E6' as text))
+SELECT length(cast(x'E697' as text))
+SELECT length(printf('%c', x'AB'))
+SELECT length(printf('%s', x'AB00CD'))
+SELECT length(printf('%s', cast(x'AB80' as text)))
+
+# printf sign-flag last-wins (Iter30.P): sqlite3 makes `+` and ` ` mutually
+# exclusive with the LAST flag winning, regardless of `-` position.
+# Verified: `%+ d` of 1 → ` 1` (space wins), `% +d` of 1 → `+1` (`+` wins).
+# C printf normally lets `+` win regardless of order, so this is a sqlite3
+# quirk we mirror.
+SELECT printf('%+ d', 1)
+SELECT printf('% +d', 1)
+SELECT printf('%-+ d', 1)
+SELECT printf('%- +d', 1)
+SELECT printf('%-+ d', -1)
+SELECT printf('%-+ 10.5f', 3.14)
+SELECT printf('%- +10.5f', 3.14)
+SELECT printf('%+ e', 1.5)
+SELECT printf('% +e', 1.5)
+SELECT printf('%+ g', 1.5)
+SELECT printf('% +g', 1.5)
+
+# unhex(text, ignore) sqlite3 quirks (Iter30.Q):
+#  * Hex chars in `ignore` are no-ops — `unhex('414243', '4')` → 'ABC'
+#    because '4' is hex first, ignore lookup never fires.
+#  * Non-hex `ignore` bytes are valid only BETWEEN pairs, never mid-pair —
+#    `unhex('4 1 4 2 4 3', ' ')` → NULL (space mid-pair after '4'),
+#    `unhex('41 42 43', ' ')` → 'ABC' (space between pairs OK).
+#  * `unhex('14243', '4')` → NULL (odd count after stripping mid-pair would
+#    fail; without strip 5 chars also odd).
+SELECT unhex('414243', '4')
+SELECT unhex('14243', '4')
+SELECT unhex('4', '4')
+SELECT unhex('41', '4')
+SELECT unhex('41 42 43', ' ')
+SELECT unhex('4 1 4 2 4 3', ' ')
+SELECT unhex('4_14_24_3', '_')
+SELECT unhex('  41 42 43  ', ' ')
+SELECT unhex('41XYZ', 'XYZ')
+SELECT unhex('44 44 44', '4 ')
+SELECT unhex('4142 43', ' ')
+
+# printf truncated-spec sqlite3 quirk (Iter30.R):
+#  * Trailing bare `%` (no flags/width/precision/length consumed) emits
+#    literal `%`: `printf('%')` → '%', `printf('a%')` → 'a%'.
+#  * Any spec partially-consumed before EOS (e.g. `%5`, `%-`, `%.5`,
+#    `%05.3`, `%l`, `%ll`) drops the unfinished spec AND aborts the
+#    format scan; bytes accumulated by preceding specs are returned as-is
+#    (empty accumulator → NULL).
+SELECT printf('%')
+SELECT printf('a%')
+SELECT printf('%5')
+SELECT printf('%-5')
+SELECT printf('%-')
+SELECT printf('%+')
+SELECT printf('%.5')
+SELECT printf('%5.')
+SELECT printf('%5.5')
+SELECT printf('%05')
+SELECT printf('%#')
+SELECT printf('%l')
+SELECT printf('%ll')
+SELECT printf('%lll')
+SELECT printf('a%5')
+SELECT printf('a%5dc%5', 1)
+SELECT printf('a%db%', 0)
+
+# TEXT→bool / TEXT→i64 lenient prefix parse (Iter30.S):
+#  * sqlite3 routes truthy on TEXT through sqlite3AtoF-prefix (longest
+#    valid numeric prefix; whitespace strip; no hex). `'1abc'` → 1 → true,
+#    `'0x10'` → 0 (stops at 'x') → false, `' 1 '` → 1 → true.
+#  * Same lenient prefix used by sqlite3VdbeIntValue for bitwise ops:
+#    `'1abc' & 1` → 1, `~'1abc'` → -2, `'0x10' & 0x10` → 0.
+#  * `'abc'` (no digit prefix) → 0 / false in both contexts.
+SELECT iif('1abc','y','n')
+SELECT iif(' 1 ','y','n')
+SELECT iif('1ex','y','n')
+SELECT iif('0x10','y','n')
+SELECT iif('abc','y','n')
+SELECT iif('-0','y','n')
+SELECT iif('0.0','y','n')
+SELECT '1abc' AND 1
+SELECT 'abc' AND 1
+SELECT NOT '1abc'
+SELECT NOT 'abc'
+SELECT CASE WHEN '1abc' THEN 'y' ELSE 'n' END
+SELECT '1abc' & 1
+SELECT '1abc' | 0
+SELECT ~'1abc'
+SELECT '1abc' << 1
+SELECT '1abc' >> 0
+SELECT ' 1 ' & 1
+SELECT '0x10' & 0x10
+SELECT '1ex' & 1
+SELECT '1.5xyz' & 1
+SELECT 'abc' & 1
+
+# Date/time TZ-token whitespace + lowercase z (Iter30.T):
+#  * sqlite3 `parseTimezone` skips ASCII whitespace before the TZ token.
+#    `'2024-01-01 12:00:00 +09:00'` (space before +HH:MM) and tab forms
+#    accepted. Multi-whitespace also OK.
+#  * Both `Z` and `z` accepted as Zulu marker.
+#  * Whitespace skip happens AFTER `.fff`, not between SS and `.`.
+SELECT date('2024-01-01 12:00:00 +09:00')
+SELECT date('2024-01-01T12:00:00 +09:00')
+SELECT date('2024-01-01 12:00:00 Z')
+SELECT date('2024-01-01 12:00:00 z')
+SELECT date('2024-01-01 12:00:00.5 +09:00')
+SELECT date('2024-01-01 12:00:00  +09:00')
+SELECT date('2024-01-01 12:00 +09:00')
+SELECT date('2024-01-01 12:00:00 -09:00')
+SELECT datetime('2024-01-01 12:00:00 +09:00')
+SELECT datetime('2024-01-01T12:00:00 +09:00')
+SELECT time('2024-01-01 12:00:00 +09:00')
+SELECT time('12:00:00 +09:00')
+SELECT julianday('2024-01-01 12:00:00 +09:00')
+SELECT strftime('%H:%M:%S', '2024-01-01 12:00:00 +09:00')
+
+# strftime extra specs + trailing-% NULL (Iter30.U):
+#  * `%F` (3.42+) → `%Y-%m-%d` alias.
+#  * `%k` → hour 0-23 with space-pad (` 9` for 09:30, `14` for 14:30).
+#  * `%l` → hour 1-12 with space-pad. 0 → 12, 12 → 12.
+#  * Trailing bare `%` → NULL (sqlite3 PRINTF_DATEFUNC abort, unlike
+#    printf where `%` literal is emitted).
+SELECT strftime('%F','2024-01-01')
+SELECT strftime('%F','2024-01-01 12:34:56')
+SELECT strftime('%k','2024-01-01 09:30:00')
+SELECT strftime('%k','2024-01-01 14:30:00')
+SELECT strftime('%l','2024-01-01 09:30:00')
+SELECT strftime('%l','2024-01-01 14:30:00')
+SELECT strftime('%l','2024-01-01 00:30:00')
+SELECT strftime('%l','2024-01-01 12:30:00')
+SELECT strftime('%','2024-01-01')
+SELECT strftime('a%','2024-01-01')
+
+# date/time floor/ceiling modifiers (Iter30.V):
+#  * sqlite3 3.46+ accepts `floor` / `ceiling` as modifiers; in 3.51 they
+#    are no-ops on the parsed DateTime (verified empirically).
+SELECT date('2024-01-15','floor')
+SELECT date('2024-01-15','ceiling')
+SELECT julianday('2024-01-01 12:00:00','floor')
+SELECT datetime('2024-01-01 12:00:00.5','floor')
+SELECT datetime('2024-01-01 12:00:00.5','ceiling')
+SELECT time('2024-01-01 12:00:00.5','floor')
+SELECT date('2024-01-31','floor','+1 day')
+SELECT date('2024-01-31','ceiling','-1 day')
+SELECT date(2451545.5,'floor')
+SELECT julianday(2451545.7,'ceiling')
+
+# LIKE `_` / GLOB `?` advance by UTF-8 char (Iter30.W):
+#  * sqlite3 uses SQLITE_SKIP_UTF8 to advance one Unicode character per
+#    `_` (LIKE) or `?` (GLOB), not one byte. Multibyte chars (αβγ, é, 𝕏)
+#    in text are matched as one position.
+#  * Literal pattern bytes still match byte-by-byte (β as 0xCE 0xB2).
+SELECT 'αβγ' LIKE '_β_'
+SELECT 'αβγ' GLOB '?β?'
+SELECT 'αβγδ' LIKE 'α_γ_'
+SELECT 'héllo' LIKE 'h_llo'
+SELECT 'héllo' GLOB 'h?llo'
+SELECT 'α' LIKE '_'
+SELECT 'α' GLOB '?'
+SELECT 'αβ' LIKE '__'
+SELECT 'αβ' GLOB '??'
+SELECT '𝕏Y' LIKE '_Y'
+SELECT '𝕏Y' GLOB '?Y'
+SELECT 'aαb' LIKE '_α_'
+
+# printf %d/%i/%u/%x/%o on TEXT 'inf'/'nan' = 0 (Iter30.X):
+#  * sqlite3 sqlite3AtoF rejects literal Inf/NaN — for printf integer
+#    specs this means TEXT 'inf' / 'nan' / 'Infinity' coerces to 0.
+#  * Numeric exponential strings ('9.99e99', '1e99') still saturate via
+#    the lenient prefix → REAL → i64 fallback.
+SELECT printf('%d', 'inf')
+SELECT printf('%d', 'nan')
+SELECT printf('%d', 'Inf')
+SELECT printf('%d', 'Infinity')
+SELECT printf('%d', '-inf')
+SELECT printf('%d', 'inf99')
+SELECT printf('%d', '9.99e99')
+SELECT printf('%d', '1e99')
+SELECT printf('%d', '1e-99')
+SELECT printf('%d', '.5')
+SELECT printf('%i', 'inf')
+SELECT printf('%u', 'inf')
+SELECT printf('%x', 'inf')
+SELECT printf('%o', 'inf')
+
+# CLI list-mode control-char escape (Iter30.Y):
+#  * sqlite3 shell `utf8_printf` escapes 0x01-0x1F (except TAB/LF) to
+#    `^X` (caret + (byte+0x40)) for both TEXT and BLOB columns. CR
+#    (0x0D) is also escaped to `^M`. NUL still terminates.
+#  * Stored values are unaffected — `hex()` / `length()` see the
+#    unescaped bytes.
+SELECT x'01'
+SELECT x'02'
+SELECT x'09'
+SELECT x'0A'
+SELECT x'0D'
+SELECT x'1F'
+SELECT x'20'
+SELECT x'AABB'
+SELECT cast(x'01' as text)
+SELECT cast(x'0D' as text)
+SELECT char(1)
+SELECT char(13)
+SELECT char(10)
+SELECT char(9)
+SELECT min(x'01', x'02')
+SELECT max(x'01', x'02')
+SELECT max(x'01', 'a')
+SELECT max('a', x'01')
+SELECT length(x'01')
+SELECT hex(x'01')
+SELECT length(char(13))
+
+# printf width/precision i32 wrap (Iter30.Z):
+#  * sqlite3 stores width/precision in C `int`. Parse loop overflows
+#    silently to negative; later `width > length` check then never
+#    fires so no padding is applied. `printf('%2147483648d', 1)` → '1'
+#    (width wraps to INT_MIN, treated as 0).
+#  * Old impl used usize parser which tried to allocate 2GB → OOM.
+#  * Modest widths (≤ ~1B) still allocate and fully pad as sqlite3 does.
+SELECT printf('%2147483648d', 1)
+SELECT length(printf('%99d', 1))
+SELECT length(printf('%9999d', 1))
+SELECT printf('%5d', 1)
+
+# quote() truncates TEXT at NUL (Iter31.A):
+#  * sqlite3 quoteFunc treats TEXT as a C string — scanning stops at
+#    the first NUL byte. `quote(char(0))` → `''` (open+close, no body),
+#    `quote('a' || char(0) || 'b')` → `'a'`.
+#  * BLOB does NOT truncate at NUL (`quote(x'00')` → `X'00'`).
+SELECT quote(char(0))
+SELECT quote('a' || char(0) || 'b')
+SELECT length(quote(char(0)))
+SELECT length(quote('a' || char(0) || 'b'))
+SELECT quote(x'00')
+SELECT quote(x'010203')
+SELECT quote(printf('%c', 9))
+SELECT quote(char(13))
+
+# replace() pattern starting with NUL = empty pattern (Iter31.B):
+#  * sqlite3 returns input unchanged when the pattern's first byte is
+#    NUL (or pattern is empty). `replace('a'||char(0)||'b', char(0),
+#    'x')` → input unchanged.
+#  * Multi-byte patterns NOT starting with NUL still match byte-for-byte:
+#    `replace('foo'||char(0)||'bar', 'foo'||char(0), 'X')` → 'Xbar'.
+SELECT hex(replace('a' || char(0) || 'b', char(0), 'x'))
+SELECT length(replace('a' || char(0) || 'b', char(0), 'x'))
+SELECT hex(replace(char(0) || 'a' || char(0) || 'b', char(0) || 'a', 'X'))
+SELECT hex(replace('foo' || char(0) || 'bar', 'foo' || char(0), 'X'))
+SELECT hex(replace('foo' || char(0) || 'bar', 'foo', 'X'))
+SELECT hex(replace('a' || char(0) || 'b', 'b', 'X'))
+SELECT hex(replace('foobar', 'foo' || char(0), 'X'))
+SELECT hex(replace(cast(x'410042' as text), char(0), 'X'))
+SELECT hex(replace(cast(x'410042' as blob), char(0), 'X'))

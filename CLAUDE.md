@@ -44,7 +44,7 @@ bash tests/differential/run.sh
 
 ### Trigger: When to split
 
-1. 500行ルール: 1ファイルが500行を超えたら、次の機能追加前に分割する。既存の500行超ファイルは段階的に分割する。
+1. 500行ルール: 1ファイルが500行を超えたら、次の機能追加前に分割する。既存の500行超ファイルは段階的に分割する。**Zig source / Markdown / テスト fixture (cases.txt 等) すべてに同じルールを適用する。**
 2. 2責務ルール: 1ファイルに2つ以上の独立した責務（例: 式評価とJOIN実行）が含まれたら分割する。
 3. 新機能は既存巨大ファイルに追加しない: 500行超のファイルに新しいpub fnを追加する場合、まず関連コードを別モジュールに抽出してから追加する。
 
@@ -53,10 +53,15 @@ bash tests/differential/run.sh
 - 入力/出力の型で分ける: 同じ型を受け取り同じ型を返す関数群は1モジュールにまとめる
 - 呼び出し方向で分ける: AがBを呼ぶがBはAを呼ばないなら、Bは別モジュールにできる
 - テスト容易性で分ける: 単体テストを書くとき、モジュール単独でテストできるのが理想
+- テスト fixture / Markdown は機能 / iteration 範囲ごとに分ける。ファイル名は zero-padded prefix (`01_`, `02_` …) で順序を保つ。
 
 ### Verification
 
-新機能をコミットする前に `wc -l packages/*/src/*.zig` を実行し、500行超のファイルがないことを確認する。
+新機能をコミットする前に以下を実行し、500行超のファイルがないことを確認する:
+
+```bash
+wc -l packages/*/src/*.zig tests/differential/cases/*.txt docs/**/*.md docs/*.md 2>/dev/null
+```
 
 ## Current Phase
 

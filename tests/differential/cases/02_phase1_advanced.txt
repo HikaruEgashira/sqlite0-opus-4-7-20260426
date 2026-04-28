@@ -1,0 +1,450 @@
+CREATE TABLE t(a, b, c); INSERT INTO t (a, c) SELECT 1, 3; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t SELECT column1 FROM (VALUES (10), (20), (30)); SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); INSERT INTO t SELECT x FROM t WHERE x > 1; SELECT * FROM t
+CREATE TABLE t(a, a, b); INSERT INTO t (a, a, b) VALUES (1, 2, 3); SELECT * FROM t
+CREATE TABLE t(a, A)
+CREATE TABLE t(name TEXT, NAME INTEGER)
+
+# SELECT alias (Iter12)
+SELECT 1 AS x
+SELECT 1+2 AS sum
+SELECT 'hi' AS greeting
+SELECT 1 AS a, 2 AS b, 3 AS c
+SELECT 1 foo
+SELECT 1 a, 2 b
+CREATE TABLE t(x, y); INSERT INTO t VALUES (10, 20); SELECT x + y AS total FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT x AS n FROM t WHERE x > 1
+
+# random() (Iter9.A) — values differ each run, so only shape can be diffed
+SELECT typeof(random())
+SELECT typeof(random()) = 'integer'
+SELECT random() <> random()
+SELECT random() IS NOT NULL
+
+# printf() / format() (Iter9.B)
+SELECT printf('hello')
+SELECT printf('%d', 42)
+SELECT printf('%i', -7)
+SELECT printf('%s', 'world')
+SELECT printf('%05d', 42)
+SELECT printf('%-10s|', 'hi')
+SELECT printf('%x', 255)
+SELECT printf('%X', 255)
+SELECT printf('%o', 8)
+SELECT printf('%.2f', 3.14159)
+SELECT printf('%5.2f', 3.14)
+SELECT printf('%+d', 5)
+SELECT printf('%+d', -5)
+SELECT printf('%.5d', 42)
+SELECT printf('a%%b')
+SELECT printf('%d %d %d', 1, 2, 3)
+SELECT printf('%s + %s = %d', 'a', 'b', 99)
+SELECT printf('%d', 3.7)
+SELECT printf('%d', 'abc')
+SELECT printf('%s', NULL)
+SELECT printf('%d %d', 1)
+SELECT format('%d', 99)
+SELECT printf('%c', 65)
+
+# strftime() (Iter9.C — 'now' / modifier 抜き)
+SELECT strftime('%Y', '2024-06-15')
+SELECT strftime('%m', '2024-06-15')
+SELECT strftime('%d', '2024-06-15')
+SELECT strftime('%Y-%m-%d', '2024-06-15')
+SELECT strftime('%H:%M:%S', '2024-06-15 12:30:45')
+SELECT strftime('%Y-%m-%dT%H:%M:%S', '2024-01-01T00:00:00')
+SELECT strftime('%j', '2024-01-01')
+SELECT strftime('%j', '2024-06-15')
+SELECT strftime('%j', '2024-12-31')
+SELECT strftime('%w', '2024-06-15')
+SELECT strftime('%w', '2000-01-01')
+SELECT strftime('a%%b', '2024-01-01')
+SELECT strftime('%Z', '2024-01-01')
+SELECT typeof(strftime('%Y', NULL))
+SELECT typeof(strftime('%Y', '2024-13-01'))
+
+# ORDER BY + LIMIT/OFFSET (Iter15)
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t ORDER BY x
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t ORDER BY x ASC
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t ORDER BY x DESC
+CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 'c'), (1, 'a'), (1, 'b'); SELECT * FROM t ORDER BY a, b
+CREATE TABLE t(a, b); INSERT INTO t VALUES (2, 'a'), (1, 'b'), (2, 'c'); SELECT * FROM t ORDER BY a DESC, b ASC
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t LIMIT 2
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t LIMIT 0
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t LIMIT 100
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t LIMIT 1 OFFSET 1
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t LIMIT 1, 2
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t ORDER BY x LIMIT 2
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t ORDER BY x DESC LIMIT 1 OFFSET 1
+CREATE TABLE t(x); INSERT INTO t VALUES (5), (3), (1); SELECT x*2 FROM t ORDER BY x
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (3), (2); SELECT * FROM t WHERE x > 1 ORDER BY x DESC
+SELECT * FROM (VALUES (1), (NULL), (2)) ORDER BY column1
+SELECT * FROM (VALUES (1), (NULL), (2)) ORDER BY column1 DESC
+SELECT * FROM (VALUES ('b'), ('a'), ('c')) ORDER BY column1
+SELECT * FROM (VALUES (10), (1), (2)) ORDER BY column1
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2); SELECT * FROM t LIMIT -1
+CREATE TABLE t(a, b); INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b'); SELECT a, b FROM t ORDER BY 2
+CREATE TABLE t(a, b); INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b'); SELECT a, b FROM t ORDER BY 1
+CREATE TABLE t(a, b); INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b'); SELECT a, b FROM t ORDER BY 2 DESC
+CREATE TABLE t(a, b); INSERT INTO t VALUES (3, 'c'), (1, 'a'), (2, 'b'); SELECT a*10, b FROM t ORDER BY 1
+
+# DISTINCT (Iter16)
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (1), (3), (2); SELECT DISTINCT x FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (NULL), (1), (NULL); SELECT DISTINCT x FROM t
+CREATE TABLE t(a, b); INSERT INTO t VALUES (1, 'a'), (1, 'b'), (1, 'a'); SELECT DISTINCT a, b FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2), (3), (1); SELECT DISTINCT x FROM t ORDER BY x
+CREATE TABLE t(x); INSERT INTO t VALUES (3), (1), (2), (3), (1); SELECT DISTINCT x FROM t ORDER BY x DESC
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3), (1), (2); SELECT DISTINCT x FROM t LIMIT 2
+SELECT DISTINCT 1
+SELECT DISTINCT 1, 1, 1
+CREATE TABLE t(x); INSERT INTO t VALUES (1.0), (1), (1.0); SELECT DISTINCT x FROM t
+
+# DELETE / UPDATE (Iter18)
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); DELETE FROM t WHERE x > 1; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); DELETE FROM t; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); DELETE FROM t WHERE x = 99; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1); DELETE FROM t WHERE x = 1; SELECT * FROM t
+CREATE TABLE t(x, y); INSERT INTO t VALUES (1, 'a'), (2, 'b'); UPDATE t SET y = 'X' WHERE x = 1; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); UPDATE t SET x = x * 10; SELECT * FROM t
+CREATE TABLE t(x, y); INSERT INTO t VALUES (1, 'a'); UPDATE t SET x = 99, y = 'Z'; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); UPDATE t SET x = NULL WHERE x = 1; SELECT * FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1); UPDATE t SET y = 1
+CREATE TABLE t(x); INSERT INTO t VALUES (1); DELETE FROM nonexistent
+
+# 集約関数 (Iter17) — count/sum/avg/min/max/total
+SELECT count(*)
+SELECT count(1)
+SELECT count(NULL)
+SELECT min(1)
+SELECT max(1)
+SELECT min(3, 1, 2)
+SELECT max(3, 1, 2)
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT count(*) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT count(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT avg(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT min(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT max(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT total(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (NULL), (3); SELECT count(x), count(*), sum(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (NULL), (3); SELECT min(x), max(x), avg(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (NULL), (NULL); SELECT sum(x), avg(x), min(x), max(x), total(x) FROM t
+CREATE TABLE t(x); SELECT count(*), sum(x), avg(x), min(x), max(x), total(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT typeof(sum(x)), typeof(avg(x)), typeof(total(x)), typeof(min(x)), typeof(max(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1.5), (2.5); SELECT sum(x), typeof(sum(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2.0); SELECT sum(x), typeof(sum(x)) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES ('hello'), ('world'); SELECT min(x), max(x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x*2) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x) + 100 FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT count(*) FROM t WHERE x > 1
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2), (3); SELECT sum(x) FROM t WHERE x > 100
+
+# GROUP BY (Iter17)
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, count(*) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, sum(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, min(v), max(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3), ('b', 4); SELECT g, avg(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', NULL), ('a', 1), ('b', NULL); SELECT g, count(v), count(*), sum(v) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(a, b, v); INSERT INTO t VALUES (1, 'x', 10), (1, 'x', 20), (1, 'y', 30); SELECT a, b, sum(v) FROM t GROUP BY a, b ORDER BY a, b
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g, sum(v) FROM t WHERE v > 1 GROUP BY g ORDER BY g
+CREATE TABLE t(g); INSERT INTO t VALUES (1), (NULL), (1), (NULL); SELECT g, count(*) FROM t GROUP BY g ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 4); SELECT g, sum(v) FROM t GROUP BY g ORDER BY sum(v) DESC
+
+# HAVING (Iter17)
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3); SELECT g FROM t GROUP BY g HAVING count(*) > 1
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('a', 2), ('b', 3), ('c', 4); SELECT g, sum(v) FROM t GROUP BY g HAVING sum(v) >= 3 ORDER BY g
+CREATE TABLE t(g, v); INSERT INTO t VALUES ('a', 1), ('b', 2); SELECT g FROM t GROUP BY g HAVING g = 'a'
+# HAVING without GROUP BY and without aggregates: sqlite3 errors with "HAVING clause on a non-aggregate query"
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT x FROM t HAVING x > 1
+CREATE TABLE t(x); INSERT INTO t VALUES (1), (2); SELECT 1 FROM t HAVING 0
+
+# DISTINCT inside aggregates (Iter17.A): NULL skipped, "IS NOT DISTINCT FROM" dedup
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT count(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT sum(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT avg(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT min(DISTINCT x), max(DISTINCT x) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(NULL),(1); SELECT total(DISTINCT x) FROM t
+# numeric class merges INTEGER/REAL but text '1' is its own group → 2 distinct
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(1.0),('1'); SELECT count(DISTINCT x) FROM t
+# DISTINCT only filters non-NULL; count(DISTINCT) on all-NULL → 0; sum/avg → NULL
+CREATE TABLE t(x); INSERT INTO t VALUES (NULL),(NULL); SELECT count(DISTINCT x), sum(DISTINCT x), avg(DISTINCT x) FROM t
+# DISTINCT with GROUP BY: per-group dedup
+CREATE TABLE t(g,v); INSERT INTO t VALUES ('a',1),('a',1),('a',2),('b',1),('b',NULL); SELECT g, count(DISTINCT v), sum(DISTINCT v) FROM t GROUP BY g ORDER BY g
+# DISTINCT with WHERE filter applied first
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(2),(3),(1); SELECT count(DISTINCT x) FROM t WHERE x >= 2
+# DISTINCT with HAVING
+CREATE TABLE t(g,v); INSERT INTO t VALUES ('a',1),('a',1),('a',2),('b',3),('b',3); SELECT g FROM t GROUP BY g HAVING count(DISTINCT v) > 1
+# DISTINCT 0-arg (count) and DISTINCT 2-arg → sqlite3 errors
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2); SELECT count(DISTINCT) FROM t
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2); SELECT count(DISTINCT x, 1) FROM t
+
+# Iter19.A: comma-separated FROM (Cartesian product) + qualified column refs
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a, b
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a, b WHERE x = 1
+CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); SELECT a.x, b.x FROM a, b
+# bare column matching only one source resolves; matching multiple sources errors
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); SELECT y FROM a, b
+CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); SELECT x FROM a, b
+# AS alias replaces the bare table name as the qualifier
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT t.x FROM a AS t
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT a.x FROM a AS t
+# self-join via aliases
+CREATE TABLE a(x); INSERT INTO a VALUES (1),(2),(3); SELECT t1.x, t2.x FROM a t1, a t2 WHERE t1.x = t2.x ORDER BY t1.x
+# duplicate alias with explicit qualified ref → ambiguous
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT t.x FROM a t, a t
+# qualified-star expansion preserves source order
+CREATE TABLE a(p,q); CREATE TABLE b(r,s); INSERT INTO a VALUES (1,2); INSERT INTO b VALUES (3,4); SELECT a.*, b.* FROM a, b
+CREATE TABLE a(p,q); CREATE TABLE b(r); INSERT INTO a VALUES (1,2); INSERT INTO b VALUES (10); SELECT b.*, a.* FROM a, b
+# qualified ref to non-existent qualifier
+CREATE TABLE a(x); INSERT INTO a VALUES (1); SELECT t.x FROM a
+# Cartesian + aggregate
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20),(30); SELECT count(*) FROM a, b
+# WHERE refers to qualified column
+CREATE TABLE a(x); CREATE TABLE b(x); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (1),(3); SELECT a.x FROM a, b WHERE a.x = b.x
+
+# Iter19.B: CROSS JOIN / INNER JOIN / JOIN keywords + ON
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a CROSS JOIN b
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a INNER JOIN b ON x = 1
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a JOIN b
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a JOIN b ON 0
+CREATE TABLE a(x,k); CREATE TABLE b(k,y); INSERT INTO a VALUES (1,'p'),(2,'q'); INSERT INTO b VALUES ('p',100),('q',200); SELECT * FROM a JOIN b ON a.k = b.k ORDER BY a.x
+# combine JOIN ON with outer WHERE
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a JOIN b ON x = 1 WHERE y = 20
+# three-way join chain
+CREATE TABLE a(x); CREATE TABLE b(y); CREATE TABLE c(z); INSERT INTO a VALUES (1); INSERT INTO b VALUES (2); INSERT INTO c VALUES (3); SELECT * FROM a JOIN b ON 1 JOIN c ON 1
+# CROSS JOIN with ON (sqlite3 permits even though logically odd)
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10); SELECT * FROM a CROSS JOIN b ON x = 1
+
+# Iter19.C: LEFT [OUTER] JOIN — keeps every left row, NULL-pads unmatched right
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2),(3); INSERT INTO b VALUES (1),(3); SELECT * FROM a LEFT JOIN b ON x = y ORDER BY x
+# OUTER keyword is optional
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (10),(20); SELECT * FROM a LEFT OUTER JOIN b ON 0 ORDER BY x
+# empty right table → all left rows with NULL
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); SELECT * FROM a LEFT JOIN b ON 1 ORDER BY x
+# LEFT JOIN with no ON behaves like cross when right has rows
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1); INSERT INTO b VALUES (10),(20); SELECT * FROM a LEFT JOIN b ORDER BY y
+# nested LEFT JOINs preserve unmatched-row propagation
+CREATE TABLE a(x); CREATE TABLE b(y); CREATE TABLE c(z); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (1); INSERT INTO c VALUES (1); SELECT * FROM a LEFT JOIN b ON x = y LEFT JOIN c ON x = z ORDER BY x
+# LEFT JOIN with WHERE filtering NULL row → unmatched rows excluded by WHERE
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2),(3); INSERT INTO b VALUES (1); SELECT * FROM a LEFT JOIN b ON x = y WHERE y IS NULL ORDER BY x
+
+# Iter20: UNION / UNION ALL / INTERSECT / EXCEPT
+SELECT 1 UNION SELECT 2
+SELECT 1 UNION ALL SELECT 1
+SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 1
+# UNION dedup keeps last seen value's storage class (sqlite3 quirk)
+SELECT 1 UNION SELECT 1.0
+SELECT 1.0 UNION SELECT 1
+SELECT 1 UNION SELECT 1.0 UNION SELECT 1
+SELECT 1 INTERSECT SELECT 1
+SELECT 1 INTERSECT SELECT 2
+SELECT 1 EXCEPT SELECT 1
+SELECT 1 EXCEPT SELECT 2
+# chain-level LIMIT / ORDER BY apply to combined result
+SELECT 1 UNION ALL SELECT 2 LIMIT 1
+SELECT 2 UNION ALL SELECT 1 ORDER BY 1
+SELECT 1 UNION ALL SELECT 2 ORDER BY 1 DESC LIMIT 1
+# storage-class boundary: integer 1 and text '1' are distinct under UNION
+SELECT 1 UNION SELECT '1'
+# NULL == NULL under UNION dedup
+SELECT NULL UNION SELECT NULL
+# left-to-right associativity: (1 UNION 2) INTERSECT 2 = {2}, not 1 UNION (2 INTERSECT 2)
+SELECT 1 UNION SELECT 2 INTERSECT SELECT 2
+# (1 INTERSECT 2) UNION 1 = {} UNION 1 = {1}
+SELECT 1 INTERSECT SELECT 2 UNION SELECT 1
+# column count mismatch → error in both engines
+SELECT 1 UNION SELECT 1, 2
+# ORDER BY before UNION → sqlite3 errors with "ORDER BY clause should come after UNION"
+SELECT 1 ORDER BY 1 UNION SELECT 2
+# table data + UNION + outer ORDER BY
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(2),(3); SELECT x FROM t UNION SELECT 99 ORDER BY 1
+# INTERSECT/EXCEPT against table sources
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (2),(3); SELECT x FROM a INTERSECT SELECT y FROM b
+CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (1),(2); INSERT INTO b VALUES (2),(3); SELECT x FROM a EXCEPT SELECT y FROM b
+# duplicate-row dedup on the LEFT side of INTERSECT
+CREATE TABLE t(x); INSERT INTO t VALUES (1),(1),(2); SELECT x FROM t INTERSECT SELECT 1
+# INSERT INTO t SELECT ... UNION
+CREATE TABLE t(x); INSERT INTO t SELECT 1 UNION SELECT 2; SELECT x FROM t ORDER BY 1
+# SELECT ALL (explicit non-distinct counterpart, sqlite3 quirk)
+SELECT ALL 1 UNION SELECT 2
+# Iter21: subqueries in FROM
+# bare subquery, single bare-ref column
+SELECT a FROM (SELECT 1 AS a)
+# star expansion of inline-aliased subquery
+SELECT * FROM (SELECT 1 AS a, 2 AS b)
+# subquery over a real table; outer projection
+CREATE TABLE t21(x INT, y INT); INSERT INTO t21 VALUES (1,10),(2,20),(3,30); SELECT x FROM (SELECT * FROM t21 WHERE y > 15) ORDER BY 1
+# qualified ref via subquery alias
+SELECT t.a FROM (SELECT 1 AS a, 2 AS b) AS t
+# multi-row subquery + WHERE on outer side
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(2),(3); SELECT x FROM (SELECT x FROM t21) WHERE x > 1 ORDER BY x
+# aggregate over a UNION subquery
+SELECT count(*), sum(x) FROM (SELECT 1 AS x UNION SELECT 2 UNION SELECT 3)
+# nested subquery (subquery inside subquery)
+SELECT * FROM (SELECT * FROM (SELECT 1 AS a, 2 AS b))
+# subquery with ORDER BY + LIMIT, outer projection
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (3),(1),(2),(4); SELECT x FROM (SELECT x FROM t21 ORDER BY x DESC LIMIT 2) ORDER BY x
+# subquery joined to a regular table via comma-FROM
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(2); SELECT s.v, t21.x FROM (SELECT 10 AS v) AS s, t21 ORDER BY t21.x
+# inner GROUP BY surfaced into outer projection
+CREATE TABLE t21(g INT, v INT); INSERT INTO t21 VALUES (1,10),(1,20),(2,30); SELECT g, total FROM (SELECT g, sum(v) AS total FROM t21 GROUP BY g) ORDER BY g
+# DISTINCT inside subquery, COUNT outside
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(1),(2),(2),(3); SELECT count(*) FROM (SELECT DISTINCT x FROM t21)
+# subquery returning no rows + outer projection (empty result)
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (1),(2); SELECT x FROM (SELECT x FROM t21 WHERE x > 99)
+# LEFT JOIN against a subquery (verifies subquery+join interaction)
+CREATE TABLE a21(id INT); INSERT INTO a21 VALUES (1),(2),(3); SELECT a21.id, s.v FROM a21 LEFT JOIN (SELECT 1 AS id, 100 AS v) AS s ON a21.id = s.id ORDER BY a21.id
+# ORDER BY referencing a subquery's projected column name (not in outer SELECT list)
+SELECT 1 FROM (SELECT 'a' AS k) ORDER BY k
+# ORDER BY referencing a subquery-projected column from a multi-row source
+CREATE TABLE t21(x INT); INSERT INTO t21 VALUES (3),(1),(2); SELECT 1 FROM (SELECT x AS sortkey FROM t21) ORDER BY sortkey
+# Iter22.B: scalar subquery in expression position
+# bare scalar subquery (FROM-less, single literal)
+SELECT (SELECT 42)
+# scalar subquery in SELECT list paired with a FROM-clause column
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); SELECT x, (SELECT max(x) FROM t22) AS m FROM t22 ORDER BY x
+# scalar subquery in WHERE
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); SELECT x FROM t22 WHERE x = (SELECT max(x) FROM t22)
+# scalar subquery in ORDER BY (drives ascending sort key)
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (3),(1),(2); SELECT x FROM t22 ORDER BY (SELECT x FROM t22 LIMIT 1) - x
+# empty scalar subquery → NULL (formatted as empty string by both engines)
+CREATE TABLE t22(x); SELECT (SELECT x FROM t22)
+# multi-row scalar subquery — sqlite3 picks the first row, no error
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2); SELECT (SELECT x FROM t22)
+# multi-column scalar subquery → both engines error
+SELECT (SELECT 1, 2)
+# scalar subquery with aggregate
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (10),(20),(30); SELECT (SELECT count(*) FROM t22) AS n
+# scalar subquery used in arithmetic
+SELECT (SELECT 7) * 6
+# scalar subquery as WHERE filter against another table
+CREATE TABLE a22(x); CREATE TABLE b22(y); INSERT INTO a22 VALUES (1),(2),(3); INSERT INTO b22 VALUES (5); SELECT x FROM a22 WHERE x < (SELECT y FROM b22) ORDER BY x
+# DELETE WHERE with scalar subquery (Iter22.A symmetry: DML eval also threads db)
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); DELETE FROM t22 WHERE x = (SELECT max(x) FROM t22); SELECT x FROM t22 ORDER BY x
+# UPDATE SET with scalar subquery RHS
+CREATE TABLE t22(x); INSERT INTO t22 VALUES (1),(2),(3); UPDATE t22 SET x = (SELECT max(x) FROM t22) WHERE x = 1; SELECT x FROM t22 ORDER BY x
+# Iter22.C: IN (SELECT ...) and EXISTS (SELECT ...) subqueries
+# IN (SELECT) basic positive
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); SELECT x FROM t22c WHERE x IN (SELECT 2 UNION SELECT 3) ORDER BY x
+# NOT IN (SELECT) basic
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); SELECT x FROM t22c WHERE x NOT IN (SELECT 2) ORDER BY x
+# IN with empty subquery — left ignored, always 0 / NOT always 1
+SELECT 1 IN (SELECT 1 WHERE 1=0)
+SELECT 1 NOT IN (SELECT 1 WHERE 1=0)
+# IN with NULL left + empty subquery — empty wins (0), not NULL
+SELECT NULL IN (SELECT 1 WHERE 1=0)
+# NULL three-valued logic with IN-subquery
+SELECT NULL IN (SELECT 1)
+SELECT 1 IN (SELECT NULL UNION SELECT 2)
+SELECT 1 IN (SELECT NULL UNION SELECT 1)
+SELECT 1 NOT IN (SELECT NULL UNION SELECT 2)
+SELECT 1 NOT IN (SELECT NULL UNION SELECT 1)
+# IN-subquery against a real table
+CREATE TABLE t22c(x); CREATE TABLE u22c(y); INSERT INTO t22c VALUES (1),(2),(3); INSERT INTO u22c VALUES (2),(4); SELECT x FROM t22c WHERE x IN (SELECT y FROM u22c) ORDER BY x
+# IN-subquery multi-column → error (sqlite3 catches at parse, we at execute — both error)
+SELECT 1 IN (SELECT 1, 2)
+# EXISTS basic — non-empty truthy
+SELECT EXISTS (SELECT 1)
+SELECT EXISTS (SELECT 1 WHERE 1=0)
+# NOT EXISTS — wraps via logical_not
+SELECT NOT EXISTS (SELECT 1)
+SELECT NOT EXISTS (SELECT 1 WHERE 1=0)
+# EXISTS ignores column count
+SELECT EXISTS (SELECT 1, 2, 3)
+# EXISTS over a real table with WHERE
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); SELECT EXISTS (SELECT 1 FROM t22c WHERE x > 5)
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); SELECT EXISTS (SELECT 1 FROM t22c WHERE x > 1)
+# EXISTS in WHERE filter with multiple outer rows
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); SELECT x FROM t22c WHERE EXISTS (SELECT 1 FROM t22c WHERE x > 100)
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); SELECT x FROM t22c WHERE EXISTS (SELECT 1) ORDER BY x
+# DML symmetry: DELETE WHERE IN (SELECT)
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); DELETE FROM t22c WHERE x IN (SELECT 2 UNION SELECT 3); SELECT x FROM t22c ORDER BY x
+# DML symmetry: DELETE WHERE EXISTS (...)
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); DELETE FROM t22c WHERE EXISTS (SELECT 1 WHERE 1=0); SELECT x FROM t22c ORDER BY x
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); DELETE FROM t22c WHERE EXISTS (SELECT 1); SELECT x FROM t22c ORDER BY x
+# UPDATE SET = (subquery) where IN-subquery is used in WHERE
+CREATE TABLE t22c(x); INSERT INTO t22c VALUES (1),(2),(3); UPDATE t22c SET x = 99 WHERE x IN (SELECT 2 UNION SELECT 3); SELECT x FROM t22c ORDER BY x
+# Iter22.C side-effect: applyIn empty-list bugfix — `NULL IN (empty)` now matches sqlite3 (0)
+SELECT NULL IN ()
+# EXISTS (SELECT NULL) — verify the row-with-NULL still counts as existing
+SELECT EXISTS (SELECT NULL)
+# Iter22.D: correlated subqueries (outer_frames in EvalContext)
+# qualified outer ref via EXISTS
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(3); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE b22d.x = a22d.x) ORDER BY a22d.x
+# qualified outer ref via NOT EXISTS
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(3); SELECT a22d.x FROM a22d WHERE NOT EXISTS (SELECT 1 FROM b22d WHERE b22d.x = a22d.x) ORDER BY a22d.x
+# correlated scalar in SELECT list
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(3); SELECT a22d.x, (SELECT max(b22d.x) FROM b22d WHERE b22d.x <= a22d.x) FROM a22d ORDER BY a22d.x
+# inner-bare-name binds to inner FROM (sqlite3 inner-wins rule)
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (10); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE x = a22d.x)
+# inner has no x → bare x falls through to outer
+CREATE TABLE a22d(x); INSERT INTO a22d VALUES (1),(2); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 WHERE x = a22d.x) ORDER BY a22d.x
+# correlated IN: outer row drives inner WHERE
+CREATE TABLE a22d(x); CREATE TABLE b22d(k, y); INSERT INTO a22d VALUES (1),(2),(3); INSERT INTO b22d VALUES (1, 100),(3, 300); SELECT a22d.x FROM a22d WHERE a22d.x IN (SELECT k FROM b22d WHERE b22d.y > 50) ORDER BY a22d.x
+# correlated IN with explicit outer ref in inner WHERE
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2),(3); INSERT INTO b22d VALUES (1),(2),(3); SELECT a22d.x FROM a22d WHERE a22d.x IN (SELECT b22d.x FROM b22d WHERE b22d.x = a22d.x) ORDER BY a22d.x
+# correlated subquery in DELETE WHERE
+CREATE TABLE a22d(x); CREATE TABLE b22d(k); INSERT INTO a22d VALUES (1),(2),(3); INSERT INTO b22d VALUES (2); DELETE FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE b22d.k = a22d.x); SELECT x FROM a22d ORDER BY x
+# correlated scalar with no inner match → NULL
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2),(99); INSERT INTO b22d VALUES (1),(2); SELECT a22d.x, (SELECT b22d.x FROM b22d WHERE b22d.x = a22d.x) FROM a22d ORDER BY a22d.x
+# nested correlated: inner subquery references outermost a
+CREATE TABLE a22d(x); CREATE TABLE b22d(x); INSERT INTO a22d VALUES (1),(2); INSERT INTO b22d VALUES (1),(2); SELECT a22d.x FROM a22d WHERE EXISTS (SELECT 1 FROM b22d WHERE EXISTS (SELECT 1 WHERE b22d.x = a22d.x)) ORDER BY a22d.x
+# DELETE + same-table IN: subquery materialised once before deletion (sqlite3 atomic semantics)
+CREATE TABLE t22d_self(x); INSERT INTO t22d_self VALUES (1),(2),(3); DELETE FROM t22d_self WHERE x IN (SELECT x FROM t22d_self WHERE x > 1); SELECT x FROM t22d_self ORDER BY x
+# strftime %s: epoch seconds at 1970-01-01 → 0
+SELECT strftime('%s', '1970-01-01 00:00:00')
+SELECT strftime('%s', '1970-01-01')
+# strftime %s: known reference times
+SELECT strftime('%s', '2024-01-01 12:30:45')
+SELECT strftime('%s', '2000-01-01 00:00:00')
+SELECT strftime('%s', '1969-12-31 23:59:59')
+# strftime %J: Julian day, exact at noon UTC
+SELECT strftime('%J', '2000-01-01 12:00:00')
+# strftime %J: midnight → JDN - 0.5
+SELECT strftime('%J', '1970-01-01 00:00:00')
+SELECT strftime('%J', '1970-01-01')
+# strftime %J: fractional time-of-day
+SELECT strftime('%J', '2024-01-01 12:30:45')
+# strftime %s: NULL input → NULL
+SELECT strftime('%s', NULL)
+SELECT strftime('%J', NULL)
+# strftime %s: invalid date → NULL
+SELECT strftime('%s', 'bogus')
+SELECT strftime('%J', '2024-13-01')
+# Iter20.A: setop chain ORDER BY <name> resolves against leftmost branch
+SELECT 1 AS x UNION SELECT 2 ORDER BY x
+SELECT 1 AS x UNION SELECT 2 ORDER BY x DESC
+# leftmost-wins: alias from branch 1 binds even when branch 2 has no alias
+SELECT 2 AS k UNION SELECT 1 ORDER BY k
+# case-insensitive match on the leftmost name
+SELECT 1 AS x UNION SELECT 2 ORDER BY X
+# multi-column: ORDER BY <name> picks the right column
+SELECT 3 AS a, 1 AS b UNION SELECT 1, 2 UNION SELECT 2, 3 ORDER BY b
+# table source's column name flows through
+CREATE TABLE t20o(name); INSERT INTO t20o VALUES ('b'),('a'),('c'); SELECT name FROM t20o UNION SELECT 'z' ORDER BY name
+# ORDER BY <name> chained with INTERSECT
+CREATE TABLE x20o(v); CREATE TABLE y20o(v); INSERT INTO x20o VALUES (3),(1),(2); INSERT INTO y20o VALUES (2),(1); SELECT v FROM x20o INTERSECT SELECT v FROM y20o ORDER BY v
+# expression ORDER BY in setop chain → both engines reject
+SELECT 1 AS x UNION SELECT 2 ORDER BY abs(x)
+# unknown name → both engines reject
+SELECT 1 AS x UNION SELECT 2 ORDER BY z
+# qualified name in chain ORDER BY → both engines reject (no source scope)
+SELECT 1 AS x UNION SELECT 2 ORDER BY t.x
+# Iter19.D: ambiguous SELECT * across duplicate-alias FROM
+# duplicate alias on same table → ambiguous expansion
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT * FROM a19d t, a19d t
+# duplicate qualifier across two tables sharing a column name
+CREATE TABLE a19d(x); CREATE TABLE b19d(x); SELECT * FROM a19d t, b19d t
+# bare-name conflict (no explicit alias → table name acts as qualifier)
+CREATE TABLE a19d(x); SELECT * FROM a19d, a19d
+# t.* picks just the qualifier-matched columns; same condition applies
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT t.* FROM a19d t, a19d t
+# subquery alias collision via FROM
+CREATE TABLE a19d(x); SELECT * FROM (SELECT 1 AS y) t, (SELECT 2 AS y) t
+# case-insensitive match on qualifier
+CREATE TABLE a19d(x); SELECT * FROM a19d T, a19d t
+# accepted: distinct column names share a qualifier (sqlite3 OK)
+CREATE TABLE a19d(x); CREATE TABLE b19d(y); INSERT INTO a19d VALUES(1); INSERT INTO b19d VALUES(2); SELECT * FROM a19d t, b19d t
+# accepted: same table without star
+CREATE TABLE a19d(x); INSERT INTO a19d VALUES(1); SELECT 1 FROM a19d t, a19d t
+# accepted: SELECT *, * (cross-star duplicates allowed by sqlite3)
