@@ -25,6 +25,7 @@ const engine_dml = @import("engine_dml.zig");
 const engine_ddl_file = @import("engine_ddl_file.zig");
 const engine_meta = @import("engine_meta.zig");
 const engine_cte = @import("engine_cte.zig");
+const stmt_cte_mod = @import("stmt_cte.zig");
 const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
@@ -52,14 +53,18 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     p.db = db;
     defer p.db = saved_db;
 
+    // Iter31.Z + .AB — `WITH name AS (...)` prefix is consumed here so
+    // it composes with SELECT and every DML uniformly. Restored on exit.
+    const saved_ctes = db.transient_ctes;
+    defer db.transient_ctes = saved_ctes;
+    if (p.cur.kind == .keyword_with) {
+        const ctes = try stmt_cte_mod.parseWithClause(p);
+        try engine_cte.materialize(db, p.allocator, ctes);
+    }
+
     switch (p.cur.kind) {
-        .keyword_select, .keyword_with => {
+        .keyword_select => {
             const parsed = try stmt_mod.parseSelectStatement(p);
-            // Iter31.Z — CTEs publish to db.transient_ctes incrementally
-            // so a later CTE can see earlier ones; restored on exit.
-            const saved_ctes = db.transient_ctes;
-            defer db.transient_ctes = saved_ctes;
-            if (parsed.with_ctes.len > 0) try engine_cte.materialize(db, p.allocator, parsed.with_ctes);
             const arena_rows = try executeSelect(db, p.allocator, parsed);
             const long_rows = try dupeRowsToLongLived(db.allocator, arena_rows);
             return .{ .select = long_rows };
@@ -81,11 +86,8 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
             return .create_table;
         },
         .keyword_insert => {
+            // executeInsert dispatches on db.pager (in-memory vs file).
             const parsed = try stmt_mod.parseInsertStatement(p);
-            // INSERT is the first DDL/DML to gain a file-mode path
-            // (Iter26.A.1) — `executeInsert` itself dispatches on
-            // `db.pager`. CREATE TABLE / DELETE / UPDATE still go
-            // through the read-only guard.
             const rowcount = try engine_dml.executeInsert(db, p.allocator, parsed);
             db.last_changes = @intCast(rowcount);
             db.total_changes += @intCast(rowcount);
@@ -93,9 +95,6 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_delete => {
             const parsed = try stmt_dml.parseDeleteStatement(p);
-            // executeDelete dispatches on `t.root_page` — file-mode is
-            // handled via Pager + rebuild-page (Iter26.A.2.a). The
-            // read-only guard no longer applies here.
             const rowcount = try engine_dml.executeDelete(db, p.allocator, parsed);
             db.last_changes = @intCast(rowcount);
             db.total_changes += @intCast(rowcount);
@@ -103,8 +102,6 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
         },
         .keyword_update => {
             const parsed = try stmt_dml.parseUpdateStatement(p);
-            // executeUpdate dispatches on `t.root_page` — file-mode is
-            // handled via Pager + rebuild-page (Iter26.A.2.b).
             const rowcount = try engine_dml.executeUpdate(db, p.allocator, parsed);
             db.last_changes = @intCast(rowcount);
             db.total_changes += @intCast(rowcount);

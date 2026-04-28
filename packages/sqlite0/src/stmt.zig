@@ -44,12 +44,6 @@ pub const ParsedSelect = struct {
     order_by: []OrderTerm = &.{},
     limit: ?*ast.Expr = null,
     offset: ?*ast.Expr = null,
-    /// Iter31.Z — `WITH name AS (SELECT ...) [, ...]` prefix. Empty when
-    /// the SELECT had no WITH clause. Only set on the top-level
-    /// `parseSelectStatement` result; setop branches and CTE bodies go
-    /// through `parseSelectInner` directly so they can never carry CTEs
-    /// (sqlite3 rejects nested WITH at most positions; we reject in all).
-    with_ctes: []ParsedCte = &.{},
 };
 
 // Set-op types live in stmt_setop.zig; re-exported to keep call sites
@@ -97,14 +91,7 @@ pub const freeParsedFrom = stmt_from.freeParsedFrom;
 pub const freeFromList = stmt_from.freeFromList;
 
 pub fn parseSelectStatement(p: *Parser) Error!ParsedSelect {
-    var with_ctes: []ParsedCte = &.{};
-    errdefer freeCtes(p.allocator, with_ctes);
-    if (p.cur.kind == .keyword_with) {
-        with_ctes = try stmt_cte.parseWithClause(p);
-    }
-    var ps = try parseSelectInner(p, true);
-    ps.with_ctes = with_ctes;
-    return ps;
+    return parseSelectInner(p, true);
 }
 
 /// Iter20 set-op support: `allow_post = true` is the outer call (parses
@@ -246,7 +233,6 @@ pub fn freeParsedSelectFields(allocator: std.mem.Allocator, ps: ParsedSelect) vo
     freeOrderTerms(allocator, ps.order_by);
     if (ps.limit) |e| e.deinit(allocator);
     if (ps.offset) |e| e.deinit(allocator);
-    if (ps.with_ctes.len > 0) freeCtes(allocator, ps.with_ctes);
 }
 
 /// Parse `GROUP BY e1 [, e2 ...]`. Bare positive integer literal is a
