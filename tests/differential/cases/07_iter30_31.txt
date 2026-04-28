@@ -446,3 +446,10 @@ SELECT ifnull(NULL, 1)
 SELECT ifnull(NULL, NULL)
 SELECT coalesce(NULL, NULL, 1)
 SELECT coalesce(NULL, NULL, NULL, NULL, 'last')
+SELECT 1 + 1 AS x FROM (VALUES(1)) ORDER BY x
+SELECT column1 AS y FROM (VALUES(1),(2),(3)) ORDER BY y
+SELECT column1 + 1 AS z FROM (VALUES(1),(2),(3)) ORDER BY z
+SELECT column1+column2 AS s FROM (VALUES(1,2),(3,4)) ORDER BY s
+SELECT count(*) AS cnt FROM (VALUES(1),(1),(2)) GROUP BY column1 ORDER BY cnt DESC
+SELECT column1+column2 AS s FROM (VALUES(1,2),(3,4)) GROUP BY s ORDER BY s
+SELECT column1 + 1 AS z FROM (VALUES(3),(1),(2)) ORDER BY z DESC

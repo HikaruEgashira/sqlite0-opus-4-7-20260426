@@ -173,6 +173,10 @@ fn evaluateGroupKey(
         // the SELECT-list column at that 1-based index. `*` items are
         // rejected (sqlite3 errors "GROUP BY term out of range") because
         // they expand to multiple columns; we collapse to SyntaxError.
+        // Also: an unqualified column-ref that matches a SELECT-list alias
+        // resolves to that aliased expression (sqlite3 ORDER BY / GROUP BY
+        // alias resolution; a bare name that's not a source column nor an
+        // alias falls through to evalExpr where it raises "no such column").
         const target = if (group_by[produced].position) |pos| blk: {
             if (pos == 0 or pos > items.len) return Error.SyntaxError;
             const item = items[pos - 1];
@@ -180,10 +184,23 @@ fn evaluateGroupKey(
                 .star => return Error.SyntaxError,
                 .expr => |e| break :blk e.expr,
             }
-        } else group_by[produced].expr;
+        } else (resolveGroupByAlias(group_by[produced].expr, items) orelse group_by[produced].expr);
         key[produced] = try eval.evalExpr(ctx, target);
     }
     return key;
+}
+
+fn resolveGroupByAlias(expr: *ast.Expr, items: []const select.SelectItem) ?*ast.Expr {
+    if (expr.* != .column_ref) return null;
+    const cref = expr.*.column_ref;
+    if (cref.qualifier != null) return null;
+    for (items) |item| switch (item) {
+        .star => {},
+        .expr => |e| if (e.alias) |alias| {
+            if (std.ascii.eqlIgnoreCase(alias, cref.name)) return e.expr;
+        },
+    };
+    return null;
 }
 
 fn findGroup(groups: []const Group, key: []const Value) ?usize {

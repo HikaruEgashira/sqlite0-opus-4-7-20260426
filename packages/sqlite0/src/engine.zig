@@ -424,9 +424,16 @@ fn validateLiteralOne(expr: *ast.Expr, max_pos: i64) !void {
 fn postProcessFromParsed(alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) !select_mod.PostProcess {
     const order = try alloc.alloc(select_mod.OrderTerm, ps.order_by.len);
     for (ps.order_by, order) |term, *out| {
+        // sqlite3 ORDER BY name resolution: unqualified column-ref that
+        // matches a SELECT-list AS alias becomes a positional reference
+        // to that column. (Source-column resolution still wins when
+        // the name shadows an alias — but the FROM-source code path
+        // tries source columns first, so this fallback only kicks in
+        // when the name truly isn't a source column.)
+        const resolved_pos = if (term.position == null) resolveAliasPosition(term.expr, ps.items) else term.position;
         out.* = .{
             .expr = term.expr,
-            .position = term.position,
+            .position = resolved_pos,
             .descending = term.dir == .desc,
         };
     }
@@ -436,6 +443,19 @@ fn postProcessFromParsed(alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) !s
         .limit = ps.limit,
         .offset = ps.offset,
     };
+}
+
+fn resolveAliasPosition(expr: *ast.Expr, items: []const select_mod.SelectItem) ?usize {
+    if (expr.* != .column_ref) return null;
+    const cref = expr.*.column_ref;
+    if (cref.qualifier != null) return null;
+    for (items, 1..) |item, idx| switch (item) {
+        .star => {},
+        .expr => |e| if (e.alias) |alias| {
+            if (std.ascii.eqlIgnoreCase(alias, cref.name)) return idx;
+        },
+    };
+    return null;
 }
 
 /// Look up a table by user-supplied (possibly mixed-case) name. `scratch` is
