@@ -475,3 +475,18 @@ PRAGMA auto_vacuum;
 PRAGMA temp_store;
 PRAGMA recursive_triggers;
 PRAGMA defer_foreign_keys;
+
+# Unknown PRAGMA silent no-op (Iter31.X):
+#  * sqlite3 silently ignores PRAGMAs it doesn't recognize (many builds
+#    differ in which pragmas exist; tools probe optional ones at setup
+#    time). sqlite0 used to error with SyntaxError, blocking legitimate
+#    clients. Now returns an empty SELECT result — same exit code 0,
+#    no output.
+#  * Single-ident arg form (`PRAGMA bogus(passive)`) also silent.
+#  * `case_sensitive_like` and similar Iter31.W deferred-set members
+#    that have specific sqlite3 behavior (no-row vs single-int) are
+#    captured here as the empty-result fall-through (sqlite3 also
+#    returns no rows for case_sensitive_like).
+PRAGMA bogus_pragma_name;
+PRAGMA case_sensitive_like;
+PRAGMA something_unknown(passive);

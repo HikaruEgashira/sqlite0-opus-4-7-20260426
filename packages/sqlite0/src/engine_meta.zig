@@ -201,7 +201,11 @@ pub fn executePragma(db: *Database, parsed: stmt_mod.ParsedPragma) !StatementRes
         if (parsed.arg != null) return Error.UnsupportedFeature;
         return singleTextSelect(db.allocator, "UTF-8");
     }
-    return Error.SyntaxError;
+    // Iter31.X: unknown PRAGMA silently returns no rows. Matches sqlite3
+    // (`PRAGMA totally_made_up_name;` rc=0, no output) — many tools at
+    // connection setup time issue PRAGMAs that may not exist on a given
+    // build, and erroring on those would block legitimate clients.
+    return .{ .select = &.{} };
 }
 
 fn intReadOnlyPragmaValue(name: []const u8) ?i64 {
