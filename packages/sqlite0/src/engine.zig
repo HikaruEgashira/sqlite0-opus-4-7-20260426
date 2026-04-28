@@ -290,6 +290,7 @@ fn executeOneSelect(
 
     if (ps.from.len == 0) {
         if (select_mod.containsStar(ps.items)) return Error.SyntaxError;
+        try validateLiteralPositions(ps.items.len, ps.order_by, ps.group_by);
         if (wants_grouping) {
             const empty_row: []const Value = &.{};
             var synthetic = [_][]const Value{empty_row};
@@ -300,6 +301,7 @@ fn executeOneSelect(
 
     const cart = try engine_from.cartesianFromSources(db, alloc, ps.from, outer_frames);
     try validateStarExpansion(ps.items, cart.columns, cart.qualifiers);
+    try validateLiteralPositions(projectedColumnCount(ps.items, cart.columns.len), ps.order_by, ps.group_by);
     if (wants_grouping) {
         const inputs = try alloc.alloc([]const Value, cart.rows.len);
         for (cart.rows, inputs) |src, *slot| slot.* = src;
@@ -377,6 +379,42 @@ fn arityOf(ps: stmt_mod.ParsedSelect, rows: [][]Value) ?usize {
         }
     }
     return n;
+}
+
+/// Compute projected column count after `*` expansion. Star qualifier
+/// (e.g. `t.*`) is approximated as the full cartesian width — slight
+/// overestimate, but only used as the upper bound for ORDER BY position
+/// validation, so a stricter check would only mask a few errors.
+fn projectedColumnCount(items: []const select_mod.SelectItem, cart_cols: usize) usize {
+    var n: usize = 0;
+    for (items) |item| switch (item) {
+        .star => n += cart_cols,
+        .expr => n += 1,
+    };
+    return n;
+}
+
+/// sqlite3 `resolveOrderGroupBy` rejects bare integer literals in ORDER BY
+/// or GROUP BY when the value is outside `[1, projected_count]`
+/// ("ORDER BY term out of range — should be between 1 and N"). `1+0` keeps
+/// expression semantics so escapes the check. We collapse to SyntaxError —
+/// differential harness treats `<error>` symmetrically.
+fn validateLiteralPositions(
+    items_len: usize,
+    order_by: []const stmt_mod.OrderTerm,
+    group_by: []const stmt_mod.GroupByTerm,
+) !void {
+    const max_pos: i64 = @intCast(items_len);
+    for (order_by) |t| try validateLiteralOne(t.expr, max_pos);
+    for (group_by) |t| try validateLiteralOne(t.expr, max_pos);
+}
+
+fn validateLiteralOne(expr: *ast.Expr, max_pos: i64) !void {
+    if (expr.* != .literal) return;
+    switch (expr.*.literal) {
+        .integer => |n| if (n < 1 or n > max_pos) return Error.SyntaxError,
+        else => {},
+    }
 }
 
 /// Translate stmt-level OrderTerm/limit/offset into the select-module's
