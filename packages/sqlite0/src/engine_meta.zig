@@ -130,7 +130,7 @@ fn popAllSavepoints(db: *Database) void {
     popSavepointsFrom(db, 0);
 }
 
-/// Iter27.C / Iter27.E — supported pragmas:
+/// Iter27.C / Iter27.E / Iter31.W — supported pragmas:
 ///   - `PRAGMA wal_checkpoint [(MODE)]` (Iter27.C) → single 3-int row
 ///     `(busy, log, ckpt)` matching sqlite3's shape.
 ///   - `PRAGMA journal_mode` (Iter27.E, read-only) → single 1-text row
@@ -138,6 +138,13 @@ fn popAllSavepoints(db: *Database) void {
 ///     `delete`); in-memory databases report `memory`. Setting the mode
 ///     (`PRAGMA journal_mode = WAL`) is deferred — the on-disk format
 ///     conversion belongs in a later iteration alongside vacuum.
+///   - Iter31.W read-only constants matching sqlite3 defaults for
+///     freshly-created databases:
+///       - `encoding` → `UTF-8`
+///       - `user_version` / `application_id` / `foreign_keys` /
+///         `auto_vacuum` / `temp_store` / `recursive_triggers` /
+///         `defer_foreign_keys` → 0 (mutating these is deferred)
+///       - `page_size` → 4096 (sqlite0 hard-coded constant)
 /// Unknown pragmas return SyntaxError — silently swallowing them would
 /// mask compatibility regressions.
 pub fn executePragma(db: *Database, parsed: stmt_mod.ParsedPragma) !StatementResult {
@@ -181,5 +188,47 @@ pub fn executePragma(db: *Database, parsed: stmt_mod.ParsedPragma) !StatementRes
         rows[0] = row;
         return .{ .select = rows };
     }
+    // Iter31.W single-int read-only PRAGMAs returning sqlite3's
+    // freshly-created-database defaults. Setting these values
+    // (`PRAGMA name = N`) is rejected — the parser doesn't yet
+    // accept the `=` form, so callers reach `parsePragmaStatement`
+    // only for the bare read shape.
+    if (intReadOnlyPragmaValue(parsed.name)) |v| {
+        if (parsed.arg != null) return Error.UnsupportedFeature;
+        return singleIntegerSelect(db.allocator, v);
+    }
+    if (func_util.eqlIgnoreCase(parsed.name, "encoding")) {
+        if (parsed.arg != null) return Error.UnsupportedFeature;
+        return singleTextSelect(db.allocator, "UTF-8");
+    }
     return Error.SyntaxError;
+}
+
+fn intReadOnlyPragmaValue(name: []const u8) ?i64 {
+    const eq = func_util.eqlIgnoreCase;
+    if (eq(name, "page_size")) return 4096;
+    if (eq(name, "user_version")) return 0;
+    if (eq(name, "application_id")) return 0;
+    if (eq(name, "foreign_keys")) return 0;
+    if (eq(name, "auto_vacuum")) return 0;
+    if (eq(name, "temp_store")) return 0;
+    if (eq(name, "recursive_triggers")) return 0;
+    if (eq(name, "defer_foreign_keys")) return 0;
+    return null;
+}
+
+fn singleIntegerSelect(allocator: std.mem.Allocator, v: i64) !StatementResult {
+    const row = try allocator.alloc(Value, 1);
+    row[0] = .{ .integer = v };
+    const rows = try allocator.alloc([]Value, 1);
+    rows[0] = row;
+    return .{ .select = rows };
+}
+
+fn singleTextSelect(allocator: std.mem.Allocator, text: []const u8) !StatementResult {
+    const row = try allocator.alloc(Value, 1);
+    row[0] = .{ .text = try allocator.dupe(u8, text) };
+    const rows = try allocator.alloc([]Value, 1);
+    rows[0] = row;
+    return .{ .select = rows };
 }

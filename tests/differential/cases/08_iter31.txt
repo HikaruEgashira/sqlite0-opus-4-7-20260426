@@ -459,3 +459,19 @@ CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES('a   '),('a'),('b'); 
 SELECT max(x COLLATE NOCASE), min(x COLLATE NOCASE) FROM (SELECT 'a' AS x UNION ALL SELECT 'B');
 SELECT max(x), min(x) FROM (VALUES(1.5),(2),(0.5));
 CREATE TABLE t(g INT, x TEXT COLLATE NOCASE); INSERT INTO t VALUES(1,'a'),(1,'B'),(2,'C'),(2,'b'); SELECT g, max(x) FROM t GROUP BY g ORDER BY g;
+
+# Read-only PRAGMA defaults (Iter31.W):
+#  * sqlite3 freshly-created database defaults — sqlite0 hard-codes
+#    matching constants in engine_meta.executePragma. Callers (ORMs,
+#    sqlite3 CLI startup probes, GUI tools) routinely query these for
+#    feature detection. Setting via `=` is deferred (parser does not
+#    yet accept the `=` form for PRAGMA).
+PRAGMA encoding;
+PRAGMA user_version;
+PRAGMA application_id;
+PRAGMA page_size;
+PRAGMA foreign_keys;
+PRAGMA auto_vacuum;
+PRAGMA temp_store;
+PRAGMA recursive_triggers;
+PRAGMA defer_foreign_keys;
