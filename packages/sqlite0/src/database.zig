@@ -166,6 +166,13 @@ pub const Database = struct {
     /// matches sqlite3's legacy behaviour). Iter27.B will use this to gate
     /// write paths; Iter27.0.a only records it.
     journal_mode: JournalMode = .delete_legacy,
+    /// Iter31.Y — `PRAGMA user_version` / `PRAGMA application_id` storage.
+    /// sqlite3 spec types these as i32 (signed 32-bit) and silently coerces
+    /// non-integer or out-of-range writes to 0. In-memory databases lose
+    /// these on close; file-mode persistence to page 1 header bytes
+    /// 60-63 / 68-71 is deferred (would need pager write hook).
+    user_version: i32 = 0,
+    application_id: i32 = 0,
     /// Iter27.E — set by BEGIN, cleared by COMMIT/ROLLBACK. While true,
     /// the per-statement commit hook in `execute` is suppressed so
     /// every staged frame from intervening DML accumulates into one

@@ -490,3 +490,21 @@ PRAGMA defer_foreign_keys;
 PRAGMA bogus_pragma_name;
 PRAGMA case_sensitive_like;
 PRAGMA something_unknown(passive);
+
+# PRAGMA name = N set form (Iter31.Y):
+#  * `PRAGMA user_version` and `PRAGMA application_id` are persisted in
+#    the connection (in-memory; file-mode header byte storage deferred).
+#    Both read (`PRAGMA name`) and set (`PRAGMA name = N`, `PRAGMA name(N)`).
+#  * sqlite3 stores both as i32 — values outside that range silently
+#    coerce to 0 (probe `PRAGMA application_id = 4294967295` returns 0).
+#    Negative values are valid.
+#  * Multi-statement fixture: set then read in one line via `;` separator.
+#  * Other PRAGMAs silently accept set forms but discard the value,
+#    matching sqlite3's "unknown set is silent" rule.
+PRAGMA user_version = 5; PRAGMA user_version;
+PRAGMA application_id = 100; PRAGMA application_id;
+PRAGMA user_version = -5; PRAGMA user_version;
+PRAGMA user_version = 2147483647; PRAGMA user_version;
+PRAGMA user_version = 2147483648; PRAGMA user_version;
+PRAGMA user_version(7); PRAGMA user_version;
+PRAGMA totally_unknown = 99;

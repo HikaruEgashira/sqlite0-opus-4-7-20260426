@@ -188,17 +188,26 @@ pub fn executePragma(db: *Database, parsed: stmt_mod.ParsedPragma) !StatementRes
         rows[0] = row;
         return .{ .select = rows };
     }
-    // Iter31.W single-int read-only PRAGMAs returning sqlite3's
-    // freshly-created-database defaults. Setting these values
-    // (`PRAGMA name = N`) is rejected — the parser doesn't yet
-    // accept the `=` form, so callers reach `parsePragmaStatement`
-    // only for the bare read shape.
+    // Iter31.Y: `user_version` / `application_id` accept set forms
+    // (`PRAGMA name = N` and `PRAGMA name(N)`). sqlite3 stores these
+    // as i32 — values outside that range silently coerce to 0. The
+    // bare read form returns the persisted value (default 0).
+    if (func_util.eqlIgnoreCase(parsed.name, "user_version")) {
+        return readWriteI32Pragma(db, parsed, &db.user_version);
+    }
+    if (func_util.eqlIgnoreCase(parsed.name, "application_id")) {
+        return readWriteI32Pragma(db, parsed, &db.application_id);
+    }
+    // Iter31.W remaining single-int read-only PRAGMAs. sqlite3 silently
+    // accepts `= N` set forms here too but the value is discarded
+    // (the underlying feature isn't wired). Mirror that: set form
+    // returns no rows, read form returns the constant default.
     if (intReadOnlyPragmaValue(parsed.name)) |v| {
-        if (parsed.arg != null) return Error.UnsupportedFeature;
+        if (parsed.int_value != null or parsed.arg != null) return .{ .select = &.{} };
         return singleIntegerSelect(db.allocator, v);
     }
     if (func_util.eqlIgnoreCase(parsed.name, "encoding")) {
-        if (parsed.arg != null) return Error.UnsupportedFeature;
+        if (parsed.int_value != null or parsed.arg != null) return .{ .select = &.{} };
         return singleTextSelect(db.allocator, "UTF-8");
     }
     // Iter31.X: unknown PRAGMA silently returns no rows. Matches sqlite3
@@ -206,6 +215,20 @@ pub fn executePragma(db: *Database, parsed: stmt_mod.ParsedPragma) !StatementRes
     // connection setup time issue PRAGMAs that may not exist on a given
     // build, and erroring on those would block legitimate clients.
     return .{ .select = &.{} };
+}
+
+/// Iter31.Y dispatch shared by `user_version` / `application_id`.
+/// Set form (`PRAGMA name = N` or `PRAGMA name(N)`) writes `*field`
+/// (clamping to i32 range — out-of-range silently → 0, matching
+/// sqlite3) and returns no rows. Bare read form returns the current
+/// value as a single i64 row.
+fn readWriteI32Pragma(db: *Database, parsed: stmt_mod.ParsedPragma, field: *i32) !StatementResult {
+    if (parsed.int_value) |v| {
+        field.* = if (v < std.math.minInt(i32) or v > std.math.maxInt(i32)) 0 else @intCast(v);
+        return .{ .select = &.{} };
+    }
+    if (parsed.arg != null) return .{ .select = &.{} };
+    return singleIntegerSelect(db.allocator, field.*);
 }
 
 fn intReadOnlyPragmaValue(name: []const u8) ?i64 {
