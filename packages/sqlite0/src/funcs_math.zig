@@ -178,7 +178,9 @@ pub fn fnAcosh(args: []const Value) Error!Value {
 pub fn fnAtanh(args: []const Value) Error!Value {
     if (args.len != 1) return Error.WrongArgumentCount;
     const x = argReal(args[0]) orelse return Value.null;
-    if (x <= -1.0 or x >= 1.0) return Value.null;
+    // sqlite3 atanh: domain endpoints x = ±1 yield ±Inf (libm convention),
+    // not NULL. Only |x| > 1 (which would give NaN) is rejected.
+    if (x < -1.0 or x > 1.0) return Value.null;
     return Value{ .real = std.math.atanh(x) };
 }
 

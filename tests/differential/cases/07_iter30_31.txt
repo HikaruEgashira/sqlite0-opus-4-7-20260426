@@ -453,3 +453,9 @@ SELECT column1+column2 AS s FROM (VALUES(1,2),(3,4)) ORDER BY s
 SELECT count(*) AS cnt FROM (VALUES(1),(1),(2)) GROUP BY column1 ORDER BY cnt DESC
 SELECT column1+column2 AS s FROM (VALUES(1,2),(3,4)) GROUP BY s ORDER BY s
 SELECT column1 + 1 AS z FROM (VALUES(3),(1),(2)) ORDER BY z DESC
+SELECT atanh(1)
+SELECT atanh(-1)
+SELECT atanh(0.5)
+SELECT atanh(2)
+SELECT atanh(-2)
+SELECT atanh(0)
