@@ -407,3 +407,16 @@ SELECT 1 LIMIT 0
 SELECT * FROM (VALUES (1), (2), (3)) LIMIT 2
 SELECT * FROM (VALUES (1), (2), (3)) LIMIT 100
 SELECT * FROM (VALUES (1), (2), (3)) LIMIT -1
+SELECT hex(substr(x'010203', 0))
+SELECT hex(substr(x'010203', -4))
+SELECT hex(substr(x'010203', -100))
+SELECT hex(substr(x'01020304', 0))
+SELECT hex(substr(x'0102', 0))
+SELECT hex(substr(x'01', 0))
+SELECT hex(substr(x'010203', 0, 0))
+SELECT hex(substr(x'010203', 0, 1))
+SELECT hex(substr(x'010203', 0, 100))
+SELECT hex(substr(x'', 0))
+SELECT hex(substr(x'010203', -1))
+SELECT hex(substr(x'010203', 1))
+SELECT hex(substr(x'010203', 4))

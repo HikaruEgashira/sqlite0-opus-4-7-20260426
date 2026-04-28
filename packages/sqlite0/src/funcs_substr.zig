@@ -50,7 +50,13 @@ pub fn fnSubstr(allocator: std.mem.Allocator, args: []const Value) Error!Value {
 fn byteSubstrSlice(z: []const u8, p_raw: i64, n_raw: i64, has_n: bool) []const u8 {
     const len_i: i64 = @intCast(z.len);
     var p1: i64 = p_raw;
-    var p2: i64 = if (has_n) n_raw else len_i;
+    // sqlite3 substrFunc uses SQLITE_LIMIT_LENGTH (default 1e9) as the
+    // sentinel for "no count given". The downstream `p2 -= 1` (P=0
+    // start-before-1 rule) and `p2 += p1` (negative P clamp) stay
+    // safely positive that way; if we used `len_i` instead we'd lose
+    // bytes (e.g. substr(x'010203', 0) drops to 2 bytes when 1B sentinel
+    // would yield 3). Final `p1+p2 > len_i` clamp bounds the result.
+    var p2: i64 = if (has_n) n_raw else 1_000_000_000;
     var negP2: bool = false;
     if (has_n and p2 < 0) {
         p2 = -p2;
