@@ -280,7 +280,9 @@ pub fn enforceNotNull(t: *const Table, row: []const Value) Error!void {
 /// or text coercing to false → reject. The eval allocator is the same
 /// per-statement arena that owns intermediate Values; the result is
 /// inspected then dropped, no long-lived allocations escape.
-fn evaluateColumnChecks(
+/// Iter31.AK — `pub` so the UPDATE path in `engine_dml.zig` can reuse
+/// the identical truthiness rules without duplicating eval code.
+pub fn evaluateColumnChecks(
     db: *Database,
     arena: std.mem.Allocator,
     t: *const Table,

@@ -223,3 +223,19 @@ CREATE TABLE t(a CHECK(a > 0), b CHECK(b < 100)); INSERT INTO t VALUES(5, 999);
 CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); INSERT OR IGNORE INTO t VALUES(-1); SELECT * FROM t;
 CREATE TABLE t(id INTEGER PRIMARY KEY, x CHECK(x > 0)); INSERT INTO t VALUES(1, 10); SELECT * FROM t;
 CREATE TABLE t(id INTEGER PRIMARY KEY, x CHECK(x > 0)); INSERT INTO t VALUES(1, 0);
+
+# Column-level CHECK enforced on UPDATE (Iter31.AK):
+#  * Sibling of Iter31.AJ. The synth-row pre-splice approach evaluates
+#    CHECK against the would-be post-update row, leaving the table
+#    untouched on violation (matches sqlite3 per-row UPDATE atomicity).
+#  * UPDATE OR IGNORE swallows the violation and skips the row's
+#    assignment; ABORT/FAIL/ROLLBACK surface ConstraintCheck.
+#  * `hasAnyCheck` shortcut keeps zero-CHECK tables free of the synth
+#    alloc + memcpy per row.
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); UPDATE t SET x=10; SELECT * FROM t;
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); UPDATE t SET x=-1;
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); UPDATE t SET x=NULL; SELECT * FROM t;
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5),(7); UPDATE OR IGNORE t SET x=-1 WHERE x=5; SELECT * FROM t ORDER BY x;
+CREATE TABLE t(a CHECK(a < b), b); INSERT INTO t VALUES(1,2); UPDATE t SET a=5;
+CREATE TABLE t(a CHECK(a < b), b); INSERT INTO t VALUES(1,2); UPDATE t SET b=10; SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x CHECK(x > 0)); INSERT INTO t VALUES(1,5),(2,10); UPDATE t SET x=x+1 WHERE id=1; SELECT * FROM t ORDER BY id;

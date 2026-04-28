@@ -287,3 +287,16 @@ test "Database.execute: CHECK falsy rejects with ConstraintCheck" {
         db.execute("CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(-1)"),
     );
 }
+
+// Iter31.AK — UPDATE evaluates CHECK against the synth post-update row
+// before the splice, so a violation rolls back nothing (the row stays
+// at its pre-update value) and surfaces ConstraintCheck.
+test "Database.execute: UPDATE CHECK violation leaves row unchanged" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(
+        Error.ConstraintCheck,
+        db.execute("CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); UPDATE t SET x=-1"),
+    );
+}

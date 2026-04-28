@@ -25,6 +25,7 @@ const engine = @import("engine.zig");
 const func_util = @import("func_util.zig");
 const engine_dml_file = @import("engine_dml_file.zig");
 const engine_returning = @import("engine_returning.zig");
+const engine_dml_insert = @import("engine_dml_insert.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -180,6 +181,10 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     if (t.root_page != 0) {
         if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
         if (parsed.conflict_action != .abort) return Error.UnsupportedFeature; // Iter31.AH deferred (file)
+        // Iter31.AK — file-mode UPDATE-CHECK is deferred (mirrors the
+        // INSERT side guard in engine_dml_insert). Reject ahead of any
+        // pwrite so the Pager never observes an unchecked mutation.
+        for (t.check_exprs) |opt| if (opt != null) return Error.UnsupportedFeature;
         const rc = try engine_dml_file.executeUpdateFile(db, t, parsed, indices);
         return .{ .rowcount = rc };
     }
@@ -296,6 +301,26 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             },
             .abort, .fail, .rollback => return Error.UniqueConstraint,
         };
+        // Iter31.AK — column-level CHECK on the synthesised post-update
+        // row. Done BEFORE the splice so a violation leaves the table
+        // unchanged for this row (errdefer frees `new_values`); IGNORE
+        // swallows. The synth array borrows pointers from the current
+        // row + new_values; eval is read-only so sharing is safe.
+        if (hasAnyCheck(t)) {
+            const synth = try arena.alloc(Value, t.columns.len);
+            @memcpy(synth, t.rows.items[i]);
+            for (indices, new_values) |col_idx, new_v| {
+                synth[col_idx] = new_v;
+            }
+            engine_dml_insert.evaluateColumnChecks(db, arena, t, synth) catch |err| {
+                if (parsed.conflict_action == .ignore) {
+                    for (new_values) |v| ops.freeValue(arena, v);
+                    i += 1;
+                    continue;
+                }
+                return err;
+            };
+        }
         // Splice into the (possibly shifted) row at index `i`.
         for (indices, new_values) |col_idx, new_v| {
             const duped = try func_util.dupeValue(db.allocator, new_v);
@@ -328,6 +353,16 @@ fn findTableColumn(t: *const Table, name: []const u8) ?usize {
         if (func_util.eqlIgnoreCase(name, col)) return i;
     }
     return null;
+}
+
+/// Iter31.AK — quick predicate so the UPDATE row-loop skips synth-array
+/// allocation when the table has zero CHECK constraints. INSERT path
+/// runs unconditional eval because evaluateColumnChecks already short-
+/// circuits on null entries; UPDATE costs an extra arena alloc + memcpy
+/// per row that's worth dodging when no constraint exists.
+fn hasAnyCheck(t: *const Table) bool {
+    for (t.check_exprs) |opt| if (opt != null) return true;
+    return false;
 }
 
 
