@@ -268,6 +268,22 @@ fn subqueryProjectionCollations(
     expected: usize,
 ) ops.Error![]const ast.CollationKind {
     if (ps.branches.len > 0) return padCollations(alloc, &.{}, expected);
+    return leftmostProjectionCollations(db, alloc, ps, expected);
+}
+
+/// Iter31.T — derive per-projection schema collations from the leftmost
+/// branch of a SELECT (or any single SELECT). Same item walk as
+/// `subqueryProjectionCollations` but WITHOUT the
+/// branches-drop-collation early return — used by setop ORDER BY where
+/// sqlite3 carries the leftmost branch's column-default collation
+/// through the chain (`SELECT x FROM t COLLATE NOCASE UNION ALL ...
+/// ORDER BY x` sorts NOCASE).
+pub fn leftmostProjectionCollations(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    ps: stmt_mod.ParsedSelect,
+    expected: usize,
+) ops.Error![]const ast.CollationKind {
     var out: std.ArrayList(ast.CollationKind) = .empty;
     var cart_opt: ?Cartesian = null;
     for (ps.items) |item| {

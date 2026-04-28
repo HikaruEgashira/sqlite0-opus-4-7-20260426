@@ -406,3 +406,23 @@ CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('
 CREATE TABLE t(x); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT DISTINCT x COLLATE NOCASE FROM t ORDER BY x COLLATE BINARY;
 SELECT DISTINCT x COLLATE NOCASE FROM (SELECT 'B' AS x UNION ALL SELECT 'a' UNION ALL SELECT 'A' UNION ALL SELECT 'b') ORDER BY x COLLATE BINARY;
 CREATE TABLE t(x TEXT COLLATE NOCASE, y INT); INSERT INTO t VALUES ('B',1),('a',2),('A',3),('b',4); SELECT DISTINCT x, sum(y) FROM t GROUP BY x ORDER BY x COLLATE BINARY;
+
+# Setop chain ORDER BY column-default propagation (Iter31.T):
+#  * sqlite3 carries the leftmost branch's per-projection-item column-
+#    default collation through the setop chain when ORDER BY references
+#    a result column. Probe: `SELECT x FROM t UNION ALL SELECT 'C' ORDER BY x`
+#    where t.x COLLATE NOCASE — sqlite3 sorts NOCASE (a,A,B,b,C);
+#    sqlite0 used to sort BINARY (A,B,C,a,b) because leftmost_collations
+#    was passed empty.
+#  * Explicit `ORDER BY x COLLATE BINARY` overrides the column-default
+#    (regression-lock).
+#  * RTRIM column propagates to chain ORDER BY.
+#  * Setop DEDUP (UNION / INTERSECT / EXCEPT) column-default propagation
+#    is a separate concern (Iter31.U candidate); not addressed here.
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT x FROM t UNION ALL SELECT 'C' ORDER BY x;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT x FROM t UNION ALL SELECT 'C' ORDER BY x COLLATE BINARY;
+CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES ('a   '),('b'); SELECT x FROM t UNION ALL SELECT 'a' ORDER BY x;
+# INTERSECT/EXCEPT chains use the same applySetopPostProcess path; this
+# fixture locks in that the column-default propagates regardless of the
+# operator mix in the chain.
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'); SELECT x FROM t INTERSECT SELECT 'a' UNION ALL SELECT 'B' ORDER BY x;

@@ -267,16 +267,14 @@ pub fn executeSelectWithOuter(
         current = try engine_setop.combine(alloc, branch.kind, current, right, resolved);
         if (left_arity == null) left_arity = right_arity;
     }
-    // Setop ORDER BY <name>: leftmost branch's projection drives name
-    // resolution (sqlite3 `... UNION SELECT 2 ORDER BY a` quirk). Lazy
-    // — only paid when ORDER BY exists. Iter31.R: column-default
-    // collation fall-through across UNION deferred (empty leftmost
-    // qualifiers/collations → explicit wrapper or BINARY).
-    const leftmost_columns: []const []const u8 = if (ps.order_by.len > 0)
-        try projectedColumnNames(db, alloc, ps)
+    // Setop ORDER BY <name>: leftmost branch drives name resolution AND
+    // per-column schema collation (Iter31.T). Lazy.
+    const lc: []const []const u8 = if (ps.order_by.len > 0) try projectedColumnNames(db, alloc, ps) else &.{};
+    const lk: []const ast.CollationKind = if (ps.order_by.len > 0)
+        try engine_from.leftmostProjectionCollations(db, alloc, ps, lc.len)
     else
         &.{};
-    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, leftmost_columns, &.{}, &.{}, outer_frames);
+    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, lc, &.{}, lk, outer_frames);
 }
 
 /// Execute one ParsedSelect with the given PostProcess. Stripped out of

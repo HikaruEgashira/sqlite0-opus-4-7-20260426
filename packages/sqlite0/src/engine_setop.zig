@@ -193,7 +193,11 @@ fn resolveSetopOrderPosition(
     leftmost_columns: []const []const u8,
 ) Error!usize {
     if (term.position) |p| return p;
-    switch (term.expr.*) {
+    // Iter31.T: peel COLLATE wrapper(s) so `ORDER BY x COLLATE NOCASE`
+    // still resolves the bare-column-ref name. The collation kind is
+    // already captured separately on `term.collation` at parse time.
+    const inner = collation.peel(term.expr).inner;
+    switch (inner.*) {
         .column_ref => |c| {
             // Qualified refs (`t.x`) never match — once we've left every
             // branch's source scope, table aliases no longer exist.
