@@ -27,6 +27,10 @@ pub const OrderTerm = struct {
     /// `null` means "evaluate `expr` against the source row".
     position: ?usize = null,
     descending: bool,
+    /// Resolved NULLS placement (translation layer applies the direction
+    /// default — sqlite3: ASC→true, DESC→false — when the parser saw no
+    /// explicit `NULLS FIRST` / `NULLS LAST`).
+    nulls_first: bool = true,
 };
 
 pub const PostProcess = struct {
@@ -151,7 +155,18 @@ pub fn sortRowsByKeys(
         terms: []const OrderTerm,
         fn lessThan(self: @This(), a: usize, b: usize) bool {
             for (self.terms, 0..) |term, ti| {
-                const cmp = compareValues(self.keys[a][ti], self.keys[b][ti]);
+                const va = self.keys[a][ti];
+                const vb = self.keys[b][ti];
+                const a_null = va == .null;
+                const b_null = vb == .null;
+                if (a_null and b_null) continue;
+                if (a_null or b_null) {
+                    // NULL placement is independent of ASC/DESC — sqlite3
+                    // honors NULLS FIRST / NULLS LAST verbatim regardless
+                    // of the direction modifier on the same term.
+                    return if (a_null) term.nulls_first else !term.nulls_first;
+                }
+                const cmp = compareValues(va, vb);
                 if (cmp == 0) continue;
                 return if (term.descending) cmp > 0 else cmp < 0;
             }

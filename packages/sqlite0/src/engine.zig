@@ -431,10 +431,12 @@ fn postProcessFromParsed(alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect) !s
         // tries source columns first, so this fallback only kicks in
         // when the name truly isn't a source column.)
         const resolved_pos = if (term.position == null) resolveAliasPosition(term.expr, ps.items) else term.position;
+        const descending = term.dir == .desc;
         out.* = .{
             .expr = term.expr,
             .position = resolved_pos,
-            .descending = term.dir == .desc,
+            .descending = descending,
+            .nulls_first = term.nulls_first orelse !descending,
         };
     }
     return .{

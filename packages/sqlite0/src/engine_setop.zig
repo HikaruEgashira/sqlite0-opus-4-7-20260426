@@ -106,7 +106,8 @@ pub fn applySetopPostProcess(
         const so_terms = try arena.alloc(select_post.OrderTerm, order_by.len);
         for (order_by, so_terms) |s, *o| {
             const resolved = try resolveSetopOrderPosition(s, leftmost_columns);
-            o.* = .{ .expr = s.expr, .position = resolved, .descending = s.dir == .desc };
+            const desc = s.dir == .desc;
+            o.* = .{ .expr = s.expr, .position = resolved, .descending = desc, .nulls_first = s.nulls_first orelse !desc };
         }
         for (current, keys) |row, *slot| {
             const key = try arena.alloc(Value, order_by.len);

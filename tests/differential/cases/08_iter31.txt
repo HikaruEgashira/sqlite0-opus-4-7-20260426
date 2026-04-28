@@ -207,3 +207,30 @@ SELECT NULL IS DISTINCT FROM TRUE
 SELECT NULL IS NOT DISTINCT FROM FALSE
 SELECT 0 IS DISTINCT FROM FALSE
 SELECT 0 IS NOT DISTINCT FROM FALSE
+
+# ORDER BY ... NULLS FIRST / LAST postfix (Iter31.N):
+#  * SQL standard syntax sqlite3 supports since 3.30. Direction-default
+#    when omitted: ASC → NULLS FIRST, DESC → NULLS LAST. Explicit NULLS
+#    placement overrides the default and is independent of ASC/DESC.
+#  * `nulls` / `first` / `last` are NOT reserved keywords in sqlite3 —
+#    `SELECT first FROM (SELECT 1 AS first)` works; the parser must
+#    detect them as identifiers in postfix position only.
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 DESC
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 ASC NULLS LAST
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 ASC NULLS FIRST
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 DESC NULLS LAST
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 DESC NULLS FIRST
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 NULLS LAST
+SELECT * FROM (VALUES(NULL),(2),(1)) ORDER BY column1 NULLS FIRST
+SELECT * FROM (VALUES(NULL),(NULL),(1),(2)) ORDER BY column1 NULLS LAST
+SELECT * FROM (VALUES(1)) ORDER BY column1 NULLS first
+SELECT * FROM (VALUES(1)) ORDER BY column1 nulls LAST
+SELECT * FROM (VALUES(1)) ORDER BY column1 NULLS
+SELECT * FROM (VALUES(1)) ORDER BY column1 NULLS bogus
+SELECT first FROM (SELECT 1 AS first)
+SELECT nulls FROM (SELECT 1 AS nulls)
+SELECT last FROM (SELECT 1 AS last)
+SELECT 1 ORDER BY 1 ASC NULLS FIRST
+SELECT * FROM (VALUES(1,'a'),(2,NULL),(NULL,'c')) ORDER BY 2 NULLS FIRST, 1
+SELECT * FROM (VALUES(1,'a'),(2,NULL),(NULL,'c')) ORDER BY 2 NULLS LAST, 1

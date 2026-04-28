@@ -1,16 +1,10 @@
-//! Statement parsing. Each `parse*Statement` function consumes one statement
-//! starting from the parser's current cursor and returns a `Parsed*` struct
-//! describing what was found — execution is the caller's responsibility
-//! (`database.zig` Database.dispatchOne). On exit the cursor sits on
-//! `.semicolon` or `.eof`.
-//!
-//! VALUES inside FROM is eagerly evaluated at parse time because it cannot
-//! correlate with outer scope; the resulting rows are arena-allocated and
-//! freed with the per-statement arena.
-//!
-//! Integration tests for execution-level behavior live in `database.zig` and
-//! `tests/differential/cases.txt`; this file deliberately contains no tests
-//! that exercise full execution paths.
+//! Statement parsing. Each `parse*Statement` consumes one statement and
+//! returns a `Parsed*` struct describing what was found — execution lives
+//! in `database.zig` Database.dispatchOne. On exit the cursor sits on
+//! `.semicolon` or `.eof`. VALUES inside FROM is eagerly evaluated at
+//! parse time (no outer-scope correlation in standard SQL); rows are
+//! arena-allocated and freed with the per-statement arena. Integration
+//! tests live in `database.zig` and `tests/differential/cases/*.txt`.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -19,6 +13,7 @@ const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
 const eval = @import("eval.zig");
 const select = @import("select.zig");
+const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -65,13 +60,13 @@ pub const freeSetopBranches = stmt_setop.freeSetopBranches;
 pub const OrderDirection = enum { asc, desc };
 
 pub const OrderTerm = struct {
-    /// When `position` is non-null, the ORDER BY term is a 1-based column
-    /// position into the SELECT list (sqlite3 quirk: `ORDER BY 2` sorts by
-    /// the second projected column). When position is null, evaluate `expr`
-    /// against the source row.
+    /// `position` non-null = 1-based SELECT-list column ref (sqlite3 quirk).
+    /// `nulls_first` null = use direction default (ASC→true, DESC→false);
+    /// non-null = explicit `NULLS FIRST` / `NULLS LAST` postfix.
     expr: *ast.Expr,
     position: ?usize = null,
     dir: OrderDirection,
+    nulls_first: ?bool = null,
 };
 
 pub const GroupByTerm = struct {
@@ -262,12 +257,8 @@ fn parseOrderBy(p: *Parser) ![]OrderTerm {
     try p.expect(.keyword_order);
     try p.expect(.keyword_by);
     var terms: std.ArrayList(OrderTerm) = .empty;
-    // Single combined errdefer: deinit each term's expr THEN release the
-    // ArrayList capacity. Two separate errdefers used to free the items
-    // slice via `allocator.free(terms.items)` and then again via
-    // `terms.deinit()` — that double-free / use-after-free segfaulted on
-    // any failed parse like `ORDER BY @` (parseOrderTerm error → both
-    // errdefers fire in reverse, the second touching freed memory).
+    // Single combined errdefer (separate per-item + container errdefers
+    // double-freed on `ORDER BY @` parse errors).
     errdefer {
         for (terms.items) |t| t.expr.deinit(p.allocator);
         terms.deinit(p.allocator);
@@ -282,20 +273,13 @@ fn parseOrderBy(p: *Parser) ![]OrderTerm {
 
 fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
     const expr = try p.parseExpr();
-    // sqlite3 quirk: a bare integer literal in ORDER BY refers to the
-    // SELECT-list column position (1-based), not its evaluated value. Detect
-    // that case here so the engine can look up `projected_row[N-1]` at sort
-    // time. Any non-literal expression (including `1+0`) keeps expression
-    // semantics — sqlite3 also distinguishes "literal vs. expression".
+    // Bare positive integer literal = 1-based SELECT-list position
+    // (sqlite3 quirk). `1+0` keeps expression semantics.
     var position: ?usize = null;
-    if (expr.* == .literal) {
-        switch (expr.*.literal) {
-            .integer => |n| if (n > 0) {
-                position = @intCast(n);
-            },
-            else => {},
-        }
-    }
+    if (expr.* == .literal) switch (expr.*.literal) {
+        .integer => |n| if (n > 0) { position = @intCast(n); },
+        else => {},
+    };
     var dir: OrderDirection = .asc;
     if (p.cur.kind == .keyword_asc) {
         p.advance();
@@ -303,7 +287,21 @@ fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
         dir = .desc;
         p.advance();
     }
-    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir });
+    // sqlite3 grammar: `NULLS FIRST` / `NULLS LAST` postfix (SQL standard).
+    // None of these tokens are reserved keywords — peek as identifiers.
+    var nulls_first: ?bool = null;
+    if (p.cur.kind == .identifier and func_util.eqlIgnoreCase(p.cur.slice(p.src), "nulls")) {
+        p.advance();
+        if (p.cur.kind != .identifier) return Error.SyntaxError;
+        const w = p.cur.slice(p.src);
+        if (func_util.eqlIgnoreCase(w, "first")) {
+            nulls_first = true;
+        } else if (func_util.eqlIgnoreCase(w, "last")) {
+            nulls_first = false;
+        } else return Error.SyntaxError;
+        p.advance();
+    }
+    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir, .nulls_first = nulls_first });
 }
 
 pub fn freeOrderTerms(allocator: std.mem.Allocator, terms: []OrderTerm) void {
