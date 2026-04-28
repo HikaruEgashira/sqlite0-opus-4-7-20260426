@@ -15,6 +15,7 @@ const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const parser_mod = @import("parser.zig");
 const stmt_mod = @import("stmt.zig");
+const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Parser = parser_mod.Parser;
@@ -52,6 +53,15 @@ pub const Body = union(enum) {
 /// Iter31.Z scope.
 pub fn parseWithClause(p: *Parser) Error![]ParsedCte {
     try p.expect(.keyword_with);
+    // Iter31.AD — optional `RECURSIVE` keyword. sqlite3 accepts both
+    // `WITH RECURSIVE` and `WITH` for recursive CTEs (recursion is
+    // detected by shape, not by the keyword); we consume the literal
+    // when present so client code that spells it out parses cleanly.
+    // `recursive` isn't promoted to a TokenKind because it would
+    // shadow legitimate column / table names.
+    if (p.cur.kind == .identifier and func_util.eqlIgnoreCase(p.cur.slice(p.src), "recursive")) {
+        p.advance();
+    }
     var list: std.ArrayList(ParsedCte) = .empty;
     errdefer {
         for (list.items) |c| freeOne(p.allocator, c);

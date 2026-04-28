@@ -578,3 +578,29 @@ SELECT * FROM (WITH cte AS (SELECT 1 AS x UNION SELECT 2) SELECT * FROM cte);
 SELECT cnt FROM (WITH src(x) AS (VALUES (10),(20),(30)) SELECT count(*) AS cnt FROM src);
 SELECT a.y FROM (WITH t(n) AS (VALUES (1),(2),(3)) SELECT n*10 AS y FROM t) AS a ORDER BY a.y;
 SELECT (SELECT v FROM (WITH s(p) AS (SELECT 7) SELECT p*p AS v FROM s));
+
+# WITH RECURSIVE — fixed-point CTE iteration (Iter31.AD):
+#  * sqlite3 supports `WITH RECURSIVE name(c1,...) AS (BASE UNION [ALL]
+#    RECURSIVE_STEP) SELECT ... FROM name` where the recursive step
+#    references `name`. sqlite0 used to reject any setop branch that
+#    referenced its enclosing CTE name with `Error.NoSuchTable` (the
+#    name resolved through CTE first, but the inner table_ref scan
+#    didn't see itself yet).
+#  * Implementation: `engine_cte.materialize` detects self-reference by
+#    scanning every FROM term (recursing into setop branches and
+#    subqueries) and dispatches to a fixed-point loop that:
+#      1. Runs the base alone (branches stripped) → working_set R0.
+#      2. Publishes a TransientCte slot pointing at working_set so the
+#         recursive step's FROM resolution sees it.
+#      3. Iterates: run recursive step, append new rows, set
+#         working_set to the new rows (UNION ALL) or the new-and-unique
+#         rows (UNION). Stop when working_set is empty.
+#      4. Hard cap at 10k rows / iterations to bound runaway queries.
+#  * The `RECURSIVE` keyword is parsed but optional — sqlite3 detects
+#    by shape, and so do we.
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT * FROM r;
+WITH r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT * FROM r;
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n*2 FROM r WHERE n<10) SELECT * FROM r;
+WITH RECURSIVE fib(a,b) AS (SELECT 0,1 UNION ALL SELECT b,a+b FROM fib WHERE b<20) SELECT a FROM fib;
+WITH RECURSIVE r(n) AS (SELECT 1 UNION SELECT n FROM r WHERE n<3) SELECT * FROM r;
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT sum(n) FROM r;
