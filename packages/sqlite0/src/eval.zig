@@ -31,6 +31,12 @@ pub const EvalContext = struct {
     /// Drives qualified-ref match and ambiguity checks; empty when FROM
     /// is absent or the source path didn't populate qualifiers.
     column_qualifiers: []const []const u8 = &.{},
+    /// Iter31.R — per-column default collation parallel to `columns`.
+    /// Empty when the source path didn't carry schema collation info
+    /// (treat as all-binary). Read by `collation.pickWithSchema` so a
+    /// bare ref to a `COLLATE NOCASE`-declared column drives compares
+    /// case-insensitively without an explicit wrapper.
+    column_collations: []const ast.CollationKind = &.{},
     /// Per-group aggregate-call substitution map. `aggregate.zig`
     /// pre-computes each aggregate's value for the current group then
     /// puts pointer→Value pairs here; `evalFuncCall` returns a duped
@@ -57,6 +63,7 @@ pub const OuterFrame = struct {
     current_row: []const Value = &.{},
     columns: []const []const u8 = &.{},
     column_qualifiers: []const []const u8 = &.{},
+    column_collations: []const ast.CollationKind = &.{},
 };
 
 /// Pointer-keyed map from func_call AST nodes to their finalised aggregate
@@ -161,7 +168,7 @@ fn evalUnaryBitNot(ctx: EvalContext, operand: *Expr) Error!Value {
 }
 
 fn evalCompare(ctx: EvalContext, c: Expr.Compare) Error!Value {
-    const kind = collation.pick(c.left, c.right);
+    const kind = collation.pickWithSchema(c.left, c.right, ctx.columns, ctx.column_qualifiers, ctx.column_collations);
     const left = try evalExpr(ctx, c.left);
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, c.right);
@@ -178,7 +185,7 @@ fn evalCompare(ctx: EvalContext, c: Expr.Compare) Error!Value {
 }
 
 fn evalEqCheck(ctx: EvalContext, e: Expr.EqCheck) Error!Value {
-    const kind = collation.pick(e.left, e.right);
+    const kind = collation.pickWithSchema(e.left, e.right, ctx.columns, ctx.column_qualifiers, ctx.column_collations);
     const left = try evalExpr(ctx, e.left);
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, e.right);
@@ -193,7 +200,7 @@ fn evalEqCheck(ctx: EvalContext, e: Expr.EqCheck) Error!Value {
 }
 
 fn evalIsCheck(ctx: EvalContext, e: Expr.IsCheck) Error!Value {
-    const kind = collation.pick(e.left, e.right);
+    const kind = collation.pickWithSchema(e.left, e.right, ctx.columns, ctx.column_qualifiers, ctx.column_collations);
     const left = try evalExpr(ctx, e.left);
     errdefer ops.freeValue(ctx.allocator, left);
     const right = try evalExpr(ctx, e.right);
@@ -216,8 +223,8 @@ fn evalBetween(ctx: EvalContext, b: Expr.Between) Error!Value {
     // back to lo (sqlite3 quirk: lo is checked before hi). This matches
     // `'A' COLLATE NOCASE BETWEEN 'a' AND 'z'` → 1 and
     // `'A' BETWEEN 'a' COLLATE NOCASE AND 'z' COLLATE NOCASE` → 1.
-    const lo_kind = collation.pick(b.value, b.lo);
-    const hi_kind = collation.pick(b.value, b.hi);
+    const lo_kind = collation.pickWithSchema(b.value, b.lo, ctx.columns, ctx.column_qualifiers, ctx.column_collations);
+    const hi_kind = collation.pickWithSchema(b.value, b.hi, ctx.columns, ctx.column_qualifiers, ctx.column_collations);
     const value = try evalExpr(ctx, b.value);
     defer ops.freeValue(ctx.allocator, value);
     const lo = try evalExpr(ctx, b.lo);
@@ -231,11 +238,12 @@ fn evalBetween(ctx: EvalContext, b: Expr.Between) Error!Value {
 }
 
 fn evalInList(ctx: EvalContext, il: Expr.InList) Error!Value {
-    // IN list: collation propagates from the value side only — sqlite3
-    // does NOT honor per-item collation overrides. Verified
-    // `'A' COLLATE NOCASE IN ('a', 'b', 'c')` → 1 vs.
-    // `'A' IN ('a' COLLATE NOCASE, ...)` → 0.
-    const kind = collation.peekKind(il.value) orelse .binary;
+    // IN list: collation comes from the value side only (sqlite3 ignores
+    // per-item COLLATE). Iter31.R: bare column-ref falls back to its
+    // schema-default collation.
+    const kind = collation.peekKind(il.value) orelse
+        collation.columnDefault(il.value, ctx.columns, ctx.column_qualifiers, ctx.column_collations) orelse
+        .binary;
     const value = try evalExpr(ctx, il.value);
     defer ops.freeValue(ctx.allocator, value);
     var items: std.ArrayList(Value) = .empty;

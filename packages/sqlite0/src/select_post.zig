@@ -33,9 +33,12 @@ pub const OrderTerm = struct {
     /// explicit `NULLS FIRST` / `NULLS LAST`).
     nulls_first: bool = true,
     /// Iter31.O — collating sequence for TEXT-vs-TEXT key comparison.
-    /// `.binary` is the no-op default; the translation layer pulls the
-    /// outermost `Collate(...)` wrapper from the parsed expression.
-    collation: ast.CollationKind = .binary,
+    /// `null` = no explicit COLLATE wrapper; sort site falls back to a
+    /// bare column-ref's schema collation (Iter31.R) before defaulting
+    /// to `.binary`. `.binary` (some) means the user wrote
+    /// `COLLATE BINARY` and that explicit choice locks BINARY in even
+    /// when the column is declared NOCASE.
+    collation: ?ast.CollationKind = null,
 };
 
 pub const PostProcess = struct {
@@ -144,27 +147,35 @@ fn valuesEqualForDistinct(a: Value, b: Value, kind: ast.CollationKind) bool {
     };
 }
 
-/// Build per-column kinds from SELECT items. Returns empty (= BINARY fallback)
-/// when items contains `*` (star expansion arity is dynamic) or when items
-/// length doesn't match row arity (mismatch shape; safer to skip than guess).
-/// Caller owns the returned slice.
+/// Build per-column kinds from SELECT items, with Iter31.R schema-default
+/// fall-back: explicit COLLATE wrapper > bare-column-ref's column-level
+/// COLLATE > BINARY. Returns empty (= BINARY fallback) when items contains
+/// `*` (star expansion arity is dynamic) or when items length doesn't match
+/// row arity. Caller owns the returned slice.
 pub fn extractDistinctCollations(
     allocator: std.mem.Allocator,
     items: []const @import("select.zig").SelectItem,
     row_arity: usize,
+    source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
 ) ![]ast.CollationKind {
     for (items) |item| if (item == .star) return &.{};
     if (items.len != row_arity) return &.{};
     const out = try allocator.alloc(ast.CollationKind, items.len);
     for (items, out) |item, *o| {
-        o.* = collation.peekKind(item.expr.expr) orelse .binary;
+        o.* = collation.peekKind(item.expr.expr) orelse
+            collation.columnDefault(item.expr.expr, source_columns, source_qualifiers, source_collations) orelse
+            .binary;
     }
     return out;
 }
 
 /// Stable sort of `rows` by parallel `keys`, applying per-term direction
 /// and collation. Uses an indirection array so the (larger) projected
-/// rows aren't swapped during comparisons.
+/// rows aren't swapped during comparisons. Resolves each term's effective
+/// collation up front: explicit wrapper > bare-column-ref schema default
+/// > BINARY (Iter31.R).
 ///
 /// Stability matters under COLLATE: sqlite3 preserves input order on
 /// equal keys (verified `('A','a','B','b') ORDER BY column1 COLLATE
@@ -175,8 +186,18 @@ pub fn sortRowsByKeys(
     rows: [][]Value,
     keys: [][]Value,
     terms: []const OrderTerm,
+    source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
 ) !void {
     std.debug.assert(rows.len == keys.len);
+    const resolved = try allocator.alloc(ast.CollationKind, terms.len);
+    defer allocator.free(resolved);
+    for (terms, resolved) |t, *r| {
+        r.* = t.collation orelse
+            collation.columnDefault(t.expr, source_columns, source_qualifiers, source_collations) orelse
+            .binary;
+    }
     const indices = try allocator.alloc(usize, rows.len);
     defer allocator.free(indices);
     for (indices, 0..) |*slot, i| slot.* = i;
@@ -184,6 +205,7 @@ pub fn sortRowsByKeys(
     const Ctx = struct {
         keys: [][]Value,
         terms: []const OrderTerm,
+        resolved: []const ast.CollationKind,
         fn lessThan(self: @This(), a: usize, b: usize) bool {
             for (self.terms, 0..) |term, ti| {
                 const va = self.keys[a][ti];
@@ -192,19 +214,16 @@ pub fn sortRowsByKeys(
                 const b_null = vb == .null;
                 if (a_null and b_null) continue;
                 if (a_null or b_null) {
-                    // NULL placement is independent of ASC/DESC — sqlite3
-                    // honors NULLS FIRST / NULLS LAST verbatim regardless
-                    // of the direction modifier on the same term.
                     return if (a_null) term.nulls_first else !term.nulls_first;
                 }
-                const cmp = compareValuesCollated(va, vb, term.collation);
+                const cmp = compareValuesCollated(va, vb, self.resolved[ti]);
                 if (cmp == 0) continue;
                 return if (term.descending) cmp > 0 else cmp < 0;
             }
             return false;
         }
     };
-    std.sort.block(usize, indices, Ctx{ .keys = keys, .terms = terms }, Ctx.lessThan);
+    std.sort.block(usize, indices, Ctx{ .keys = keys, .terms = terms, .resolved = resolved }, Ctx.lessThan);
 
     const scratch = try allocator.alloc([]Value, rows.len);
     defer allocator.free(scratch);

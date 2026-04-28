@@ -6,24 +6,29 @@ const std = @import("std");
 const ops = @import("ops.zig");
 const parser_mod = @import("parser.zig");
 const func_util = @import("func_util.zig");
+const ast = @import("ast.zig");
+const collation_mod = @import("collation.zig");
 
 const Error = ops.Error;
 const Parser = parser_mod.Parser;
 
 /// One column in a parsed CREATE TABLE. `is_ipk` is set only when the
 /// column-def's type+constraint stream matches the literal sequence
-/// `INTEGER PRIMARY KEY` (case-insensitive, depth-0). sqlite3 reserves
-/// IPK aliasing for that exact spelling — `INT PRIMARY KEY`,
-/// `BIGINT PRIMARY KEY`, `INTEGER PRIMARY KEY DESC` are NOT aliases
-/// (the last creates a regular index instead). `is_not_null` (Iter29.B)
-/// is set when the column-constraint stream contains `NOT NULL` at
-/// depth 0; sqlite3 enforces this at INSERT/UPDATE time. PRIMARY KEY
-/// does NOT imply NOT NULL in sqlite3 (legacy quirk: even non-IPK PK
-/// columns accept NULL), so the two flags are independent.
+/// `INTEGER PRIMARY KEY` (case-insensitive, depth-0). `is_not_null`
+/// captures depth-0 `NOT NULL`. `collation` (Iter31.R) captures the
+/// last depth-0 `COLLATE <name>` clause and becomes the column's default
+/// collating sequence — comparisons / DISTINCT / ORDER BY / GROUP BY on
+/// a bare ref to this column use it when no explicit `expr COLLATE name`
+/// wrapper is present. Default `.binary` matches sqlite3's column
+/// default. Multiple COLLATE clauses on one column let the LAST one
+/// win (sqlite3 honors the rightmost too — verified
+/// `CREATE TABLE t(x COLLATE BINARY COLLATE NOCASE)` then `x = 'A'`
+/// matches 'a').
 pub const ParsedColumn = struct {
     name: []const u8,
     is_ipk: bool = false,
     is_not_null: bool = false,
+    collation: ast.CollationKind = .binary,
 };
 
 /// All slices borrow from `Parser.src`, which the caller (`Database.execute`)
@@ -127,12 +132,13 @@ test "parseColumnDef: missing NOT NULL leaves flag false" {
 }
 
 /// Column-def: `<name> [<type-name> ...] [<column-constraint> ...]`.
-/// Captures the column name and scans the trailing token stream for two
-/// signals at depth 0: the literal `INTEGER PRIMARY KEY` triple (IPK
-/// aliasing — Iter28) and the `NOT NULL` pair (constraint enforcement
-/// — Iter29.B). Everything else is consumed and discarded —
-/// `x INT DEFAULT (1+1)`, `x VARCHAR(255)`, `x TEXT COLLATE NOCASE`,
-/// etc. all parse without their semantics being captured.
+/// Captures three depth-0 signals:
+///   - `INTEGER PRIMARY KEY` triple → `is_ipk` (Iter28).
+///   - `NOT NULL` pair → `is_not_null` (Iter29.B).
+///   - `COLLATE <name>` clause → `collation` (Iter31.R). Last wins;
+///     unknown name → `Error.SyntaxError` ("no such collation sequence").
+/// Other tokens are scanned for paren depth tracking and otherwise
+/// discarded — type names, DEFAULT expressions, CHECK constraints, etc.
 fn parseColumnDef(p: *Parser) !ParsedColumn {
     if (p.cur.kind != .identifier) return Error.SyntaxError;
     const name = p.cur.slice(p.src);
@@ -147,16 +153,29 @@ fn parseColumnDef(p: *Parser) !ParsedColumn {
     // identifiers, so a separate flag tracks the depth-0 `keyword_not`.
     var saw_not: bool = false;
     var is_not_null: bool = false;
+    var collation: ast.CollationKind = .binary;
     while (true) {
         switch (p.cur.kind) {
             .comma, .rparen => if (depth == 0) return .{
                 .name = name,
                 .is_ipk = is_ipk,
                 .is_not_null = is_not_null,
+                .collation = collation,
             },
             else => {},
         }
-        if (depth == 0 and p.cur.kind == .identifier) {
+        if (depth == 0 and p.cur.kind == .keyword_collate) {
+            // Consume `COLLATE <name>` as a unit. The trailing
+            // identifier is the collation name; unknown names match
+            // sqlite3's "no such collation sequence" error.
+            p.advance();
+            if (p.cur.kind != .identifier) return Error.SyntaxError;
+            const cname = p.cur.slice(p.src);
+            collation = collation_mod.kindFromName(cname) orelse return Error.SyntaxError;
+            saw_integer = false;
+            saw_primary = false;
+            saw_not = false;
+        } else if (depth == 0 and p.cur.kind == .identifier) {
             const tok = p.cur.slice(p.src);
             if (saw_primary and func_util.eqlIgnoreCase(tok, "key")) {
                 is_ipk = true;

@@ -231,7 +231,15 @@ pub fn dupeArena(allocator: std.mem.Allocator, v: Value) !Value {
 /// Map an `ast.Expr.FuncCall` aggregate call to an initialised `Aggregator`.
 /// `count` with zero args is `count(*)`; one arg is the column-aware variant.
 /// `min`/`max` arity is already validated to 1 by `aggregate_walk.isAggregateCall`.
-pub fn aggregatorFromCall(fc: ast.Expr.FuncCall) Aggregator {
+/// `(source_columns, source_qualifiers, source_collations)` provide the
+/// schema fall-back for `count(DISTINCT x)`-style calls when no explicit
+/// `COLLATE` wrapper is present (Iter31.R).
+pub fn aggregatorFromCall(
+    fc: ast.Expr.FuncCall,
+    source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
+) Aggregator {
     const kind: Aggregator.Kind = if (func_util.eqlIgnoreCase(fc.name, "count"))
         if (fc.args.len == 0) .count_star else .count
     else if (func_util.eqlIgnoreCase(fc.name, "sum")) .sum
@@ -243,7 +251,9 @@ pub fn aggregatorFromCall(fc: ast.Expr.FuncCall) Aggregator {
         func_util.eqlIgnoreCase(fc.name, "string_agg")) .group_concat
     else unreachable;
     const distinct_kind: ast.CollationKind = if (fc.distinct and fc.args.len == 1)
-        (collation.peekKind(fc.args[0]) orelse .binary)
+        (collation.peekKind(fc.args[0]) orelse
+            collation.columnDefault(fc.args[0], source_columns, source_qualifiers, source_collations) orelse
+            .binary)
     else
         .binary;
     return Aggregator.init(kind, fc.distinct, distinct_kind);

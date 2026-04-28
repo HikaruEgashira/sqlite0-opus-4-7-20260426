@@ -25,6 +25,7 @@ const stmt_mod = @import("stmt.zig");
 const parser_mod = @import("parser.zig");
 const engine = @import("engine.zig");
 const pager_mod = @import("pager.zig");
+const ast = @import("ast.zig");
 
 const Value = value_mod.Value;
 pub const Error = ops.Error;
@@ -71,6 +72,12 @@ pub const Table = struct {
     /// length as `columns`; allocated by registerTable / synthetic
     /// registration; freed in `deinit`.
     not_null: []bool,
+    /// Iter31.R — parallel to `columns`. The column-level COLLATE
+    /// sequence (default `.binary`) used by binary comparisons / ORDER
+    /// BY / GROUP BY / DISTINCT / set-op dedup when the operand is a
+    /// bare reference to this column AND no explicit `expr COLLATE`
+    /// wrapper is present. Explicit COLLATE always overrides.
+    collations: []ast.CollationKind,
     rows: std.ArrayListUnmanaged([]Value) = .empty,
     /// Non-zero when this table lives in a Pager-backed sqlite3 .db
     /// file. 0 means in-memory (CREATE TABLE on a memory Database).
@@ -110,6 +117,7 @@ pub const Table = struct {
         for (self.columns) |c| allocator.free(c);
         allocator.free(self.columns);
         allocator.free(self.not_null);
+        allocator.free(self.collations);
     }
 };
 
@@ -261,6 +269,8 @@ pub const Database = struct {
         }
         const not_null = try self.allocator.alloc(bool, parsed.columns.len);
         errdefer self.allocator.free(not_null);
+        const collations = try self.allocator.alloc(ast.CollationKind, parsed.columns.len);
+        errdefer self.allocator.free(collations);
         var ipk: ?usize = null;
         while (produced < parsed.columns.len) : (produced += 1) {
             const src = parsed.columns[produced];
@@ -284,11 +294,13 @@ pub const Database = struct {
             }
             cols[produced] = lowered;
             not_null[produced] = src.is_not_null;
+            collations[produced] = src.collation;
         }
 
         try self.tables.put(self.allocator, key, .{
             .columns = cols,
             .not_null = not_null,
+            .collations = collations,
             .ipk_column = ipk,
         });
     }

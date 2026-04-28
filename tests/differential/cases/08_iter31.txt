@@ -340,3 +340,51 @@ SELECT x FROM (SELECT 'a' AS x COLLATE BINARY UNION SELECT 'A' COLLATE NOCASE) O
 SELECT x FROM (SELECT 'a' AS x COLLATE NOCASE INTERSECT SELECT 'A') ORDER BY 1
 SELECT x FROM (SELECT 'a' AS x COLLATE RTRIM UNION SELECT 'a   ') ORDER BY 1
 SELECT x FROM (SELECT 'a' AS x UNION ALL SELECT 'A' COLLATE NOCASE) ORDER BY 1
+
+# CREATE TABLE column-level COLLATE (Iter31.R):
+#  * Schema-declared `x TEXT COLLATE NOCASE` makes bare `x = 'a'` case-insensitive.
+#  * Explicit COLLATE on either operand overrides the column default
+#    (BINARY locks; NOCASE confirms).
+#  * LHS column collation wins in column-vs-column compares
+#    (a NOCASE / b BINARY: a=b honors NOCASE, b=a honors BINARY).
+#  * ORDER BY on a NOCASE-declared column folds case (stable input order).
+#  * GROUP BY / SELECT DISTINCT / count(DISTINCT) on a NOCASE column fold case.
+#  * Wrapped expression (upper(x), x||'') breaks column-collation propagation.
+#  * Multi-COLLATE on declaration: last wins.
+#  * RTRIM column folds trailing-space variants on equality / DISTINCT.
+#  * Unknown collation in CREATE TABLE → SyntaxError ("no such collation").
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'),('b'); SELECT count(*) FROM t WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM t WHERE x = 'a' COLLATE BINARY;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM t WHERE x COLLATE BINARY = 'a';
+CREATE TABLE t(a TEXT COLLATE NOCASE, b TEXT); INSERT INTO t VALUES ('A','a'); SELECT a=b, b=a FROM t;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'),('b'); SELECT x FROM t ORDER BY x;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'),('b'); SELECT x FROM t ORDER BY x DESC;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'),('b'); SELECT DISTINCT x FROM t;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'),('b'); SELECT x, count(*) FROM t GROUP BY x ORDER BY x;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'),('b'); SELECT count(DISTINCT x) FROM t;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'); SELECT count(*) FROM t WHERE upper(x) = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM t WHERE x||'' = 'a';
+CREATE TABLE t(x TEXT COLLATE BINARY COLLATE NOCASE); INSERT INTO t VALUES ('A'); SELECT count(*) FROM t WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE COLLATE BINARY); INSERT INTO t VALUES ('A'); SELECT count(*) FROM t WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES ('a   '),('a'),('b'); SELECT count(*) FROM t WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES ('a   '),('a'),('b'); SELECT DISTINCT x FROM t;
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'),('B'); SELECT count(*) FROM t WHERE x IN ('a');
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('a'),('B'),('b'); SELECT count(*) FROM t WHERE x BETWEEN 'a' AND 'a';
+CREATE TABLE t(x TEXT COLLATE BOGUS);
+
+# Subquery-in-FROM propagates column-level COLLATE (Iter31.R follow-up):
+#  * Bare column-ref projection carries the inner column's schema collation
+#    across the subquery boundary; SELECT *, alias, qualified ref behave
+#    identically.
+#  * Wrapped exprs (max(x), upper(x)) drop propagation → BINARY in outer.
+#  * DISTINCT / GROUP BY in the inner SELECT keep propagation (projection
+#    is still a bare ref); setop branches drop it (sqlite3 quirk).
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM t) WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT * FROM t) WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x AS y FROM t) WHERE y = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT a.x FROM t a) WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT upper(x) AS y FROM t) WHERE y = 'A';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT DISTINCT x FROM t) WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM t GROUP BY x) WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM t UNION SELECT 'B') WHERE x = 'a';
+CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('A'),('a'); SELECT count(*) FROM (SELECT x FROM (SELECT x FROM t)) WHERE x = 'a';

@@ -239,6 +239,7 @@ fn modifyOneLeaf(
             .current_row = row_values,
             .columns = t.columns,
             .column_qualifiers = dml_qualifiers,
+            .column_collations = t.collations,
             .db = db,
         };
         switch (op) {

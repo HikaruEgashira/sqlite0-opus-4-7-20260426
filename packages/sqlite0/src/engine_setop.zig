@@ -148,6 +148,8 @@ pub fn applySetopPostProcess(
     limit: ?*ast.Expr,
     offset: ?*ast.Expr,
     leftmost_columns: []const []const u8,
+    leftmost_qualifiers: []const []const u8,
+    leftmost_collations: []const ast.CollationKind,
     outer_frames: []const eval.OuterFrame,
 ) Error![][]Value {
     const current = rows;
@@ -167,7 +169,11 @@ pub fn applySetopPostProcess(
             }
             slot.* = key;
         }
-        try select_post.sortRowsByKeys(arena, current, keys, so_terms);
+        // Setop chain ORDER BY collation: explicit wrapper wins, then
+        // leftmost branch's per-projection-item column-default collation
+        // (sqlite3 carries column-level NOCASE/RTRIM through UNION ALL —
+        // verified `SELECT x FROM t COLLATE NOCASE UNION ... ORDER BY x`).
+        try select_post.sortRowsByKeys(arena, current, keys, so_terms, leftmost_columns, leftmost_qualifiers, leftmost_collations);
     }
     const pp = select_post.PostProcess{
         .distinct = false,

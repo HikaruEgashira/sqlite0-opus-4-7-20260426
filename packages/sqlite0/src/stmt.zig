@@ -56,23 +56,23 @@ pub const freeSetopBranches = stmt_setop.freeSetopBranches;
 pub const OrderDirection = enum { asc, desc };
 
 /// `position` non-null = 1-based SELECT-list column ref (sqlite3 quirk).
-/// `nulls_first` null = direction default (ASC→true, DESC→false). `collation`
-/// is the outermost COLLATE wrapper (Iter31.O); BINARY when none. `expr`
-/// retains the wrapper so eval-time callers see the same value either way.
+/// `nulls_first` null = direction default. `collation` is the outermost
+/// COLLATE wrapper (Iter31.O); null = no wrapper at all (so the call site
+/// can fall back to a bare column-ref's schema collation per Iter31.R).
 pub const OrderTerm = struct {
     expr: *ast.Expr,
     position: ?usize = null,
     dir: OrderDirection,
     nulls_first: ?bool = null,
-    collation: ast.CollationKind = .binary,
+    collation: ?ast.CollationKind = null,
 };
 
-/// `collation` is the outermost COLLATE wrapper (Iter31.P); used by
-/// `aggregate.groupKeysEqual` for per-column key compare.
+/// `collation` is the outermost COLLATE wrapper (Iter31.P); null = no
+/// wrapper (Iter31.R fall-back to column-default).
 pub const GroupByTerm = struct {
     expr: *ast.Expr,
     position: ?usize = null,
-    collation: ast.CollationKind = .binary,
+    collation: ?ast.CollationKind = null,
 };
 
 // FROM clause — types and parsing live in stmt_from.zig (split out to
@@ -244,7 +244,7 @@ fn parseGroupByList(p: *Parser) ![]GroupByTerm {
             .integer => |n| if (n > 0) @as(usize, @intCast(n)) else null,
             else => null,
         } else null;
-        try list.append(p.allocator, .{ .expr = expr, .position = position, .collation = peeled.kind });
+        try list.append(p.allocator, .{ .expr = expr, .position = position, .collation = collation.peekKind(expr) });
         if (p.cur.kind != .comma) break;
         p.advance();
     }
@@ -303,7 +303,7 @@ fn parseOrderTerm(p: *Parser, terms: *std.ArrayList(OrderTerm)) !void {
         else return Error.SyntaxError;
         p.advance();
     }
-    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir, .nulls_first = nulls_first, .collation = peeled.kind });
+    try terms.append(p.allocator, .{ .expr = expr, .position = position, .dir = dir, .nulls_first = nulls_first, .collation = collation.peekKind(expr) });
 }
 
 pub fn freeOrderTerms(allocator: std.mem.Allocator, terms: []OrderTerm) void {

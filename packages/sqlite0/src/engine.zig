@@ -267,16 +267,16 @@ pub fn executeSelectWithOuter(
         current = try engine_setop.combine(alloc, branch.kind, current, right, resolved);
         if (left_arity == null) left_arity = right_arity;
     }
-    // ORDER BY <name> in a setop chain resolves against the leftmost branch's
-    // projection (sqlite3 quirk: `SELECT 1 AS a UNION SELECT 2 ORDER BY a` is
-    // valid; the alias from branch 1 wins). Computing names lazily — only
-    // when the chain actually has an ORDER BY — keeps the no-ORDER-BY path
-    // free of a second FROM-resolution pass.
+    // Setop ORDER BY <name>: leftmost branch's projection drives name
+    // resolution (sqlite3 `... UNION SELECT 2 ORDER BY a` quirk). Lazy
+    // — only paid when ORDER BY exists. Iter31.R: column-default
+    // collation fall-through across UNION deferred (empty leftmost
+    // qualifiers/collations → explicit wrapper or BINARY).
     const leftmost_columns: []const []const u8 = if (ps.order_by.len > 0)
         try projectedColumnNames(db, alloc, ps)
     else
         &.{};
-    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, leftmost_columns, outer_frames);
+    return engine_setop.applySetopPostProcess(alloc, db, current, ps.order_by, ps.limit, ps.offset, leftmost_columns, &.{}, &.{}, outer_frames);
 }
 
 /// Execute one ParsedSelect with the given PostProcess. Stripped out of
@@ -299,7 +299,7 @@ fn executeOneSelect(
         if (wants_grouping) {
             const empty_row: []const Value = &.{};
             var synthetic = [_][]const Value{empty_row};
-            return aggregate.executeAggregated(alloc, db, ps.items, synthetic[0..], &.{}, &.{}, ps.where, ps.group_by, ps.having, pp, outer_frames);
+            return aggregate.executeAggregated(alloc, db, ps.items, synthetic[0..], &.{}, &.{}, &.{}, ps.where, ps.group_by, ps.having, pp, outer_frames);
         }
         return select_mod.executeWithoutFrom(alloc, db, ps.items, ps.where, pp, outer_frames);
     }
@@ -310,11 +310,11 @@ fn executeOneSelect(
     if (wants_grouping) {
         const inputs = try alloc.alloc([]const Value, cart.rows.len);
         for (cart.rows, inputs) |src, *slot| slot.* = src;
-        return aggregate.executeAggregated(alloc, db, ps.items, inputs, cart.columns, cart.qualifiers, ps.where, ps.group_by, ps.having, pp, outer_frames);
+        return aggregate.executeAggregated(alloc, db, ps.items, inputs, cart.columns, cart.qualifiers, cart.collations, ps.where, ps.group_by, ps.having, pp, outer_frames);
     }
     const rows_const = try alloc.alloc([]const Value, cart.rows.len);
     for (cart.rows, rows_const) |src, *slot| slot.* = src;
-    return select_mod.executeWithFrom(alloc, db, ps.items, rows_const, cart.columns, cart.qualifiers, ps.where, pp, outer_frames);
+    return select_mod.executeWithFrom(alloc, db, ps.items, rows_const, cart.columns, cart.qualifiers, cart.collations, ps.where, pp, outer_frames);
 }
 
 /// Detect ambiguous star expansion across the FROM cartesian. For each `*`

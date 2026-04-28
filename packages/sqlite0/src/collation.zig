@@ -85,6 +85,53 @@ pub fn pick(left: *const ast.Expr, right: *const ast.Expr) CollationKind {
     return .binary;
 }
 
+/// Iter31.R — column-default lookup for a bare `column_ref` AST node.
+/// Returns the schema collation when the ref resolves into the
+/// passed-in `(columns, qualifiers, collations)` triple; null when the
+/// expr is not a column-ref or doesn't resolve. Used by `pickWithSchema`
+/// to wire column-level COLLATE into the standard precedence ladder.
+/// Only bare refs propagate column collation — a wrapped expression
+/// (`upper(a)`, `a||''`) yields BINARY in sqlite3 too.
+pub fn columnDefault(
+    expr: *const ast.Expr,
+    columns: []const []const u8,
+    qualifiers: []const []const u8,
+    collations: []const CollationKind,
+) ?CollationKind {
+    if (expr.* != .column_ref) return null;
+    const cr = expr.column_ref;
+    var i: usize = 0;
+    while (i < columns.len) : (i += 1) {
+        if (!std.ascii.eqlIgnoreCase(cr.name, columns[i])) continue;
+        if (cr.qualifier) |q| {
+            if (i >= qualifiers.len) continue;
+            if (!std.ascii.eqlIgnoreCase(q, qualifiers[i])) continue;
+        }
+        if (i < collations.len) return collations[i];
+        return null;
+    }
+    return null;
+}
+
+/// Iter31.R — full sqlite3 precedence: explicit COLLATE wrapper > column-
+/// default. Among explicit, LHS wins; among column-defaults, LHS wins;
+/// fallback BINARY. Column-default only fires when neither side is
+/// wrapped — explicit always overrides (verified `a = 'x' COLLATE
+/// BINARY` returns BINARY-compared even when `a` is NOCASE-declared).
+pub fn pickWithSchema(
+    left: *const ast.Expr,
+    right: *const ast.Expr,
+    columns: []const []const u8,
+    qualifiers: []const []const u8,
+    collations: []const CollationKind,
+) CollationKind {
+    if (peekKind(left)) |k| return k;
+    if (peekKind(right)) |k| return k;
+    if (columnDefault(left, columns, qualifiers, collations)) |k| return k;
+    if (columnDefault(right, columns, qualifiers, collations)) |k| return k;
+    return .binary;
+}
+
 /// 3-way text compare under `kind`. NOCASE folds ASCII letters only,
 /// then byte-compares; RTRIM strips trailing spaces, then byte-compares.
 /// Empty / equal-after-fold / equal-after-trim collapses to `.eq`.

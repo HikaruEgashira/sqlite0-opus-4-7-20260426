@@ -65,6 +65,7 @@ pub fn executeDelete(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
                 .current_row = row,
                 .columns = t.columns,
                 .column_qualifiers = dml_qualifiers,
+                .column_collations = t.collations,
                 .db = db,
             };
             const cond = try eval.evalExpr(ctx, w_ast);
@@ -157,6 +158,7 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
                 .current_row = row_ptr.*,
                 .columns = t.columns,
                 .column_qualifiers = dml_qualifiers,
+                .column_collations = t.collations,
                 .db = db,
             };
             const cond = try eval.evalExpr(ctx, w_ast);
@@ -168,6 +170,7 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
             .current_row = row_ptr.*,
             .columns = t.columns,
             .column_qualifiers = dml_qualifiers,
+            .column_collations = t.collations,
             .db = db,
         };
         const new_values = try arena.alloc(Value, parsed.assignments.len);

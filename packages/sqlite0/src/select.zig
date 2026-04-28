@@ -179,10 +179,10 @@ pub fn executeWithoutFrom(
     pp: PostProcess,
     outer_frames: []const eval.OuterFrame,
 ) ![][]Value {
-    if (!try evalWhereTruthy(allocator, db, where_ast, &.{}, &.{}, &.{}, outer_frames)) {
+    if (!try evalWhereTruthy(allocator, db, where_ast, &.{}, &.{}, &.{}, &.{}, outer_frames)) {
         return allocator.alloc([]Value, 0);
     }
-    const row = try evaluateSelectRow(allocator, db, items, &.{}, &.{}, &.{}, outer_frames);
+    const row = try evaluateSelectRow(allocator, db, items, &.{}, &.{}, &.{}, &.{}, outer_frames);
     errdefer {
         for (row) |v| ops.freeValue(allocator, v);
         allocator.free(row);
@@ -197,6 +197,9 @@ pub fn executeWithoutFrom(
 /// filter by WHERE, then evaluate the SELECT list (`*` expanding to all
 /// source columns) bound to that row. `pp.order_by` is evaluated against
 /// the SOURCE row (sqlite3 resolves ORDER BY in the FROM scope first).
+/// `source_collations` (Iter31.R, parallel to source_columns) carries the
+/// schema-default COLLATE for every source column so WHERE / projection /
+/// ORDER BY pick it up via `EvalContext.column_collations`.
 pub fn executeWithFrom(
     allocator: std.mem.Allocator,
     db: ?*Database,
@@ -204,6 +207,7 @@ pub fn executeWithFrom(
     source_rows: []const []const Value,
     source_columns: []const []const u8,
     source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
     where_ast: ?*ast.Expr,
     pp: PostProcess,
     outer_frames: []const eval.OuterFrame,
@@ -226,15 +230,15 @@ pub fn executeWithFrom(
     }
 
     for (source_rows) |source_row| {
-        if (!try evalWhereTruthy(allocator, db, where_ast, source_row, source_columns, source_qualifiers, outer_frames)) continue;
-        const out_row = try evaluateSelectRow(allocator, db, items, source_row, source_columns, source_qualifiers, outer_frames);
+        if (!try evalWhereTruthy(allocator, db, where_ast, source_row, source_columns, source_qualifiers, source_collations, outer_frames)) continue;
+        const out_row = try evaluateSelectRow(allocator, db, items, source_row, source_columns, source_qualifiers, source_collations, outer_frames);
         rows.append(allocator, out_row) catch |err| {
             for (out_row) |v| ops.freeValue(allocator, v);
             allocator.free(out_row);
             return err;
         };
         if (pp.order_by.len > 0) {
-            const key = try evaluateOrderKey(allocator, db, pp.order_by, source_row, source_columns, source_qualifiers, out_row, outer_frames);
+            const key = try evaluateOrderKey(allocator, db, pp.order_by, source_row, source_columns, source_qualifiers, source_collations, out_row, outer_frames);
             sort_keys.append(allocator, key) catch |err| {
                 for (key) |v| ops.freeValue(allocator, v);
                 allocator.free(key);
@@ -244,7 +248,7 @@ pub fn executeWithFrom(
     }
 
     if (pp.order_by.len > 0) {
-        try post.sortRowsByKeys(allocator, rows.items, sort_keys.items, pp.order_by);
+        try post.sortRowsByKeys(allocator, rows.items, sort_keys.items, pp.order_by, source_columns, source_qualifiers, source_collations);
         for (sort_keys.items) |key| {
             for (key) |v| ops.freeValue(allocator, v);
             allocator.free(key);
@@ -256,7 +260,7 @@ pub fn executeWithFrom(
     var all_rows = try rows.toOwnedSlice(allocator);
     if (pp.distinct) {
         const arity = if (all_rows.len > 0) all_rows[0].len else 0;
-        const kinds = try post.extractDistinctCollations(allocator, items, arity);
+        const kinds = try post.extractDistinctCollations(allocator, items, arity, source_columns, source_qualifiers, source_collations);
         defer allocator.free(kinds);
         all_rows = post.dedupeRows(allocator, all_rows, kinds);
     }
@@ -270,6 +274,7 @@ fn evaluateOrderKey(
     current_row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    column_collations: []const ast.CollationKind,
     projected_row: []const Value,
     outer_frames: []const eval.OuterFrame,
 ) ![]Value {
@@ -284,6 +289,7 @@ fn evaluateOrderKey(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .column_collations = column_collations,
         .db = db,
         .outer_frames = outer_frames,
     };
@@ -315,6 +321,7 @@ fn evaluateSelectRow(
     current_row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    column_collations: []const ast.CollationKind,
     outer_frames: []const eval.OuterFrame,
 ) Error![]Value {
     var total: usize = 0;
@@ -333,6 +340,7 @@ fn evaluateSelectRow(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .column_collations = column_collations,
         .db = db,
         .outer_frames = outer_frames,
     };
@@ -377,6 +385,7 @@ fn evalWhereTruthy(
     current_row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    column_collations: []const ast.CollationKind,
     outer_frames: []const eval.OuterFrame,
 ) !bool {
     const w = where_ast orelse return true;
@@ -385,6 +394,7 @@ fn evalWhereTruthy(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .column_collations = column_collations,
         .db = db,
         .outer_frames = outer_frames,
     };

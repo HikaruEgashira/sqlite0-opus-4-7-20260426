@@ -71,6 +71,7 @@ pub fn executeAggregated(
     source_rows: []const []const Value,
     source_columns: []const []const u8,
     source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
     where_ast: ?*ast.Expr,
     group_by: []const stmt_mod.GroupByTerm,
     having: ?*ast.Expr,
@@ -104,6 +105,7 @@ pub fn executeAggregated(
                 .current_row = row,
                 .columns = source_columns,
                 .column_qualifiers = source_qualifiers,
+                .column_collations = source_collations,
                 .db = db,
                 .outer_frames = outer_frames,
             };
@@ -112,8 +114,8 @@ pub fn executeAggregated(
             if (!(ops.truthy(cond) orelse false)) continue;
         }
 
-        const key = try evaluateGroupKey(alloc, db, group_by, items, row, source_columns, source_qualifiers, outer_frames);
-        const group_idx = if (findGroup(groups.items, key, group_by)) |idx| blk: {
+        const key = try evaluateGroupKey(alloc, db, group_by, items, row, source_columns, source_qualifiers, source_collations, outer_frames);
+        const group_idx = if (findGroup(groups.items, key, group_by, source_columns, source_qualifiers, source_collations)) |idx| blk: {
             // Existing group — discard the redundant key (arena reclaims).
             for (key) |v| ops.freeValue(alloc, v);
             alloc.free(key);
@@ -122,12 +124,12 @@ pub fn executeAggregated(
             const idx = groups.items.len;
             try groups.append(alloc, .{
                 .key = key,
-                .aggs = try makeAggregators(alloc, agg_calls.items),
+                .aggs = try makeAggregators(alloc, agg_calls.items, source_columns, source_qualifiers, source_collations),
                 .representative = row,
             });
             break :blk idx;
         };
-        try feedRow(alloc, db, &groups.items[group_idx], agg_calls.items, row, source_columns, source_qualifiers, outer_frames);
+        try feedRow(alloc, db, &groups.items[group_idx], agg_calls.items, row, source_columns, source_qualifiers, source_collations, outer_frames);
     }
 
     // Implicit-group rule: if there are aggregates but no GROUP BY and no
@@ -137,12 +139,12 @@ pub fn executeAggregated(
     if (groups.items.len == 0 and group_by.len == 0 and agg_calls.items.len > 0) {
         try groups.append(alloc, .{
             .key = &.{},
-            .aggs = try makeAggregators(alloc, agg_calls.items),
+            .aggs = try makeAggregators(alloc, agg_calls.items, source_columns, source_qualifiers, source_collations),
             .representative = &.{},
         });
     }
 
-    return finaliseGroups(alloc, db, items, having, pp, agg_calls.items, groups.items, source_columns, source_qualifiers, outer_frames);
+    return finaliseGroups(alloc, db, items, having, pp, agg_calls.items, groups.items, source_columns, source_qualifiers, source_collations, outer_frames);
 }
 
 fn evaluateGroupKey(
@@ -153,6 +155,7 @@ fn evaluateGroupKey(
     row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    column_collations: []const ast.CollationKind,
     outer_frames: []const eval.OuterFrame,
 ) ![]Value {
     const key = try alloc.alloc(Value, group_by.len);
@@ -166,6 +169,7 @@ fn evaluateGroupKey(
         .current_row = row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .column_collations = column_collations,
         .db = db,
         .outer_frames = outer_frames,
     };
@@ -208,33 +212,58 @@ fn resolveGroupByAlias(expr: *ast.Expr, items: []const select.SelectItem) ?*ast.
     return null;
 }
 
-fn findGroup(groups: []const Group, key: []const Value, group_by: []const stmt_mod.GroupByTerm) ?usize {
+fn findGroup(
+    groups: []const Group,
+    key: []const Value,
+    group_by: []const stmt_mod.GroupByTerm,
+    source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
+) ?usize {
     for (groups, 0..) |g, i| {
-        if (groupKeysEqual(g.key, key, group_by)) return i;
+        if (groupKeysEqual(g.key, key, group_by, source_columns, source_qualifiers, source_collations)) return i;
     }
     return null;
 }
 
-/// sqlite3 GROUP BY collation: NULL == NULL within group key (one of the few
-/// places NULL is treated as equal). Numeric values cross-compare via the
-/// REAL coercion already in `compareValues`. TEXT pairs honor the per-term
-/// COLLATE wrapper (Iter31.P) so `GROUP BY x COLLATE NOCASE` folds 'A'/'a'
-/// into one group.
-fn groupKeysEqual(a: []const Value, b: []const Value, group_by: []const stmt_mod.GroupByTerm) bool {
+/// sqlite3 GROUP BY collation: NULL == NULL within group key. TEXT pairs
+/// honor the per-term COLLATE wrapper (Iter31.P) and fall back to the
+/// referenced column's schema collation when the term is a bare column-ref
+/// without an explicit wrapper (Iter31.R) — so `GROUP BY x` on a NOCASE
+/// column folds 'A'/'a' into one group.
+fn groupKeysEqual(
+    a: []const Value,
+    b: []const Value,
+    group_by: []const stmt_mod.GroupByTerm,
+    source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
+) bool {
     if (a.len != b.len) return false;
     for (a, b, 0..) |va, vb, i| {
         if (va == .null and vb == .null) continue;
         if (va == .null or vb == .null) return false;
-        const kind = if (i < group_by.len) group_by[i].collation else .binary;
+        const kind = if (i < group_by.len)
+            (group_by[i].collation orelse
+                collation.columnDefault(group_by[i].expr, source_columns, source_qualifiers, source_collations) orelse
+                .binary)
+        else
+            .binary;
         if (collation.compareValuesCollated(va, vb, kind) != .eq) return false;
     }
     return true;
 }
 
-fn makeAggregators(alloc: std.mem.Allocator, calls: []const *const ast.Expr) ![]Aggregator {
+fn makeAggregators(
+    alloc: std.mem.Allocator,
+    calls: []const *const ast.Expr,
+    source_columns: []const []const u8,
+    source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
+) ![]Aggregator {
     const aggs = try alloc.alloc(Aggregator, calls.len);
     for (calls, aggs) |call_expr, *slot| {
-        slot.* = aggregatorFromCall(call_expr.*.func_call);
+        slot.* = aggregatorFromCall(call_expr.*.func_call, source_columns, source_qualifiers, source_collations);
     }
     return aggs;
 }
@@ -247,6 +276,7 @@ fn feedRow(
     row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    column_collations: []const ast.CollationKind,
     outer_frames: []const eval.OuterFrame,
 ) !void {
     const ctx = eval.EvalContext{
@@ -254,6 +284,7 @@ fn feedRow(
         .current_row = row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .column_collations = column_collations,
         .db = db,
         .outer_frames = outer_frames,
     };
@@ -300,6 +331,7 @@ fn finaliseGroups(
     groups: []Group,
     source_columns: []const []const u8,
     source_qualifiers: []const []const u8,
+    source_collations: []const ast.CollationKind,
     outer_frames: []const eval.OuterFrame,
 ) ![][]Value {
     var rows: std.ArrayList([]Value) = .empty;
@@ -338,6 +370,7 @@ fn finaliseGroups(
             .current_row = g.representative,
             .columns = source_columns,
             .column_qualifiers = source_qualifiers,
+            .column_collations = source_collations,
             .agg_values = &agg_map,
             .db = db,
             .outer_frames = outer_frames,
@@ -365,7 +398,7 @@ fn finaliseGroups(
         try rows.append(alloc, out_row);
 
         if (pp.order_by.len > 0) {
-            const key = try evaluateAggOrderKey(alloc, db, pp.order_by, g.representative, source_columns, source_qualifiers, out_row, &agg_map, outer_frames);
+            const key = try evaluateAggOrderKey(alloc, db, pp.order_by, g.representative, source_columns, source_qualifiers, source_collations, out_row, &agg_map, outer_frames);
             sort_keys.append(alloc, key) catch |err| {
                 for (key) |v| ops.freeValue(alloc, v);
                 alloc.free(key);
@@ -375,7 +408,7 @@ fn finaliseGroups(
     }
 
     if (pp.order_by.len > 0) {
-        try select_post.sortRowsByKeys(alloc, rows.items, sort_keys.items, pp.order_by);
+        try select_post.sortRowsByKeys(alloc, rows.items, sort_keys.items, pp.order_by, source_columns, source_qualifiers, source_collations);
         for (sort_keys.items) |k| {
             for (k) |v| ops.freeValue(alloc, v);
             alloc.free(k);
@@ -387,7 +420,7 @@ fn finaliseGroups(
     var all_rows = try rows.toOwnedSlice(alloc);
     if (pp.distinct) {
         const arity = if (all_rows.len > 0) all_rows[0].len else 0;
-        const kinds = try select_post.extractDistinctCollations(alloc, items, arity);
+        const kinds = try select_post.extractDistinctCollations(alloc, items, arity, source_columns, source_qualifiers, source_collations);
         defer alloc.free(kinds);
         all_rows = select_post.dedupeRows(alloc, all_rows, kinds);
     }
@@ -401,6 +434,7 @@ fn evaluateAggOrderKey(
     current_row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
+    column_collations: []const ast.CollationKind,
     projected_row: []const Value,
     agg_map: *const eval.AggregateValues,
     outer_frames: []const eval.OuterFrame,
@@ -416,6 +450,7 @@ fn evaluateAggOrderKey(
         .current_row = current_row,
         .columns = columns,
         .column_qualifiers = column_qualifiers,
+        .column_collations = column_collations,
         .agg_values = agg_map,
         .db = db,
         .outer_frames = outer_frames,

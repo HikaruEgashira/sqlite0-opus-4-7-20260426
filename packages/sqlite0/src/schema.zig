@@ -121,9 +121,13 @@ fn registerSyntheticSchemaTable(db: *database.Database, name: []const u8) Error!
     const not_null = try db.allocator.alloc(bool, col_names.len);
     errdefer db.allocator.free(not_null);
     @memset(not_null, false);
+    const collations = try db.allocator.alloc(@import("ast.zig").CollationKind, col_names.len);
+    errdefer db.allocator.free(collations);
+    @memset(collations, .binary);
     try db.tables.put(db.allocator, lower, .{
         .columns = cols,
         .not_null = not_null,
+        .collations = collations,
         .root_page = 1,
         .is_system = true,
     });

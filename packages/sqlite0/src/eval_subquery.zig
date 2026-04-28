@@ -34,6 +34,7 @@ fn extendOuter(ctx: eval.EvalContext) Error![]eval.OuterFrame {
         .current_row = ctx.current_row,
         .columns = ctx.columns,
         .column_qualifiers = ctx.column_qualifiers,
+        .column_collations = ctx.column_collations,
     };
     return out;
 }

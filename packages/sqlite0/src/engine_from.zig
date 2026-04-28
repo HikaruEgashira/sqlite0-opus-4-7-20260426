@@ -22,6 +22,7 @@ const engine = @import("engine.zig");
 const eval = @import("eval.zig");
 const cursor_mod = @import("cursor.zig");
 const btree_cursor_mod = @import("btree_cursor.zig");
+const collation_mod = @import("collation.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -31,20 +32,25 @@ const ParsedFromSource = stmt_mod.ParsedFromSource;
 /// One FROM source resolved to in-memory state. `qualifier` is the
 /// effective alias (explicit `AS x` if given, else the bare table name; ""
 /// for inline VALUES with no alias — qualified refs cannot match an empty
-/// qualifier).
+/// qualifier). `collations` (Iter31.R) is parallel to `columns`; empty for
+/// inline_values / subquery (which carry no schema), populated from
+/// `Table.collations` for table_ref.
 pub const ResolvedSource = struct {
     rows: []const []const Value,
     columns: []const []const u8,
     qualifier: []const u8,
+    collations: []const ast.CollationKind = &.{},
 };
 
 /// Output of `buildJoinedRows` — combined rows and the flat metadata (one
 /// entry per combined column) that `EvalContext` needs for column
-/// resolution.
+/// resolution. `collations` (Iter31.R) carries each merged column's
+/// schema-default collation, parallel to `columns`/`qualifiers`.
 pub const Cartesian = struct {
     rows: [][]Value,
     columns: []const []const u8,
     qualifiers: []const []const u8,
+    collations: []const ast.CollationKind,
 };
 
 /// Resolve the FROM list and fold every term into a single combined row
@@ -68,11 +74,13 @@ pub fn cartesianFromSources(
         for (qs) |*q| q.* = first.qualifier;
         break :blk qs;
     };
+    var current_collations: []const ast.CollationKind = try padCollations(alloc, first.collations, first.columns.len);
 
     for (terms[1..]) |term| {
         const right = try resolveSource(db, alloc, term.source);
         const merged_columns = try concatColumns(alloc, current_columns, right.columns);
         const merged_qualifiers = try concatQualifiers(alloc, current_qualifiers, right.qualifier, right.columns.len);
+        const merged_collations = try concatCollations(alloc, current_collations, right.collations, right.columns.len);
 
         // For each left row, walk the right rows and apply ON. Inner / cross
         // / comma keep only matching pairs (or all pairs when ON is null);
@@ -92,6 +100,7 @@ pub fn cartesianFromSources(
                         .current_row = combined,
                         .columns = merged_columns,
                         .column_qualifiers = merged_qualifiers,
+                        .column_collations = merged_collations,
                         .db = db,
                         .outer_frames = outer_frames,
                     };
@@ -116,8 +125,34 @@ pub fn cartesianFromSources(
         current_rows = try next.toOwnedSlice(alloc);
         current_columns = merged_columns;
         current_qualifiers = merged_qualifiers;
+        current_collations = merged_collations;
     }
-    return .{ .rows = current_rows, .columns = current_columns, .qualifiers = current_qualifiers };
+    return .{ .rows = current_rows, .columns = current_columns, .qualifiers = current_qualifiers, .collations = current_collations };
+}
+
+/// Iter31.R — fill or trim a collation slice to match `width`. Empty
+/// input becomes all-binary (sources that don't carry schema info treat
+/// every column as default-binary).
+fn padCollations(
+    alloc: std.mem.Allocator,
+    src: []const ast.CollationKind,
+    width: usize,
+) ![]const ast.CollationKind {
+    const out = try alloc.alloc(ast.CollationKind, width);
+    for (out, 0..) |*o, i| o.* = if (i < src.len) src[i] else .binary;
+    return out;
+}
+
+fn concatCollations(
+    alloc: std.mem.Allocator,
+    left: []const ast.CollationKind,
+    right: []const ast.CollationKind,
+    right_count: usize,
+) ![]const ast.CollationKind {
+    const out = try alloc.alloc(ast.CollationKind, left.len + right_count);
+    for (left, out[0..left.len]) |k, *s| s.* = k;
+    for (out[left.len..], 0..) |*s, i| s.* = if (i < right.len) right[i] else .binary;
+    return out;
 }
 
 fn dupRowsToOwned(alloc: std.mem.Allocator, rows: []const []const Value) ![][]Value {
@@ -164,7 +199,7 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             .columns = iv.columns,
             .qualifier = iv.alias orelse "",
         },
-        .table_ref => |tr| blk: {
+        .table_ref => |tr| tblblk: {
             // Phase 3a (Iter24.A): the row source goes through `Cursor`
             // rather than reading `t.rows.items` directly. Phase 3b
             // (Iter25.B.4/5) added the BtreeCursor backend — `t.root_page
@@ -187,10 +222,11 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             const materialized = try cursor_mod.materializeRows(alloc, c);
             const out = try alloc.alloc([]const Value, materialized.len);
             for (materialized, out) |row, *slot| slot.* = row;
-            break :blk .{
+            break :tblblk .{
                 .rows = out,
                 .columns = c.columns(),
                 .qualifier = tr.alias orelse tr.name,
+                .collations = t.collations,
             };
         },
         .subquery => |sq| blk: {
@@ -198,15 +234,78 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             // The qualifier is the explicit alias (if any); without an alias
             // qualified refs into the subquery can't match — sqlite3 still
             // accepts unqualified refs in that case, which is what an empty
-            // qualifier achieves here too.
+            // qualifier achieves here too. `collations` (Iter31.R) carries
+            // each projected column's schema collation across the subquery
+            // boundary so column-level COLLATE propagates through
+            // `(SELECT x FROM t)` — see `subqueryProjectionCollations`.
             const result = try engine.executeSelectWithColumns(db, alloc, sq.select);
             const out = try alloc.alloc([]const Value, result.rows.len);
             for (result.rows, out) |row, *slot| slot.* = row;
+            const cols = try subqueryProjectionCollations(db, alloc, sq.select, result.columns.len);
             break :blk .{
                 .rows = out,
                 .columns = result.columns,
                 .qualifier = sq.alias orelse "",
+                .collations = cols,
             };
         },
     };
+}
+
+/// Iter31.R — derive per-projection schema collations for a subquery in
+/// FROM. For each `.expr` item: peek explicit COLLATE wrapper, else look
+/// up bare column-ref's schema collation against the inner FROM
+/// cartesian, else BINARY. For each `.star` item: copy matching cart
+/// entries by qualifier. Setop chains return all-BINARY (sqlite3 quirk:
+/// `SELECT x FROM t UNION SELECT 'b'` projects BINARY, verified). Built
+/// length always matches `result.columns.len` from `executeSelectWithColumns`;
+/// `expected` is passed in to fall back safely if a future projection
+/// path desyncs.
+fn subqueryProjectionCollations(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    ps: stmt_mod.ParsedSelect,
+    expected: usize,
+) ops.Error![]const ast.CollationKind {
+    if (ps.branches.len > 0) return padCollations(alloc, &.{}, expected);
+    var out: std.ArrayList(ast.CollationKind) = .empty;
+    var cart_opt: ?Cartesian = null;
+    for (ps.items) |item| {
+        switch (item) {
+            .star => |q| {
+                if (cart_opt == null and ps.from.len > 0) {
+                    cart_opt = try cartesianFromSources(db, alloc, ps.from, &.{});
+                }
+                if (cart_opt) |cart| {
+                    for (cart.qualifiers, cart.collations) |qual, k| {
+                        if (q == null or std.ascii.eqlIgnoreCase(q.?, qual)) {
+                            try out.append(alloc, k);
+                        }
+                    }
+                }
+            },
+            .expr => |e| {
+                if (collation_mod.peekKind(e.expr)) |k| {
+                    try out.append(alloc, k);
+                    continue;
+                }
+                if (e.expr.* == .column_ref and cart_opt == null and ps.from.len > 0) {
+                    cart_opt = try cartesianFromSources(db, alloc, ps.from, &.{});
+                }
+                if (cart_opt) |cart| {
+                    if (collation_mod.columnDefault(e.expr, cart.columns, cart.qualifiers, cart.collations)) |k| {
+                        try out.append(alloc, k);
+                        continue;
+                    }
+                }
+                try out.append(alloc, .binary);
+            },
+        }
+    }
+    // Width-mismatch guard: if items expansion ever falls out of sync with
+    // executeSelectWithColumns (e.g. star against an empty FROM), pad/trim.
+    if (out.items.len != expected) {
+        return padCollations(alloc, out.items, expected);
+    }
+    return out.toOwnedSlice(alloc);
 }
