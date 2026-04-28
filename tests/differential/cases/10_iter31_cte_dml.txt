@@ -1,0 +1,138 @@
+# Non-recursive CTE: `WITH name AS (...) SELECT ...` (Iter31.Z):
+#  * sqlite3 supports `WITH t AS (SELECT ...) SELECT * FROM t` and chained
+#    `WITH a AS (...), b AS (...) SELECT ...` where later items see earlier
+#    ones. sqlite0 materialises each CTE left-to-right into a transient
+#    map on `Database` consulted by `engine_from.resolveSource` ahead of
+#    `db.tables`, so a CTE name shadows a real table for the duration of
+#    the statement.
+#  * Skipped (deferred to a later iteration): `RECURSIVE`, `t(a, b)`
+#    column rename, nested `WITH` inside a CTE body or subquery,
+#    WITH-prefixed INSERT/UPDATE/DELETE, `WITH t AS (VALUES ...)`.
+#  * Regression-lock: when no CTE matches, the table-ref still resolves
+#    against `db.tables`; an unknown name still surfaces NoSuchTable.
+WITH t AS (SELECT 1 AS x) SELECT * FROM t;
+WITH cte AS (SELECT 'hello' AS msg) SELECT msg, msg||'!' FROM cte;
+WITH a AS (SELECT 1 AS x), b AS (SELECT x+1 AS y FROM a) SELECT y FROM b;
+WITH t AS (SELECT 1 UNION SELECT 2 UNION SELECT 3) SELECT count(*) FROM t;
+WITH cte AS (SELECT 1 AS x) SELECT * FROM cte WHERE x > 0 ORDER BY x;
+WITH cte AS (SELECT 1 AS x) SELECT cte.x, c2.x FROM cte JOIN cte AS c2 ON cte.x = c2.x;
+CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH big AS (SELECT v*10 AS w FROM u) SELECT sum(w) FROM big;
+CREATE TABLE t(x INT); INSERT INTO t VALUES(10); WITH t AS (SELECT 99 AS x) SELECT x FROM t;
+CREATE TABLE u(v INT); WITH cte AS (SELECT 1) SELECT * FROM u;
+
+# CTE column rename + VALUES body (Iter31.AA):
+#  * `WITH t(c1, c2, ...) AS (...)` overrides the body's projected column
+#    names. Width mismatch is a parse-time error in sqlite3 ("table t has
+#    N values for M columns"); sqlite0 surfaces SyntaxError, exit code 1
+#    matches.
+#  * `WITH t AS (VALUES (...), ...)` materialises the VALUES rows and
+#    auto-names columns `column1`/`column2`/... matching sqlite3's quirk
+#    for inline-VALUES sources.
+#  * Combined: VALUES body + column rename = explicit names override the
+#    `columnN` defaults.
+#  * Cross-CTE chain still works: a VALUES-bodied CTE feeds a SELECT-bodied
+#    one through the transient CTE map.
+WITH t(a,b) AS (SELECT 1, 2) SELECT a, b FROM t;
+WITH t AS (VALUES (1,'a'),(2,'b')) SELECT * FROM t;
+WITH t(num, ch) AS (VALUES (1,'a'),(2,'b')) SELECT num, ch FROM t;
+WITH t(c1) AS (VALUES (1),(2),(3)) SELECT * FROM t ORDER BY c1 DESC;
+CREATE TABLE u(v INT); INSERT INTO u VALUES(10),(20); WITH cte(doubled) AS (SELECT v*2 FROM u) SELECT sum(doubled) FROM cte;
+WITH a(x) AS (VALUES (1),(2),(3)), b(y) AS (SELECT x*10 FROM a) SELECT y FROM b;
+WITH t(a) AS (SELECT 1, 2) SELECT * FROM t;
+WITH t(a,b) AS (VALUES (1)) SELECT * FROM t;
+
+# WITH-prefixed DML (Iter31.AB):
+#  * sqlite3 accepts `WITH name AS (...) [, ...] {INSERT|UPDATE|DELETE} ...`
+#    in addition to `WITH ... SELECT`. The CTE map persists for the whole
+#    DML statement so the WHERE clause / source SELECT can reference it.
+#  * Implementation: the WITH clause is now consumed in `engine.dispatchOne`
+#    before the per-statement dispatch, so it composes with SELECT and
+#    every DML path uniformly without per-parser changes.
+#  * Multi-statement fixture (`;`-separated) plus a final SELECT confirms
+#    the side effect.
+CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH big AS (SELECT v*100 AS w FROM u) DELETE FROM u WHERE v IN (SELECT w/100 FROM big); SELECT count(*) FROM u;
+CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH t(x) AS (VALUES (10),(20)) UPDATE u SET v=v*100 WHERE v IN (SELECT x/10 FROM t); SELECT * FROM u ORDER BY v;
+CREATE TABLE u(v INT); WITH src(x) AS (VALUES(1),(2),(3)) INSERT INTO u SELECT x*10 FROM src; SELECT * FROM u ORDER BY v;
+CREATE TABLE u(v INT); INSERT INTO u VALUES(5); WITH a(p) AS (SELECT 5), b(q) AS (SELECT p*2 FROM a) DELETE FROM u WHERE v IN (SELECT q/2 FROM b); SELECT count(*) FROM u;
+
+# WITH inside FROM subquery (Iter31.AC):
+#  * sqlite3 accepts `FROM (WITH cte AS (...) SELECT * FROM cte)`. The
+#    inner CTE's name is local to the subquery scope; outside the
+#    parentheses the name is invisible.
+#  * Implementation: parse the inner WITH locally in `parseFromSource`,
+#    materialise via `engine_cte.materialize` with save/restore of
+#    `db.transient_ctes` around the inner SELECT.
+SELECT * FROM (WITH cte AS (SELECT 1 AS x) SELECT x*2 FROM cte);
+SELECT * FROM (WITH cte AS (SELECT 1 AS x UNION SELECT 2) SELECT * FROM cte);
+SELECT cnt FROM (WITH src(x) AS (VALUES (10),(20),(30)) SELECT count(*) AS cnt FROM src);
+SELECT a.y FROM (WITH t(n) AS (VALUES (1),(2),(3)) SELECT n*10 AS y FROM t) AS a ORDER BY a.y;
+SELECT (SELECT v FROM (WITH s(p) AS (SELECT 7) SELECT p*p AS v FROM s));
+
+# WITH RECURSIVE — fixed-point CTE iteration (Iter31.AD):
+#  * sqlite3 supports `WITH RECURSIVE name(c1,...) AS (BASE UNION [ALL]
+#    RECURSIVE_STEP) SELECT ... FROM name` where the recursive step
+#    references `name`. sqlite0 used to reject any setop branch that
+#    referenced its enclosing CTE name with `Error.NoSuchTable` (the
+#    name resolved through CTE first, but the inner table_ref scan
+#    didn't see itself yet).
+#  * Implementation: `engine_cte.materialize` detects self-reference by
+#    scanning every FROM term (recursing into setop branches and
+#    subqueries) and dispatches to a fixed-point loop that:
+#      1. Runs the base alone (branches stripped) → working_set R0.
+#      2. Publishes a TransientCte slot pointing at working_set so the
+#         recursive step's FROM resolution sees it.
+#      3. Iterates: run recursive step, append new rows, set
+#         working_set to the new rows (UNION ALL) or the new-and-unique
+#         rows (UNION). Stop when working_set is empty.
+#      4. Hard cap at 10k rows / iterations to bound runaway queries.
+#  * The `RECURSIVE` keyword is parsed but optional — sqlite3 detects
+#    by shape, and so do we.
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT * FROM r;
+WITH r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT * FROM r;
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n*2 FROM r WHERE n<10) SELECT * FROM r;
+WITH RECURSIVE fib(a,b) AS (SELECT 0,1 UNION ALL SELECT b,a+b FROM fib WHERE b<20) SELECT a FROM fib;
+WITH RECURSIVE r(n) AS (SELECT 1 UNION SELECT n FROM r WHERE n<3) SELECT * FROM r;
+WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT sum(n) FROM r;
+
+# RETURNING clause for INSERT/UPDATE/DELETE (Iter31.AE):
+#  * sqlite3 added RETURNING in 3.35.0. The clause runs after the
+#    statement's row mutations — INSERT/UPDATE return post-state,
+#    DELETE returns pre-state. Items reuse the SELECT projection
+#    grammar (`*`, `t.*`, `expr [AS alias]`).
+#  * sqlite0 used to reject RETURNING with SyntaxError.
+#  * Implementation: parsers attach `returning: ?[]SelectItem` to
+#    each ParsedInsert/Delete/Update via the new `keyword_returning`
+#    token. engine_dml captures projected rows into the per-statement
+#    arena at the right moment, dispatchOne deep-dupes to long-lived
+#    memory through `engine_returning.dupeRowsToLong`. CLI prints
+#    returning rows like SELECT.
+#  * File-mode DML rejects RETURNING with UnsupportedFeature for now
+#    (deferred — fixtures here all use in-memory tables).
+CREATE TABLE t(a INT, b TEXT); INSERT INTO t VALUES(1,'x') RETURNING *;
+CREATE TABLE t(a INT, b TEXT); INSERT INTO t VALUES(1,'x'),(2,'y') RETURNING a;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(5) RETURNING a*2;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET a=a*10 RETURNING a;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE a>1 RETURNING a;
+CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE a>100 RETURNING a;
+CREATE TABLE u(v INT); WITH src(x) AS (VALUES(1),(2)) INSERT INTO u SELECT x*10 FROM src RETURNING v;
+CREATE TABLE t(x INT, y INT); INSERT INTO t VALUES(1,2) RETURNING x+y, x*y AS prod;
+
+# IPK UNIQUE constraint enforcement (Iter31.AF):
+#  * INTEGER PRIMARY KEY is an alias for rowid; sqlite3 enforces
+#    UNIQUE on it transparently and rejects duplicates with
+#    "UNIQUE constraint failed: t.id" (SQLITE_CONSTRAINT 19).
+#  * sqlite0 used to silently insert duplicate rowids — only auto
+#    assignment via NULL kept things consistent.
+#  * Implementation: engine_dml.executeInsert in-memory scans
+#    t.rows for matching IPK after auto-assignment but before
+#    append; engine_dml.executeUpdate scans others when an
+#    assignment targets the IPK column. File-mode path keeps the
+#    existing B-tree behaviour (which already rejects dups via
+#    btree_insert collision). Self-update (new == old) is allowed.
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(1,'b');
+CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(5),(5);
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET id=1 WHERE x='b';
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET id=id WHERE x='a'; SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(NULL,'a'); INSERT INTO t VALUES(NULL,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(7,'a'); INSERT INTO t VALUES(NULL,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET x='c' WHERE id=1; SELECT * FROM t;

@@ -1,0 +1,210 @@
+# quote() truncates TEXT at NUL (Iter31.A):
+#  * sqlite3 quoteFunc treats TEXT as a C string — scanning stops at
+#    the first NUL byte. `quote(char(0))` → `''` (open+close, no body),
+#    `quote('a' || char(0) || 'b')` → `'a'`.
+#  * BLOB does NOT truncate at NUL (`quote(x'00')` → `X'00'`).
+SELECT quote(char(0))
+SELECT quote('a' || char(0) || 'b')
+SELECT length(quote(char(0)))
+SELECT length(quote('a' || char(0) || 'b'))
+SELECT quote(x'00')
+SELECT quote(x'010203')
+SELECT quote(printf('%c', 9))
+SELECT quote(char(13))
+
+# replace() pattern starting with NUL = empty pattern (Iter31.B):
+#  * sqlite3 returns input unchanged when the pattern's first byte is
+#    NUL (or pattern is empty). `replace('a'||char(0)||'b', char(0),
+#    'x')` → input unchanged.
+#  * Multi-byte patterns NOT starting with NUL still match byte-for-byte:
+#    `replace('foo'||char(0)||'bar', 'foo'||char(0), 'X')` → 'Xbar'.
+SELECT hex(replace('a' || char(0) || 'b', char(0), 'x'))
+SELECT length(replace('a' || char(0) || 'b', char(0), 'x'))
+SELECT hex(replace(char(0) || 'a' || char(0) || 'b', char(0) || 'a', 'X'))
+SELECT hex(replace('foo' || char(0) || 'bar', 'foo' || char(0), 'X'))
+SELECT hex(replace('foo' || char(0) || 'bar', 'foo', 'X'))
+SELECT hex(replace('a' || char(0) || 'b', 'b', 'X'))
+SELECT hex(replace('foobar', 'foo' || char(0), 'X'))
+SELECT hex(replace(cast(x'410042' as text), char(0), 'X'))
+SELECT hex(replace(cast(x'410042' as blob), char(0), 'X'))
+
+# trim() UTF-8 char-aware (Iter31.C):
+#  * sqlite3 trim treats subject and trim-set as UTF-8 char sequences,
+#    not bytes. `trim('αβα', 'α')` → `'β'` because each `α` (2 bytes)
+#    is one trim-set element matched as a unit.
+#  * Old impl was byte-set: stripped 0xCE / 0xB1 individually, leaving
+#    invalid UTF-8 fragments.
+SELECT trim('αβα', 'α')
+SELECT length(trim('αβα', 'α'))
+SELECT trim('αβα', 'βα')
+SELECT length(trim('αβα', 'βα'))
+SELECT trim('αβγαβ', 'αβ')
+SELECT trim('αβγ', 'γ')
+SELECT trim('αβ', 'α')
+SELECT ltrim('ααβ', 'α')
+SELECT rtrim('βαα', 'α')
+SELECT length(trim(' héllo ', ' '))
+
+# concat_ws leading-empty separator (Iter31.D):
+#  * sqlite3 emits separator only between values once at least one
+#    non-empty arg has been seen. Leading '' values still consume a
+#    slot but no separator precedes the first non-empty value.
+SELECT concat_ws('-', '', 'a')
+SELECT concat_ws('-', 'a', '')
+SELECT concat_ws('-', '', '')
+SELECT concat_ws('-', '', 'a', 'b')
+SELECT concat_ws('-', 'a', '', 'b')
+SELECT concat_ws('-', '', '', 'a')
+SELECT concat_ws('-', NULL, '', 'a')
+SELECT concat_ws('-', '', NULL, 'a')
+SELECT concat_ws('-', 1, '')
+SELECT concat_ws('-', '', 1)
+SELECT concat_ws(',', '', 'a', '')
+SELECT concat_ws('|', '', 'x', '', 'y')
+SELECT concat_ws('-', '', '', '')
+
+# LIMIT / OFFSET strict integer coercion (Iter31.E):
+#  * sqlite3 OP_MustBeInt rejects non-integer-coercible LIMIT/OFFSET
+#    with SQLITE_MISMATCH. NULL/blob/empty-text/non-numeric-text error.
+#  * REAL coerces to i64 (truncate); overflow → error rather than panic.
+SELECT 1 LIMIT NULL
+SELECT 1 LIMIT 'abc'
+SELECT 1 LIMIT 1.5
+SELECT 1 LIMIT '1.5'
+SELECT 1 LIMIT ''
+SELECT 1 LIMIT x'01'
+SELECT 1 LIMIT 1 OFFSET NULL
+SELECT 1 LIMIT 1 OFFSET 'abc'
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT 1.5
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT 9223372036854775808
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT 1e20
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT '1abc'
+SELECT 1 LIMIT 1.0
+SELECT 1 LIMIT 0
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT 2
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT 100
+SELECT * FROM (VALUES (1), (2), (3)) LIMIT -1
+
+# substr() length sentinel = SQLITE_LIMIT_LENGTH (Iter31.F):
+#  * 2-arg form (no length given) returns the full remainder. sqlite3
+#    uses the SQLITE_LIMIT_LENGTH default (1e9) as the implicit length;
+#    larger values are clamped by the limit, not by INT64_MAX.
+SELECT hex(substr(x'010203', 0))
+SELECT hex(substr(x'010203', -4))
+SELECT hex(substr(x'010203', -100))
+SELECT hex(substr(x'01020304', 0))
+SELECT hex(substr(x'0102', 0))
+SELECT hex(substr(x'01', 0))
+SELECT hex(substr(x'010203', 0, 0))
+SELECT hex(substr(x'010203', 0, 1))
+SELECT hex(substr(x'010203', 0, 100))
+SELECT hex(substr(x'', 0))
+SELECT hex(substr(x'010203', -1))
+SELECT hex(substr(x'010203', 1))
+SELECT hex(substr(x'010203', 4))
+
+# GROUP BY positional integer reference to SELECT list (Iter31.G):
+#  * sqlite3 resolves bare positive integers in GROUP BY as 1-based
+#    indices into the SELECT list, identical to ORDER BY semantics.
+SELECT column1, count(*) FROM (VALUES('a','b'),('a','c'),('b','c')) GROUP BY 1 ORDER BY 1
+SELECT column1, count(*) FROM (VALUES('a','b'),('a','c'),('b','c')) GROUP BY column1 ORDER BY column1
+SELECT column1, count(*) FROM (VALUES(NULL,'b'),('a','c'),(NULL,'d')) GROUP BY column1 ORDER BY column1
+SELECT column1, sum(column2) FROM (VALUES('a',1),('a',2),('b',3)) GROUP BY 1 ORDER BY 1
+SELECT column1, sum(column2) FROM (VALUES('a',1),('a',2),('b',3)) GROUP BY column1 ORDER BY column1
+SELECT column1, count(*) FROM (VALUES(1,'a'),(2,'b'),(1,'c')) GROUP BY 1 ORDER BY 1
+SELECT column2, count(*) FROM (VALUES('a','x'),('b','x'),('c','y')) GROUP BY 2 ORDER BY 2
+
+# ORDER BY positional integer bounds checking (Iter31.H):
+#  * sqlite3 errors on positional indices < 1 or > SELECT list length.
+#  * Non-bare integer expressions (e.g. `1+0`) still evaluate normally.
+SELECT 1 ORDER BY 0
+SELECT 1 ORDER BY -1
+SELECT 1 ORDER BY 2
+SELECT * FROM (VALUES(1),(2),(3)) ORDER BY 0
+SELECT * FROM (VALUES(1),(2),(3)) ORDER BY -1
+SELECT * FROM (VALUES(1),(2),(3)) ORDER BY 2
+SELECT * FROM (VALUES(1),(2),(3)) ORDER BY 1+0
+SELECT 1 ORDER BY 1
+SELECT 1 ORDER BY 1+0
+SELECT 1, 2 ORDER BY 2
+SELECT 1, 2 ORDER BY 3
+
+# ifnull arity = exactly 2 (Iter31.I):
+#  * sqlite3 ifnull is fixed 2-arg; coalesce is variadic. Mixing them
+#    must error on >2 args even though the implementations are similar.
+SELECT ifnull(NULL, NULL, NULL)
+SELECT ifnull(1, 2, 3)
+SELECT ifnull(NULL, 1, 'extra')
+SELECT ifnull(1, 2)
+SELECT ifnull(NULL, 1)
+SELECT ifnull(NULL, NULL)
+SELECT coalesce(NULL, NULL, 1)
+SELECT coalesce(NULL, NULL, NULL, NULL, 'last')
+
+# ORDER BY / GROUP BY SELECT-list AS-alias resolution (Iter31.J):
+#  * sqlite3 resolves bare unqualified column-refs in ORDER BY/GROUP BY
+#    against SELECT-list aliases first, before table columns.
+SELECT 1 + 1 AS x FROM (VALUES(1)) ORDER BY x
+SELECT column1 AS y FROM (VALUES(1),(2),(3)) ORDER BY y
+SELECT column1 + 1 AS z FROM (VALUES(1),(2),(3)) ORDER BY z
+SELECT column1+column2 AS s FROM (VALUES(1,2),(3,4)) ORDER BY s
+SELECT count(*) AS cnt FROM (VALUES(1),(1),(2)) GROUP BY column1 ORDER BY cnt DESC
+SELECT column1+column2 AS s FROM (VALUES(1,2),(3,4)) GROUP BY s ORDER BY s
+SELECT column1 + 1 AS z FROM (VALUES(3),(1),(2)) ORDER BY z DESC
+
+# atanh domain endpoints return ±Inf (Iter31.K):
+#  * sqlite3 delegates atanh to libm which returns ±Inf at x = ±1
+#    rather than NULL. Outside [-1,1] sqlite3 returns NULL (NaN-elide).
+SELECT atanh(1)
+SELECT atanh(-1)
+SELECT atanh(0.5)
+SELECT atanh(2)
+SELECT atanh(-2)
+SELECT atanh(0)
+
+# parseDateTime trailing 'T' = date-only (Iter31.L):
+#  * sqlite3 parseYyyyMmDd skips trailing whitespace + uppercase 'T';
+#    if nothing remains, the value is a valid date-only.
+#  * Lowercase 't' is NOT skipped — both engines NULL on 'YYYY-MM-DDt'.
+SELECT datetime('2024-01-01T')
+SELECT date('2024-01-01T')
+SELECT datetime('2024-01-01T12:00:00')
+SELECT datetime('2024-01-01t')
+SELECT datetime('2024-01-01T12')
+SELECT datetime('2024-01-01T12:')
+
+# IS [NOT] [DISTINCT FROM] TRUE/FALSE applies truthiness (Iter31.M):
+#  * sqlite3 special-cases bare TRUE/FALSE on the IS RHS — instead of
+#    strict identicalValues, it coerces LHS via the same lenient path
+#    used by `iif()` (TEXT prefix, REAL→bool). NULL never matches
+#    either polarity (both `NULL IS TRUE` and `NULL IS FALSE` → 0).
+#  * `IS DISTINCT FROM TRUE` ↔ NOT (x IS TRUE); negation chain folds
+#    via has_not XOR has_distinct, identical to plain IS.
+#  * Old impl ran through `is_check` after the parser collapsed
+#    TRUE/FALSE to INTEGER 1/0, missing both the truthiness coercion
+#    and the NULL-rejection.
+SELECT 1 IS TRUE
+SELECT 0 IS TRUE
+SELECT NULL IS TRUE
+SELECT 1 IS FALSE
+SELECT 0 IS FALSE
+SELECT NULL IS FALSE
+SELECT 1 IS NOT TRUE
+SELECT 1 IS NOT FALSE
+SELECT NULL IS NOT TRUE
+SELECT NULL IS NOT FALSE
+SELECT 'abc' IS TRUE
+SELECT '1abc' IS TRUE
+SELECT 1.5 IS TRUE
+SELECT 0.0 IS FALSE
+SELECT TRUE IS TRUE
+SELECT FALSE IS FALSE
+SELECT 1 IS DISTINCT FROM TRUE
+SELECT 1 IS NOT DISTINCT FROM TRUE
+SELECT '1abc' IS DISTINCT FROM TRUE
+SELECT 'abc' IS NOT DISTINCT FROM FALSE
+SELECT NULL IS DISTINCT FROM TRUE
+SELECT NULL IS NOT DISTINCT FROM FALSE
+SELECT 0 IS DISTINCT FROM FALSE
+SELECT 0 IS NOT DISTINCT FROM FALSE
+
