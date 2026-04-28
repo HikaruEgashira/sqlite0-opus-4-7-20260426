@@ -420,3 +420,10 @@ SELECT hex(substr(x'', 0))
 SELECT hex(substr(x'010203', -1))
 SELECT hex(substr(x'010203', 1))
 SELECT hex(substr(x'010203', 4))
+SELECT column1, count(*) FROM (VALUES('a','b'),('a','c'),('b','c')) GROUP BY 1 ORDER BY 1
+SELECT column1, count(*) FROM (VALUES('a','b'),('a','c'),('b','c')) GROUP BY column1 ORDER BY column1
+SELECT column1, count(*) FROM (VALUES(NULL,'b'),('a','c'),(NULL,'d')) GROUP BY column1 ORDER BY column1
+SELECT column1, sum(column2) FROM (VALUES('a',1),('a',2),('b',3)) GROUP BY 1 ORDER BY 1
+SELECT column1, sum(column2) FROM (VALUES('a',1),('a',2),('b',3)) GROUP BY column1 ORDER BY column1
+SELECT column1, count(*) FROM (VALUES(1,'a'),(2,'b'),(1,'c')) GROUP BY 1 ORDER BY 1
+SELECT column2, count(*) FROM (VALUES('a','x'),('b','x'),('c','y')) GROUP BY 2 ORDER BY 2

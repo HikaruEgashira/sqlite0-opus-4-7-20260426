@@ -32,6 +32,7 @@ const walk = @import("aggregate_walk.zig");
 const state = @import("aggregate_state.zig");
 const database = @import("database.zig");
 const func_util = @import("func_util.zig");
+const stmt_mod = @import("stmt.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -70,7 +71,7 @@ pub fn executeAggregated(
     source_columns: []const []const u8,
     source_qualifiers: []const []const u8,
     where_ast: ?*ast.Expr,
-    group_by: []const *ast.Expr,
+    group_by: []const stmt_mod.GroupByTerm,
     having: ?*ast.Expr,
     pp: select_post.PostProcess,
     outer_frames: []const eval.OuterFrame,
@@ -110,7 +111,7 @@ pub fn executeAggregated(
             if (!(ops.truthy(cond) orelse false)) continue;
         }
 
-        const key = try evaluateGroupKey(alloc, db, group_by, row, source_columns, source_qualifiers, outer_frames);
+        const key = try evaluateGroupKey(alloc, db, group_by, items, row, source_columns, source_qualifiers, outer_frames);
         const group_idx = if (findGroup(groups.items, key)) |idx| blk: {
             // Existing group — discard the redundant key (arena reclaims).
             for (key) |v| ops.freeValue(alloc, v);
@@ -146,7 +147,8 @@ pub fn executeAggregated(
 fn evaluateGroupKey(
     alloc: std.mem.Allocator,
     db: ?*Database,
-    group_by: []const *ast.Expr,
+    group_by: []const stmt_mod.GroupByTerm,
+    items: []const select.SelectItem,
     row: []const Value,
     columns: []const []const u8,
     column_qualifiers: []const []const u8,
@@ -167,7 +169,19 @@ fn evaluateGroupKey(
         .outer_frames = outer_frames,
     };
     while (produced < group_by.len) : (produced += 1) {
-        key[produced] = try eval.evalExpr(ctx, group_by[produced]);
+        // sqlite3 quirk: bare positive integer literal in GROUP BY refers to
+        // the SELECT-list column at that 1-based index. `*` items are
+        // rejected (sqlite3 errors "GROUP BY term out of range") because
+        // they expand to multiple columns; we collapse to SyntaxError.
+        const target = if (group_by[produced].position) |pos| blk: {
+            if (pos == 0 or pos > items.len) return Error.SyntaxError;
+            const item = items[pos - 1];
+            switch (item) {
+                .star => return Error.SyntaxError,
+                .expr => |e| break :blk e.expr,
+            }
+        } else group_by[produced].expr;
+        key[produced] = try eval.evalExpr(ctx, target);
     }
     return key;
 }

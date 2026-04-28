@@ -35,11 +35,11 @@ pub const ParsedSelect = struct {
     from: []FromTerm = &.{},
     where: ?*ast.Expr,
     distinct: bool = false,
-    /// `GROUP BY e1 [, e2 ...]` — one ASTs per group key. Empty slice when
-    /// the clause is absent. The aggregate execution path treats empty
-    /// group_by as "implicit single group" only when at least one aggregate
-    /// call is present in items/having/order_by.
-    group_by: []*ast.Expr = &.{},
+    /// `GROUP BY e1 [, e2 ...]`. Empty slice = no clause; aggregate path
+    /// treats it as "implicit single group" iff an aggregate is present.
+    /// `GroupByTerm.position` resolves bare integer literals positionally
+    /// against the SELECT list (mirrors ORDER BY).
+    group_by: []GroupByTerm = &.{},
     /// `HAVING <expr>` filter applied after grouping. May reference
     /// aggregates not in the SELECT list (sqlite3 allows this). Null when
     /// absent.
@@ -72,6 +72,11 @@ pub const OrderTerm = struct {
     expr: *ast.Expr,
     position: ?usize = null,
     dir: OrderDirection,
+};
+
+pub const GroupByTerm = struct {
+    expr: *ast.Expr,
+    position: ?usize = null,
 };
 
 // FROM clause — types and parsing live in stmt_from.zig (split out to
@@ -121,12 +126,12 @@ fn parseSelectInner(p: *Parser, allow_post: bool) Error!ParsedSelect {
         where_ast = try p.parseExpr();
     }
 
-    var group_by: []*ast.Expr = &.{};
-    errdefer freeExprList(p.allocator, group_by);
+    var group_by: []GroupByTerm = &.{};
+    errdefer freeGroupByTerms(p.allocator, group_by);
     if (p.cur.kind == .keyword_group) {
         p.advance();
         try p.expect(.keyword_by);
-        group_by = try parseExprList(p);
+        group_by = try parseGroupByList(p);
     }
 
     var having_ast: ?*ast.Expr = null;
@@ -220,7 +225,7 @@ pub fn freeParsedSelectFields(allocator: std.mem.Allocator, ps: ParsedSelect) vo
     select.freeSelectList(allocator, ps.items);
     freeFromList(allocator, ps.from);
     if (ps.where) |w| w.deinit(allocator);
-    freeExprList(allocator, ps.group_by);
+    freeGroupByTerms(allocator, ps.group_by);
     if (ps.having) |h| h.deinit(allocator);
     freeSetopBranches(allocator, ps.branches);
     freeOrderTerms(allocator, ps.order_by);
@@ -228,24 +233,28 @@ pub fn freeParsedSelectFields(allocator: std.mem.Allocator, ps: ParsedSelect) vo
     if (ps.offset) |e| e.deinit(allocator);
 }
 
-/// Parse `<expr> [, <expr>]*`. Used by GROUP BY (and trivially extensible
-/// to other comma-list contexts that don't need extra per-term metadata).
-fn parseExprList(p: *Parser) ![]*ast.Expr {
-    var list: std.ArrayList(*ast.Expr) = .empty;
-    errdefer {
-        for (list.items) |e| e.deinit(p.allocator);
-        list.deinit(p.allocator);
-    }
-    try list.append(p.allocator, try p.parseExpr());
-    while (p.cur.kind == .comma) {
+/// Parse `GROUP BY e1 [, e2 ...]`. Bare positive integer literal is a
+/// 1-based SELECT-list column reference (sqlite3 quirk; `GROUP BY 1+0`
+/// keeps expression semantics — only literal INTEGER nodes resolve
+/// positionally, mirroring `parseOrderTerm`).
+fn parseGroupByList(p: *Parser) ![]GroupByTerm {
+    var list: std.ArrayList(GroupByTerm) = .empty;
+    errdefer freeGroupByTerms(p.allocator, list.items);
+    while (true) {
+        const expr = try p.parseExpr();
+        const position: ?usize = if (expr.* == .literal) switch (expr.*.literal) {
+            .integer => |n| if (n > 0) @as(usize, @intCast(n)) else null,
+            else => null,
+        } else null;
+        try list.append(p.allocator, .{ .expr = expr, .position = position });
+        if (p.cur.kind != .comma) break;
         p.advance();
-        try list.append(p.allocator, try p.parseExpr());
     }
     return list.toOwnedSlice(p.allocator);
 }
 
-pub fn freeExprList(allocator: std.mem.Allocator, list: []*ast.Expr) void {
-    for (list) |e| e.deinit(allocator);
+pub fn freeGroupByTerms(allocator: std.mem.Allocator, list: []GroupByTerm) void {
+    for (list) |t| t.expr.deinit(allocator);
     allocator.free(list);
 }
 
