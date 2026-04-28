@@ -530,3 +530,24 @@ WITH cte AS (SELECT 1 AS x) SELECT cte.x, c2.x FROM cte JOIN cte AS c2 ON cte.x 
 CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH big AS (SELECT v*10 AS w FROM u) SELECT sum(w) FROM big;
 CREATE TABLE t(x INT); INSERT INTO t VALUES(10); WITH t AS (SELECT 99 AS x) SELECT x FROM t;
 CREATE TABLE u(v INT); WITH cte AS (SELECT 1) SELECT * FROM u;
+
+# CTE column rename + VALUES body (Iter31.AA):
+#  * `WITH t(c1, c2, ...) AS (...)` overrides the body's projected column
+#    names. Width mismatch is a parse-time error in sqlite3 ("table t has
+#    N values for M columns"); sqlite0 surfaces SyntaxError, exit code 1
+#    matches.
+#  * `WITH t AS (VALUES (...), ...)` materialises the VALUES rows and
+#    auto-names columns `column1`/`column2`/... matching sqlite3's quirk
+#    for inline-VALUES sources.
+#  * Combined: VALUES body + column rename = explicit names override the
+#    `columnN` defaults.
+#  * Cross-CTE chain still works: a VALUES-bodied CTE feeds a SELECT-bodied
+#    one through the transient CTE map.
+WITH t(a,b) AS (SELECT 1, 2) SELECT a, b FROM t;
+WITH t AS (VALUES (1,'a'),(2,'b')) SELECT * FROM t;
+WITH t(num, ch) AS (VALUES (1,'a'),(2,'b')) SELECT num, ch FROM t;
+WITH t(c1) AS (VALUES (1),(2),(3)) SELECT * FROM t ORDER BY c1 DESC;
+CREATE TABLE u(v INT); INSERT INTO u VALUES(10),(20); WITH cte(doubled) AS (SELECT v*2 FROM u) SELECT sum(doubled) FROM cte;
+WITH a(x) AS (VALUES (1),(2),(3)), b(y) AS (SELECT x*10 FROM a) SELECT y FROM b;
+WITH t(a) AS (SELECT 1, 2) SELECT * FROM t;
+WITH t(a,b) AS (VALUES (1)) SELECT * FROM t;

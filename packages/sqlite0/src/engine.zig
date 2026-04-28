@@ -495,18 +495,53 @@ fn materializeCtes(
     const slots = try alloc.alloc(database.TransientCte, ctes.len);
     var i: usize = 0;
     while (i < ctes.len) : (i += 1) {
-        const result = try executeSelectWithColumns(db, alloc, ctes[i].select);
-        const rows_const = try alloc.alloc([]const Value, result.rows.len);
-        for (result.rows, rows_const) |row, *slot| slot.* = row;
+        const cte = ctes[i];
+        const rows_const, const columns_default = try materializeOneCteBody(db, alloc, cte.body);
+        // Iter31.AA — `WITH t(c1, c2) AS (...)` overrides the body's
+        // projected names. Width must match (sqlite3 errors with
+        // "table t has N values for M columns"); we surface the same
+        // condition as a SyntaxError to stay within the existing error
+        // taxonomy.
+        const columns: []const []const u8 = if (cte.column_names) |overrides| blk: {
+            if (overrides.len != columns_default.len) return Error.SyntaxError;
+            break :blk overrides;
+        } else columns_default;
         slots[i] = .{
-            .name = ctes[i].name,
-            .columns = result.columns,
+            .name = cte.name,
+            .columns = columns,
             .rows = rows_const,
         };
         // Publish through `db.transient_ctes` so the next CTE in the
         // list can resolve a `.table_ref` against earlier names.
         db.transient_ctes = slots[0 .. i + 1];
     }
+}
+
+/// Iter31.AA — execute one CTE body and return `(rows, default_columns)`.
+/// SELECT path delegates to `executeSelectWithColumns`. VALUES path
+/// returns the eagerly-evaluated rows verbatim and synthesises
+/// `column1`/`column2`/... matching sqlite3's auto-naming. Both paths
+/// allocate in the per-statement arena (`alloc`).
+fn materializeOneCteBody(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    body: stmt_mod.CteBody,
+) Error!struct { []const []const Value, []const []const u8 } {
+    return switch (body) {
+        .select => |ps| blk: {
+            const result = try executeSelectWithColumns(db, alloc, ps);
+            const rows_const = try alloc.alloc([]const Value, result.rows.len);
+            for (result.rows, rows_const) |row, *slot| slot.* = row;
+            break :blk .{ rows_const, result.columns };
+        },
+        .values => |rows| blk: {
+            const arity: usize = if (rows.len > 0) rows[0].len else 0;
+            const cols = try @import("stmt_from.zig").synthesizeColumnNames(alloc, arity);
+            const rows_const = try alloc.alloc([]const Value, rows.len);
+            for (rows, rows_const) |row, *slot| slot.* = row;
+            break :blk .{ rows_const, cols };
+        },
+    };
 }
 
 /// Deep-copy `rows` from arena-backed memory into `long`. Each TEXT/BLOB

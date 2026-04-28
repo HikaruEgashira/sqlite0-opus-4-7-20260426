@@ -61,6 +61,7 @@ pub const freeSetopBranches = stmt_setop.freeSetopBranches;
 
 // CTE types live in stmt_cte.zig; re-exported for parity.
 pub const ParsedCte = stmt_cte.ParsedCte;
+pub const CteBody = stmt_cte.Body;
 pub const freeCtes = stmt_cte.freeCtes;
 
 pub const OrderDirection = enum { asc, desc };

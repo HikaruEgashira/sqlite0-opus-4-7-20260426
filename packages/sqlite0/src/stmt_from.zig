@@ -226,8 +226,9 @@ fn parseOptionalAlias(p: *Parser) ?[]const u8 {
 }
 
 /// Allocate `column1`, `column2`, ... `columnN` matching SQLite's auto-naming
-/// for `(VALUES ...)` subqueries.
-fn synthesizeColumnNames(allocator: std.mem.Allocator, n: usize) ![][]const u8 {
+/// for `(VALUES ...)` subqueries. Public so `engine.materializeCtes` (Iter31.AA)
+/// can reuse the same synthesis for VALUES bodies in CTEs.
+pub fn synthesizeColumnNames(allocator: std.mem.Allocator, n: usize) ![][]const u8 {
     var names = try allocator.alloc([]const u8, n);
     var produced: usize = 0;
     errdefer {
