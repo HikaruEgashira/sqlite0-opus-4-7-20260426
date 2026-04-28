@@ -175,15 +175,42 @@ pub fn fnTrim(allocator: std.mem.Allocator, args: []const Value, side: TrimSide)
         break :blk c;
     } else default_ws;
 
+    // sqlite3 trim is UTF-8 char-aware (SQLITE_SKIP_UTF8): subject and
+    // trim-set are both iterated by codepoint, so `trim('αβα', 'α')` → `'β'`
+    // (byte-by-byte would strip 0xCE / 0xB1 individually and break UTF-8).
     var lo: usize = 0;
     var hi: usize = s.len;
     if (side == .left or side == .both) {
-        while (lo < hi and std.mem.indexOfScalar(u8, chars, s[lo]) != null) lo += 1;
+        while (lo < hi) {
+            const next = util.skipUtf8Char(s, lo);
+            if (!charInSet(s[lo..next], chars)) break;
+            lo = next;
+        }
     }
     if (side == .right or side == .both) {
-        while (hi > lo and std.mem.indexOfScalar(u8, chars, s[hi - 1]) != null) hi -= 1;
+        // Forward scan, remember the last non-trim char's end. Symmetric
+        // SKIP_UTF8 semantics with left and avoids backward orphan-cont
+        // ambiguity.
+        var pos: usize = lo;
+        var last_keep_end: usize = lo;
+        while (pos < hi) {
+            const next = util.skipUtf8Char(s, pos);
+            if (!charInSet(s[pos..next], chars)) last_keep_end = next;
+            pos = next;
+        }
+        hi = last_keep_end;
     }
     return Value{ .text = try allocator.dupe(u8, s[lo..hi]) };
+}
+
+fn charInSet(needle: []const u8, set: []const u8) bool {
+    var i: usize = 0;
+    while (i < set.len) {
+        const next = util.skipUtf8Char(set, i);
+        if (std.mem.eql(u8, set[i..next], needle)) return true;
+        i = next;
+    }
+    return false;
 }
 
 /// SQLite `instr(haystack, needle)` — 1-based byte offset of first match,
@@ -232,17 +259,9 @@ fn textInstrCharPos(hay: []const u8, needle: []const u8) i64 {
     return 0;
 }
 
-/// SQLite `char(N1, N2, ...)` — concatenate the UTF-8 encodings of the given
-/// unicode code points.
-///
-/// sqlite3 quirks reproduced here:
-///   * Out-of-range codepoints (`< 0` or `> 0x10FFFF`) emit U+FFFD
-///     (EF BF BD), the Unicode replacement character — NOT skipped.
-///   * Surrogate codepoints (0xD800-0xDFFF) emit a literal 3-byte
-///     WTF-8 sequence (ED Ax/Bx xx). sqlite3's UTF-8 encoder doesn't
-///     reject surrogates the way std.unicode.utf8Encode does — match
-///     by writing the bytes directly.
-///   * `char(0)` emits a single NUL byte (no replacement).
+/// `char(N1, N2, ...)` — concatenate UTF-8 encodings. sqlite3 quirks:
+/// out-of-range codepoint → U+FFFD; surrogate (0xD800-DFFF) → literal
+/// WTF-8 3-byte sequence; `char(0)` emits raw NUL.
 pub fn fnChar(allocator: std.mem.Allocator, args: []const Value) Error!Value {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);

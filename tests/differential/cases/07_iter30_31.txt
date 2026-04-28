@@ -360,3 +360,20 @@ SELECT hex(replace('a' || char(0) || 'b', 'b', 'X'))
 SELECT hex(replace('foobar', 'foo' || char(0), 'X'))
 SELECT hex(replace(cast(x'410042' as text), char(0), 'X'))
 SELECT hex(replace(cast(x'410042' as blob), char(0), 'X'))
+
+# trim() UTF-8 char-aware (Iter31.C):
+#  * sqlite3 trim treats subject and trim-set as UTF-8 char sequences,
+#    not bytes. `trim('αβα', 'α')` → `'β'` because each `α` (2 bytes)
+#    is one trim-set element matched as a unit.
+#  * Old impl was byte-set: stripped 0xCE / 0xB1 individually, leaving
+#    invalid UTF-8 fragments.
+SELECT trim('αβα', 'α')
+SELECT length(trim('αβα', 'α'))
+SELECT trim('αβα', 'βα')
+SELECT length(trim('αβα', 'βα'))
+SELECT trim('αβγαβ', 'αβ')
+SELECT trim('αβγ', 'γ')
+SELECT trim('αβ', 'α')
+SELECT ltrim('ααβ', 'α')
+SELECT rtrim('βαα', 'α')
+SELECT length(trim(' héllo ', ' '))
