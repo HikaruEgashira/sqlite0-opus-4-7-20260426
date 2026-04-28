@@ -111,9 +111,15 @@ pub fn parseDateTime(in: []const u8) ?DateTime {
     var dt = DateTime{ .year = year_signed, .month = month, .day = day };
     var offset_min: i16 = 0;
     if (s.len > 10 + off) {
+        if (s[10 + off] != ' ' and s[10 + off] != 'T') return null;
+        // sqlite3 quirk (date.c parseYyyyMmDd): a date-only string followed
+        // by a bare `T` separator (no HH:MM after it) is accepted as the
+        // date-only form. `datetime('2024-01-01T')` → `'2024-01-01 00:00:00'`.
+        // Trailing space is already stripped earlier, so this only fires
+        // for `'YYYY-MM-DDT'` exactly.
+        if (s.len == 11 + off) return dt;
         // Datetime with time component: needs at least HH:MM (16 chars total + sign).
         if (s.len < 16 + off) return null;
-        if (s[10 + off] != ' ' and s[10 + off] != 'T') return null;
         if (s[13 + off] != ':') return null;
         const hour = parseUintFixed(u8, s[11 + off .. 13 + off]) orelse return null;
         const minute = parseUintFixed(u8, s[14 + off .. 16 + off]) orelse return null;
