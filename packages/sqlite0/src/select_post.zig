@@ -15,6 +15,7 @@ const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const eval = @import("eval.zig");
 const database = @import("database.zig");
+const util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -195,13 +196,13 @@ pub fn applyLimitOffset(
     if (pp.offset) |e| {
         const v = try eval.evalExpr(ctx, e);
         defer ops.freeValue(allocator, v);
-        skip = clampNonNegative(coerceToInt(v));
+        skip = clampNonNegative(try coerceLimitStrict(v));
     }
     var keep: usize = std.math.maxInt(usize);
     if (pp.limit) |e| {
         const v = try eval.evalExpr(ctx, e);
         defer ops.freeValue(allocator, v);
-        const n = coerceToInt(v);
+        const n = try coerceLimitStrict(v);
         if (n >= 0) keep = @intCast(n);
         // sqlite3: negative LIMIT means "no limit" — keep stays at maxInt.
     }
@@ -285,14 +286,44 @@ fn classOrder(v: Value) u8 {
     };
 }
 
-fn coerceToInt(v: Value) i64 {
+/// Strict LIMIT/OFFSET integer coercion — mirrors sqlite3 OP_MustBeInt.
+/// sqlite3 evaluates the LIMIT/OFFSET expr, applies NUMERIC affinity,
+/// then requires the result to be representable as an i64 with no
+/// fractional / non-numeric loss. Anything else raises SQLITE_MISMATCH
+/// (20) "datatype mismatch" at step time.
+///
+/// Rules (vdbe.c OP_MustBeInt + applyNumericAffinity):
+///   - INTEGER → as-is
+///   - REAL → only if `r == @floor(r)` AND in [INT64_MIN, INT64_MAX] range.
+///     Note INT64_MAX (2^63-1) cannot be represented exactly as f64; the
+///     nearest f64 is 2^63 itself, which we reject. NaN/Inf → reject.
+///   - TEXT → trim ASCII whitespace, then parse as a strict numeric
+///     (no trailing garbage); resulting REAL must be whole + in range.
+///     Empty / no-digit / `0x...` prefix → reject (sqlite3AtoF strict).
+///   - BLOB / NULL → reject (sqlite3 OP_MustBeInt errors on non-numeric).
+fn coerceLimitStrict(v: Value) ops.Error!i64 {
     return switch (v) {
-        .null => 0,
+        .null, .blob => ops.Error.DatatypeMismatch,
         .integer => |i| i,
-        .real => |r| @intFromFloat(r),
-        .text => |t| std.fmt.parseInt(i64, t, 10) catch 0,
-        .blob => |b| std.fmt.parseInt(i64, b, 10) catch 0,
+        .real => |r| try realToI64Strict(r),
+        .text => |t| blk: {
+            const s = std.mem.trim(u8, t, " \t\n\r");
+            if (s.len == 0) break :blk ops.Error.DatatypeMismatch;
+            const r = util.parseFloatStrictOpt(s) orelse break :blk ops.Error.DatatypeMismatch;
+            break :blk try realToI64Strict(r);
+        },
     };
+}
+
+fn realToI64Strict(r: f64) ops.Error!i64 {
+    if (std.math.isNan(r) or std.math.isInf(r)) return ops.Error.DatatypeMismatch;
+    // i64 max = 2^63-1, but f64 mantissa is 52 bits — the nearest
+    // f64 to 2^63-1 IS 2^63 (rounds up). So accept r in
+    // [-2^63, 2^63) only; equality with 2^63 is out-of-range.
+    if (r < -9223372036854775808.0 or r >= 9223372036854775808.0) return ops.Error.DatatypeMismatch;
+    const i: i64 = @intFromFloat(r);
+    if (@as(f64, @floatFromInt(i)) != r) return ops.Error.DatatypeMismatch;
+    return i;
 }
 
 fn clampNonNegative(n: i64) usize {
