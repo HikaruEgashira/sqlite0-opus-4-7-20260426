@@ -3044,3 +3044,19 @@ SELECT quote(x'00')
 SELECT quote(x'010203')
 SELECT quote(printf('%c', 9))
 SELECT quote(char(13))
+
+# replace() pattern starting with NUL = empty pattern (Iter31.B):
+#  * sqlite3 returns input unchanged when the pattern's first byte is
+#    NUL (or pattern is empty). `replace('a'||char(0)||'b', char(0),
+#    'x')` → input unchanged.
+#  * Multi-byte patterns NOT starting with NUL still match byte-for-byte:
+#    `replace('foo'||char(0)||'bar', 'foo'||char(0), 'X')` → 'Xbar'.
+SELECT hex(replace('a' || char(0) || 'b', char(0), 'x'))
+SELECT length(replace('a' || char(0) || 'b', char(0), 'x'))
+SELECT hex(replace(char(0) || 'a' || char(0) || 'b', char(0) || 'a', 'X'))
+SELECT hex(replace('foo' || char(0) || 'bar', 'foo' || char(0), 'X'))
+SELECT hex(replace('foo' || char(0) || 'bar', 'foo', 'X'))
+SELECT hex(replace('a' || char(0) || 'b', 'b', 'X'))
+SELECT hex(replace('foobar', 'foo' || char(0), 'X'))
+SELECT hex(replace(cast(x'410042' as text), char(0), 'X'))
+SELECT hex(replace(cast(x'410042' as blob), char(0), 'X'))

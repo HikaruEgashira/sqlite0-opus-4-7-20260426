@@ -69,7 +69,13 @@ pub fn fnReplace(allocator: std.mem.Allocator, args: []const Value) Error!Value 
     const repl = try util.ensureText(allocator, args[2]);
     defer allocator.free(repl);
 
-    if (find.len == 0) return Value{ .text = try allocator.dupe(u8, s) };
+    // sqlite3 quirk: if the pattern starts with NUL (or is itself empty),
+    // `replaceFunc` returns the input unchanged. Verified against 3.51.0
+    // for `replace('a' || char(0) || 'b', char(0), 'x')` → `'a' || char(0)
+    // || 'b'` (no replacement) and `replace(..., char(0) || 'a', 'X')`
+    // (also no replacement). Multi-byte patterns *not* starting with NUL
+    // (e.g. `'foo' || char(0)`) still match byte-for-byte.
+    if (find.len == 0 or find[0] == 0) return Value{ .text = try allocator.dupe(u8, s) };
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
