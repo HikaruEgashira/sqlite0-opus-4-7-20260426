@@ -35,13 +35,33 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     // page-1 silent corruption.
     if (t.is_system) return Error.UnsupportedFeature;
 
+    // Iter31.AI — DEFAULT VALUES synthesises a single row of NULLs in the
+    // arena (no column DEFAULT clauses are tracked yet). Width matches the
+    // table column count so the identity column-target mapping below works.
     const source_rows: [][]Value = switch (parsed.source) {
         .values => |rows| rows,
         .select => |ps| try engine.executeSelect(db, arena, ps),
+        .default_values => blk: {
+            const single = try arena.alloc(Value, t.columns.len);
+            for (single) |*slot| slot.* = Value.null;
+            const wrapper = try arena.alloc([]Value, 1);
+            wrapper[0] = single;
+            break :blk wrapper;
+        },
     };
 
-    const target_indices = try resolveColumnTargets(arena, t, parsed.columns);
-    const source_arity: usize = if (parsed.columns) |cs| cs.len else t.columns.len;
+    // DEFAULT VALUES bypasses any user-supplied column list; force the
+    // identity mapping so all NULLs flow into every column slot.
+    const target_indices = if (parsed.source == .default_values)
+        try resolveColumnTargets(arena, t, null)
+    else
+        try resolveColumnTargets(arena, t, parsed.columns);
+    const source_arity: usize = if (parsed.source == .default_values)
+        t.columns.len
+    else if (parsed.columns) |cs|
+        cs.len
+    else
+        t.columns.len;
     for (source_rows) |row| {
         if (row.len != source_arity) return Error.ColumnCountMismatch;
     }

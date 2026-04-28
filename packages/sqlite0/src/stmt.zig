@@ -338,33 +338,23 @@ pub const parseCreateTableStatement = stmt_ddl.parseCreateTableStatement;
 
 // ── INSERT ──────────────────────────────────────────────────────────────────
 
-/// `INSERT INTO <name> [(c1, c2, ...)] (VALUES (...) [, (...)] | SELECT ...)`
-///
-/// `columns == null` means "all table columns in declaration order" (the
-/// default). When non-null, each name borrows from `Parser.src` and the
-/// outer slice lives in the per-statement arena.
-///
-/// `source` holds either eagerly-evaluated VALUES rows or an unevaluated
-/// `ParsedSelect`; the engine resolves the SELECT path against `Database`
-/// state at execute time.
+/// `INSERT [OR <action>] INTO <name> [(c1, ...)] (VALUES ... | SELECT ... |
+/// DEFAULT VALUES) [RETURNING ...]`. `columns == null` ⇒ identity mapping
+/// over all table columns. `returning == null` ⇒ engine returns rowcount
+/// only. Conflict action defaults to `.abort` (== plain INSERT).
 pub const ParsedInsert = struct {
     table: []const u8,
     columns: ?[][]const u8,
     source: Source,
-    /// Iter31.AE — `RETURNING <items>` clause. Items reuse `select.SelectItem`
-    /// for shape parity with SELECT projections (`*` / `t.*` / `expr [AS
-    /// alias]`). Null = no RETURNING (the common path); engine returns just
-    /// the rowcount. Non-null = engine captures inserted rows and projects
-    /// the items over each.
     returning: ?[]select.SelectItem = null,
-    /// Iter31.AG — `INSERT OR <action>` conflict resolution. `.abort` is the
-    /// default and matches plain `INSERT`. `.fail` and `.rollback` collapse
-    /// to abort here since transactions are not yet modeled.
     conflict_action: ConflictAction = .abort,
 
     pub const Source = union(enum) {
         values: [][]Value,
         select: ParsedSelect,
+        /// Iter31.AI — `INSERT INTO t DEFAULT VALUES`. Engine fills one
+        /// row with all NULLs (no column DEFAULT clauses yet).
+        default_values,
     };
 
     pub const ConflictAction = enum { abort, ignore, replace, fail, rollback };
@@ -413,17 +403,26 @@ pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
         try p.expect(.rparen);
     }
 
-    var source: ParsedInsert.Source = undefined;
-    errdefer freeInsertSource(p.allocator, source);
+    // Iter31.AI — `source` is wrapped in Optional so the errdefer never
+    // fires on uninitialized memory (the prior `var source = undefined`
+    // segfaulted when the SyntaxError fallthrough fired errdefer).
+    var source_opt: ?ParsedInsert.Source = null;
+    errdefer if (source_opt) |s| freeInsertSource(p.allocator, s);
     switch (p.cur.kind) {
         .keyword_values => {
             p.advance();
             const rows = try parseValuesBody(p);
-            source = .{ .values = rows };
+            source_opt = .{ .values = rows };
         },
         .keyword_select => {
             const ps = try parseSelectStatement(p);
-            source = .{ .select = ps };
+            source_opt = .{ .select = ps };
+        },
+        .keyword_default => {
+            // Iter31.AI — `DEFAULT VALUES`. Engine fills one NULL row.
+            p.advance();
+            try p.expect(.keyword_values);
+            source_opt = .default_values;
         },
         else => return Error.SyntaxError,
     }
@@ -431,7 +430,7 @@ pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
     return .{
         .table = table,
         .columns = columns,
-        .source = source,
+        .source = source_opt.?,
         .returning = returning,
         .conflict_action = conflict_action,
     };
@@ -447,6 +446,7 @@ fn freeInsertSource(alloc: std.mem.Allocator, src: ParsedInsert.Source) void {
             alloc.free(rows);
         },
         .select => |ps| freeParsedSelectFields(alloc, ps),
+        .default_values => {},
     }
 }
 

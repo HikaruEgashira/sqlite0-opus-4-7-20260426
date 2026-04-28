@@ -73,5 +73,6 @@ pub fn keywordKind(text: []const u8) ?TokenKind {
     if (eq(text, "collate")) return .keyword_collate;
     if (eq(text, "with")) return .keyword_with;
     if (eq(text, "returning")) return .keyword_returning;
+    if (eq(text, "default")) return .keyword_default;
     return null;
 }

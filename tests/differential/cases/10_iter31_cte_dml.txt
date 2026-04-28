@@ -179,3 +179,24 @@ CREATE TABLE t(id INTEGER PRIMARY KEY, x NOT NULL); INSERT INTO t VALUES(1,'a'),
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR IGNORE t SET id=id+1; SELECT * FROM t ORDER BY id;
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR ABORT t SET id=2 WHERE x='a';
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'),(2,'b'); UPDATE OR REPLACE t SET id=99 WHERE id=1; SELECT * FROM t ORDER BY id;
+
+# INSERT DEFAULT VALUES form + parser uninit-memory crash (Iter31.AI):
+#  * `INSERT INTO t DEFAULT VALUES` inserts one row with each column set
+#    to its DEFAULT (NULL when no DEFAULT clause was declared). sqlite0
+#    used to crash with a segfault — `parseInsertStatement` had `var
+#    source: Source = undefined; errdefer freeInsertSource(...);` and
+#    the `else => SyntaxError` branch fired the errdefer on
+#    uninitialized memory.
+#  * Fix: switch to Optional `?Source = null` + unwrap on success.
+#    The errdefer is now safe on the no-init path.
+#  * Feature: new `Source.default_values` variant. Parser consumes
+#    `keyword_default keyword_values`. Engine synthesises one row of
+#    NULLs sized to the table's column count and routes through the
+#    normal INSERT pipeline so IPK auto-assignment, NOT NULL, and
+#    UNIQUE checks all apply.
+CREATE TABLE t(x); INSERT INTO t DEFAULT VALUES; SELECT count(*), x FROM t;
+CREATE TABLE t(a, b, c); INSERT INTO t DEFAULT VALUES; SELECT a, b, c FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t DEFAULT VALUES; SELECT * FROM t;
+CREATE TABLE t(x INT NOT NULL); INSERT INTO t DEFAULT VALUES;
+CREATE TABLE t(x); INSERT INTO t DEFAULT VALUES; INSERT INTO t DEFAULT VALUES; SELECT count(*) FROM t;
+CREATE TABLE t(x);
