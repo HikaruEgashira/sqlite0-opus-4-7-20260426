@@ -136,3 +136,25 @@ CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT I
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(NULL,'a'); INSERT INTO t VALUES(NULL,'b'); SELECT * FROM t;
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(7,'a'); INSERT INTO t VALUES(NULL,'b'); SELECT * FROM t;
 CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET x='c' WHERE id=1; SELECT * FROM t;
+
+# INSERT OR IGNORE / OR REPLACE conflict resolution (Iter31.AG):
+#  * sqlite3 since SQLite 3.0 supports `INSERT OR IGNORE|REPLACE|ABORT|
+#    FAIL|ROLLBACK INTO ...`. IGNORE skips the row on any constraint
+#    failure (UNIQUE or NOT NULL). REPLACE catches UNIQUE/PK conflicts
+#    by deleting the offender then inserting; NOT NULL still errors
+#    (REPLACE substitutes column DEFAULT, but we have none).
+#  * sqlite0 used to SyntaxError the whole `OR <action>` form.
+#  * Implementation: parser consumes optional `OR <ident>` between
+#    INSERT and INTO. engine_dml_insert wraps NOT NULL check in IGNORE
+#    skip, IPK UNIQUE branches on action (skip / orderedRemove+append /
+#    error). File-mode rejects non-abort with UnsupportedFeature.
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT OR IGNORE INTO t VALUES(1,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT OR REPLACE INTO t VALUES(1,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x NOT NULL); INSERT INTO t VALUES(1,'a'); INSERT OR IGNORE INTO t VALUES(2,NULL); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x NOT NULL); INSERT INTO t VALUES(1,'a'); INSERT OR REPLACE INTO t VALUES(2,NULL);
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT OR IGNORE INTO t VALUES(1,'a'),(1,'b'),(2,'c'); SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT OR REPLACE INTO t VALUES(1,'a'),(1,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'orig'),(2,'two'); INSERT OR REPLACE INTO t VALUES(1,'a'),(2,'b'); SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT OR REPLACE INTO t VALUES(NULL,'auto'); SELECT * FROM t ORDER BY id;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT OR ABORT INTO t VALUES(1,'a'); INSERT OR ABORT INTO t VALUES(1,'b');
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT OR FAIL INTO t VALUES(1,'a'); INSERT OR FAIL INTO t VALUES(1,'b'); SELECT * FROM t;

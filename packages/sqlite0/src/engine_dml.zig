@@ -18,14 +18,12 @@
 const std = @import("std");
 const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
-const stmt_mod = @import("stmt.zig");
 const stmt_dml = @import("stmt_dml.zig");
 const eval = @import("eval.zig");
 const database = @import("database.zig");
 const engine = @import("engine.zig");
 const func_util = @import("func_util.zig");
 const engine_dml_file = @import("engine_dml_file.zig");
-const engine_dml_insert_file = @import("engine_dml_insert_file.zig");
 const engine_returning = @import("engine_returning.zig");
 
 const Value = value_mod.Value;
@@ -281,199 +279,10 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     return .{ .rowcount = changed, .returning = ret_slice };
 }
 
-/// Append rows from a parsed INSERT into the target table. Source rows come
-/// from either eagerly-evaluated VALUES tuples or a per-row SELECT result;
-/// both live in arena memory until `func_util.dupeValue` moves them.
-///
-/// When `parsed.columns` is non-null, source-row columns are projected into
-/// the table-schema-shaped row by name (case-insensitive); table columns
-/// not mentioned in the column list become NULL. Unknown column names or
-/// arity mismatches return `SyntaxError`/`ColumnCountMismatch` before any
-/// rows are appended (validation precedes mutation).
-pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.ParsedInsert) !DmlInternal {
-    const t = try engine.lookupTable(db, db.allocator, parsed.table);
-    // Iter29.A — sqlite_schema / sqlite_master are engine-managed.
-    // Direct SQL mutation would corrupt page 1 (silent corruption);
-    // sqlite3 rejects with "table sqlite_master may not be modified".
-    if (t.is_system) return Error.UnsupportedFeature;
-
-    const source_rows: [][]Value = switch (parsed.source) {
-        .values => |rows| rows,
-        .select => |ps| try engine.executeSelect(db, arena, ps),
-    };
-
-    const target_indices = try resolveColumnTargets(arena, t, parsed.columns);
-    const source_arity: usize = if (parsed.columns) |cs| cs.len else t.columns.len;
-    for (source_rows) |row| {
-        if (row.len != source_arity) return Error.ColumnCountMismatch;
-    }
-
-    // File-mode tables route through the Pager + B-tree mutation path.
-    // In-memory tables (root_page == 0) keep the existing ArrayList
-    // append behaviour. The dispatch lives here so the caller-side
-    // (engine.dispatchOne) doesn't need to know about the backend.
-    if (t.root_page != 0) {
-        if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
-        const rc = try engine_dml_insert_file.executeInsertFile(db, t, target_indices, source_rows);
-        return .{ .rowcount = rc };
-    }
-
-    try t.rows.ensureUnusedCapacity(db.allocator, source_rows.len);
-    if (t.ipk_column == null) {
-        try t.rowids.ensureUnusedCapacity(db.allocator, source_rows.len);
-    }
-    var inserted: u64 = 0;
-    // Iter28.fix — in-memory IPK auto-rowid. Mirrors Iter28's file-mode
-    // chooseRowid: scan existing rows for the highest integer value in
-    // the IPK column (default 0 for empty table), then bump for each
-    // row whose IPK column is NULL after column-target resolution.
-    // Explicit IPK values bump max_rowid forward so subsequent NULL
-    // entries continue from there. sqlite3 returns 1 for the first
-    // auto-assigned rowid in a fresh table; we match. Iter29.T —
-    // non-IPK path computes max from the parallel `rowids` list, so
-    // DELETE-from-end correctly reduces `max+1` next iteration.
-    var max_rowid: i64 = if (t.ipk_column) |ipk|
-        computeMaxIpkValue(t, ipk)
-    else
-        currentMaxImplicitRowid(t);
-    errdefer {
-        // Roll back any rows already appended in this call (ADR-0003 §1
-        // all-or-nothing). Schema mutations from registerTable are not
-        // rolled back; only same-call row appends are. For non-IPK
-        // tables the parallel rowids entry is popped in lockstep.
-        var i: u64 = 0;
-        while (i < inserted) : (i += 1) {
-            const last_idx = t.rows.items.len - 1;
-            const undone_row = t.rows.items[last_idx];
-            t.rows.items.len = last_idx;
-            for (undone_row) |v| ops.freeValue(db.allocator, v);
-            db.allocator.free(undone_row);
-            if (t.ipk_column == null) {
-                t.rowids.items.len -= 1;
-            }
-        }
-    }
-    // Iter29.S — track last-inserted rowid in a local that we commit
-    // to `db.last_insert_rowid` only after the full for-loop succeeds.
-    var last_rowid: i64 = db.last_insert_rowid;
-    for (source_rows) |row| {
-        const new_row = try db.allocator.alloc(Value, t.columns.len);
-        var k: usize = 0;
-        errdefer {
-            for (new_row[0..k]) |v| ops.freeValue(db.allocator, v);
-            db.allocator.free(new_row);
-        }
-        while (k < t.columns.len) : (k += 1) {
-            new_row[k] = if (target_indices[k]) |src_idx|
-                try func_util.dupeValue(db.allocator, row[src_idx])
-            else
-                Value.null;
-        }
-        if (t.ipk_column) |ipk| switch (new_row[ipk]) {
-            .null => {
-                max_rowid += 1;
-                new_row[ipk] = .{ .integer = max_rowid };
-                last_rowid = max_rowid;
-            },
-            .integer => |explicit| {
-                if (explicit > max_rowid) max_rowid = explicit;
-                last_rowid = explicit;
-            },
-            else => {},
-        } else {
-            max_rowid += 1;
-            last_rowid = max_rowid;
-        }
-        try enforceNotNull(t, new_row);
-        // Iter31.AF — IPK UNIQUE: auto values (NULL → max+1) can't conflict
-        // by construction; explicit ones get scanned against t.rows (which
-        // already includes any rows appended earlier in this batch). The
-        // outer new_row errdefer frees the row when we error out.
-        if (t.ipk_column) |ipk| {
-            if (new_row[ipk] == .integer) {
-                const new_ipk = new_row[ipk].integer;
-                for (t.rows.items) |existing| {
-                    if (existing[ipk] == .integer and existing[ipk].integer == new_ipk) {
-                        return Error.UniqueConstraint;
-                    }
-                }
-            }
-        }
-        t.rows.appendAssumeCapacity(new_row);
-        if (t.ipk_column == null) {
-            t.rowids.appendAssumeCapacity(max_rowid);
-        }
-        inserted += 1;
-    }
-    if (inserted > 0) {
-        db.last_insert_rowid = last_rowid;
-    }
-
-    // Iter31.AE — RETURNING projection over each newly-inserted row.
-    // Done after the loop so partial-failure rollback (errdefer above)
-    // doesn't leave behind rows whose RETURNING projection ran but
-    // whose insertion was rolled back.
-    var returning_rows: ?[][]Value = null;
-    if (parsed.returning) |items| {
-        const start_idx = t.rows.items.len - inserted;
-        const arr = try arena.alloc([]Value, inserted);
-        var i: usize = 0;
-        while (i < inserted) : (i += 1) {
-            const row = t.rows.items[start_idx + i];
-            arr[i] = try engine_returning.projectRow(db, arena, items, row, parsed.table, t.columns, t.collations);
-        }
-        returning_rows = arr;
-    }
-    return .{ .rowcount = inserted, .returning = returning_rows };
-}
-
-fn currentMaxImplicitRowid(t: *const Table) i64 {
-    var max_val: i64 = 0;
-    for (t.rowids.items) |rid| {
-        if (rid > max_val) max_val = rid;
-    }
-    return max_val;
-}
-
-fn computeMaxIpkValue(t: *const Table, ipk: usize) i64 {
-    var max_val: i64 = 0;
-    for (t.rows.items) |row| {
-        if (ipk >= row.len) continue;
-        switch (row[ipk]) {
-            .integer => |n| if (n > max_val) {
-                max_val = n;
-            },
-            else => {},
-        }
-    }
-    return max_val;
-}
-
-/// Build a per-table-column slice mapping each table column index to either
-/// the source row position that provides it (`?usize`) or null (meaning
-/// "column omitted; use NULL"). When `cols` is null the mapping is the
-/// identity (`[0, 1, 2, ...]`).
-fn resolveColumnTargets(
-    arena: std.mem.Allocator,
-    t: *const Table,
-    cols: ?[][]const u8,
-) ![]?usize {
-    const targets = try arena.alloc(?usize, t.columns.len);
-    if (cols) |column_list| {
-        @memset(targets, null);
-        // Duplicate column names: sqlite3 silently keeps the FIRST mapping
-        // and ignores later occurrences. Match that behavior — verified
-        // against sqlite3 3.51.0 (`INSERT INTO t (a, a, b) VALUES (1, 2, 3)`
-        // → row `(1, 3)`).
-        for (column_list, 0..) |name, src_idx| {
-            const tcol_idx = findTableColumn(t, name) orelse return Error.SyntaxError;
-            if (targets[tcol_idx] == null) targets[tcol_idx] = src_idx;
-        }
-    } else {
-        for (targets, 0..) |*slot, i| slot.* = i;
-    }
-    return targets;
-}
+/// Re-export — Iter31.AG split executeInsert + helpers into
+/// `engine_dml_insert.zig` to keep this file under the 500-line discipline.
+pub const executeInsert = @import("engine_dml_insert.zig").executeInsert;
+pub const enforceNotNull = @import("engine_dml_insert.zig").enforceNotNull;
 
 fn findTableColumn(t: *const Table, name: []const u8) ?usize {
     for (t.columns, 0..) |col, i| {
@@ -482,14 +291,4 @@ fn findTableColumn(t: *const Table, name: []const u8) ?usize {
     return null;
 }
 
-/// Iter29.B — reject if any column declared `NOT NULL` carries a NULL
-/// value at this point. Called AFTER IPK auto-assignment so an IPK
-/// column whose source NULL was rewritten to the next rowid passes.
-/// Mirrors the file-mode equivalent in `engine_dml_insert_file` so
-/// both backends produce the same rejection signal.
-pub fn enforceNotNull(t: *const Table, row: []const Value) Error!void {
-    for (t.not_null, row) |required, v| {
-        if (required and v == .null) return Error.ConstraintNotNull;
-    }
-}
 

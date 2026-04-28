@@ -357,15 +357,49 @@ pub const ParsedInsert = struct {
     /// the rowcount. Non-null = engine captures inserted rows and projects
     /// the items over each.
     returning: ?[]select.SelectItem = null,
+    /// Iter31.AG — `INSERT OR <action>` conflict resolution. `.abort` is the
+    /// default and matches plain `INSERT`. `.fail` and `.rollback` collapse
+    /// to abort here since transactions are not yet modeled.
+    conflict_action: ConflictAction = .abort,
 
     pub const Source = union(enum) {
         values: [][]Value,
         select: ParsedSelect,
     };
+
+    pub const ConflictAction = enum { abort, ignore, replace, fail, rollback };
 };
 
 pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
     try p.expect(.keyword_insert);
+    // Iter31.AG — optional `OR <action>` between INSERT and INTO. The action
+    // names (IGNORE/REPLACE/ABORT/FAIL/ROLLBACK) are not reserved in sqlite3,
+    // so we accept them as identifiers (or as the keyword they collide with,
+    // i.e. ROLLBACK already lexes to `keyword_rollback`).
+    var conflict_action: ParsedInsert.ConflictAction = .abort;
+    if (p.cur.kind == .keyword_or) {
+        p.advance();
+        const action_text = switch (p.cur.kind) {
+            .identifier => p.cur.slice(p.src),
+            .keyword_rollback => "rollback",
+            else => return Error.SyntaxError,
+        };
+        const eq = func_util.eqlIgnoreCase;
+        if (eq(action_text, "ignore")) {
+            conflict_action = .ignore;
+        } else if (eq(action_text, "replace")) {
+            conflict_action = .replace;
+        } else if (eq(action_text, "abort")) {
+            conflict_action = .abort;
+        } else if (eq(action_text, "fail")) {
+            conflict_action = .fail;
+        } else if (eq(action_text, "rollback")) {
+            conflict_action = .rollback;
+        } else {
+            return Error.SyntaxError;
+        }
+        p.advance();
+    }
     try p.expect(.keyword_into);
     if (p.cur.kind != .identifier) return Error.SyntaxError;
     const table = p.cur.slice(p.src);
@@ -394,7 +428,13 @@ pub fn parseInsertStatement(p: *Parser) !ParsedInsert {
         else => return Error.SyntaxError,
     }
     const returning = try parseOptionalReturning(p);
-    return .{ .table = table, .columns = columns, .source = source, .returning = returning };
+    return .{
+        .table = table,
+        .columns = columns,
+        .source = source,
+        .returning = returning,
+        .conflict_action = conflict_action,
+    };
 }
 
 fn freeInsertSource(alloc: std.mem.Allocator, src: ParsedInsert.Source) void {
