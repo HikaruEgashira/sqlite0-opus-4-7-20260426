@@ -627,3 +627,23 @@ CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE a>1 
 CREATE TABLE t(a INT); INSERT INTO t VALUES(1),(2),(3); DELETE FROM t WHERE a>100 RETURNING a;
 CREATE TABLE u(v INT); WITH src(x) AS (VALUES(1),(2)) INSERT INTO u SELECT x*10 FROM src RETURNING v;
 CREATE TABLE t(x INT, y INT); INSERT INTO t VALUES(1,2) RETURNING x+y, x*y AS prod;
+
+# IPK UNIQUE constraint enforcement (Iter31.AF):
+#  * INTEGER PRIMARY KEY is an alias for rowid; sqlite3 enforces
+#    UNIQUE on it transparently and rejects duplicates with
+#    "UNIQUE constraint failed: t.id" (SQLITE_CONSTRAINT 19).
+#  * sqlite0 used to silently insert duplicate rowids — only auto
+#    assignment via NULL kept things consistent.
+#  * Implementation: engine_dml.executeInsert in-memory scans
+#    t.rows for matching IPK after auto-assignment but before
+#    append; engine_dml.executeUpdate scans others when an
+#    assignment targets the IPK column. File-mode path keeps the
+#    existing B-tree behaviour (which already rejects dups via
+#    btree_insert collision). Self-update (new == old) is allowed.
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(1,'b');
+CREATE TABLE t(id INTEGER PRIMARY KEY); INSERT INTO t VALUES(5),(5);
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET id=1 WHERE x='b';
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET id=id WHERE x='a'; SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(NULL,'a'); INSERT INTO t VALUES(NULL,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(7,'a'); INSERT INTO t VALUES(NULL,'b'); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t VALUES(1,'a'); INSERT INTO t VALUES(2,'b'); UPDATE t SET x='c' WHERE id=1; SELECT * FROM t;

@@ -22,18 +22,20 @@ pub const Error = error{
     /// Iter29.B — INSERT/UPDATE wrote NULL into a NOT NULL column.
     /// sqlite3 returns SQLITE_CONSTRAINT (19) / NOTNULL (1299).
     ConstraintNotNull,
+    /// Iter31.AF — duplicate INTEGER PRIMARY KEY value via INSERT/UPDATE.
+    /// sqlite3 surfaces SQLITE_CONSTRAINT_PRIMARYKEY (1555) under
+    /// SQLITE_CONSTRAINT (19); we collapse to one variant.
+    UniqueConstraint,
     /// Iter31.E — LIMIT/OFFSET could not be coerced to i64 losslessly.
     /// sqlite3 returns SQLITE_MISMATCH (20) via `OP_MustBeInt`.
     DatatypeMismatch,
-    /// Pager (ADR-0005): could not acquire the exclusive flock on the
-    /// database file because another process already holds it.
+    /// Pager (ADR-0005): could not acquire the exclusive flock — another
+    /// process already holds it.
     DatabaseLocked,
     /// Pager (ADR-0005): file open / pread / close returned a negative
-    /// errno. The Pager surface intentionally collapses every file-I/O
-    /// failure into one variant — Phase 3a doesn't need finer granularity
-    /// for the differential test surface (single-process, single-file).
-    /// Phase 4 (Transaction + WAL) will split this when WAL recovery
-    /// branches on specific errors.
+    /// errno. Phase 3a doesn't need finer granularity for the differential
+    /// surface (single-process, single-file); Phase 4 (Transaction + WAL)
+    /// will split this when WAL recovery branches on specific errors.
     IoError,
 };
 

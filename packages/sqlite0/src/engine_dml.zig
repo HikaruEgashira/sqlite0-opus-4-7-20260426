@@ -192,8 +192,17 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
     var returning_rows: std.ArrayList([]Value) = .empty;
     errdefer returning_rows.deinit(arena);
 
+    // Iter31.AF — pre-locate the assignment slot (if any) that targets
+    // the IPK column. `null` => UPDATE doesn't touch IPK; no UNIQUE check.
+    const ipk_assignment_slot: ?usize = if (t.ipk_column) |ipk| blk: {
+        for (indices, 0..) |col_idx, i| {
+            if (col_idx == ipk) break :blk i;
+        }
+        break :blk null;
+    } else null;
+
     var changed: u64 = 0;
-    for (t.rows.items) |*row_ptr| {
+    for (t.rows.items, 0..) |*row_ptr, row_idx| {
         if (parsed.where) |w_ast| {
             const ctx = eval.EvalContext{
                 .allocator = arena,
@@ -231,6 +240,25 @@ pub fn executeUpdate(db: *Database, arena: std.mem.Allocator, parsed: stmt_dml.P
         for (indices, new_values) |col_idx, new_v| {
             if (t.not_null[col_idx] and new_v == .null) {
                 return Error.ConstraintNotNull;
+            }
+        }
+        // Iter31.AF — IPK UNIQUE check. Self-update (new == old) is fine;
+        // otherwise scan every other row for the new IPK value.
+        if (ipk_assignment_slot) |ai| {
+            const ipk = t.ipk_column.?;
+            const new_ipk_v = new_values[ai];
+            if (new_ipk_v == .integer) {
+                const new_ipk = new_ipk_v.integer;
+                const cur_ipk_v = row_ptr.*[ipk];
+                const same_as_self = cur_ipk_v == .integer and cur_ipk_v.integer == new_ipk;
+                if (!same_as_self) {
+                    for (t.rows.items, 0..) |other_row, j| {
+                        if (j == row_idx) continue;
+                        if (other_row[ipk] == .integer and other_row[ipk].integer == new_ipk) {
+                            return Error.UniqueConstraint;
+                        }
+                    }
+                }
             }
         }
         for (indices, new_values) |col_idx, new_v| {
@@ -357,6 +385,20 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
             last_rowid = max_rowid;
         }
         try enforceNotNull(t, new_row);
+        // Iter31.AF — IPK UNIQUE: auto values (NULL → max+1) can't conflict
+        // by construction; explicit ones get scanned against t.rows (which
+        // already includes any rows appended earlier in this batch). The
+        // outer new_row errdefer frees the row when we error out.
+        if (t.ipk_column) |ipk| {
+            if (new_row[ipk] == .integer) {
+                const new_ipk = new_row[ipk].integer;
+                for (t.rows.items) |existing| {
+                    if (existing[ipk] == .integer and existing[ipk].integer == new_ipk) {
+                        return Error.UniqueConstraint;
+                    }
+                }
+            }
+        }
         t.rows.appendAssumeCapacity(new_row);
         if (t.ipk_column == null) {
             t.rowids.appendAssumeCapacity(max_rowid);
