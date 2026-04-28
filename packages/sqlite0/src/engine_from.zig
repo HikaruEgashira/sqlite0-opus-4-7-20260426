@@ -284,7 +284,25 @@ pub fn leftmostProjectionCollations(
     ps: stmt_mod.ParsedSelect,
     expected: usize,
 ) ops.Error![]const ast.CollationKind {
-    var out: std.ArrayList(ast.CollationKind) = .empty;
+    const opt = try leftmostProjectionCollationsOpt(db, alloc, ps, expected);
+    const out = try alloc.alloc(ast.CollationKind, opt.len);
+    for (opt, out) |k, *o| o.* = k orelse .binary;
+    return out;
+}
+
+/// Iter31.U — same as `leftmostProjectionCollations` but preserves
+/// "no inherent collation" (literal / expression with no wrapper) as
+/// null instead of folding to `.binary`. Setop DEDUP precedence rule
+/// "leftmost branch with ANY collation source wins" needs this:
+/// a column-ref's column-default (even BINARY) locks the chain in,
+/// while a bare literal yields to subsequent branches' collations.
+pub fn leftmostProjectionCollationsOpt(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    ps: stmt_mod.ParsedSelect,
+    expected: usize,
+) ops.Error![]?ast.CollationKind {
+    var out: std.ArrayList(?ast.CollationKind) = .empty;
     var cart_opt: ?Cartesian = null;
     for (ps.items) |item| {
         switch (item) {
@@ -314,14 +332,16 @@ pub fn leftmostProjectionCollations(
                         continue;
                     }
                 }
-                try out.append(alloc, .binary);
+                try out.append(alloc, null);
             },
         }
     }
     // Width-mismatch guard: if items expansion ever falls out of sync with
     // executeSelectWithColumns (e.g. star against an empty FROM), pad/trim.
     if (out.items.len != expected) {
-        return padCollations(alloc, out.items, expected);
+        const padded = try alloc.alloc(?ast.CollationKind, expected);
+        for (padded, 0..) |*o, i| o.* = if (i < out.items.len) out.items[i] else null;
+        return padded;
     }
     return out.toOwnedSlice(alloc);
 }

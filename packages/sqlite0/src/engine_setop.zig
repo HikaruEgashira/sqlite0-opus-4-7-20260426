@@ -17,32 +17,38 @@ const collation = @import("collation.zig");
 const database = @import("database.zig");
 const eval = @import("eval.zig");
 const func_util = @import("func_util.zig");
+const engine_from = @import("engine_from.zig");
 
 const Value = value_mod.Value;
 const SetopKind = stmt_mod.SetopKind;
 const Error = ops.Error;
 const Database = database.Database;
 
-/// Per-column dedup collation tracker for a set-op chain (Iter31.Q).
-/// Implements sqlite3's "leftmost branch with ANY explicit COLLATE wins"
-/// precedence: explicit BINARY (some(.binary)) locks the column out of
-/// later-branch upgrades, while no wrapper (null) yields to the next
-/// branch's choice. `resolve` snapshots the current state into a
-/// `[]CollationKind` (defaulting null → .binary) for `combine`.
+/// Per-column dedup collation tracker for a set-op chain (Iter31.Q + .U).
+/// Implements sqlite3's "leftmost branch with ANY collation source wins"
+/// precedence:
+///   * Explicit COLLATE wrapper on the projection item (peekKind) — even
+///     COLLATE BINARY locks the column out of later-branch upgrades.
+///   * Otherwise, a column-ref's column-default collation (Iter31.U) —
+///     also locks the column in (so `SELECT x FROM t (TEXT) UNION
+///     SELECT 'a' COLLATE NOCASE` dedups BINARY, not NOCASE).
+///   * Otherwise null — yields to subsequent branches' contributions.
+/// `resolve` snapshots the current state into `[]CollationKind`
+/// (defaulting null → .binary) for `combine`.
 pub const SetopKinds = struct {
     opt: []?ast.CollationKind = &.{},
 
-    pub fn seed(self: *SetopKinds, alloc: std.mem.Allocator, items: []const select_mod.SelectItem, arity: usize) !void {
+    pub fn seed(self: *SetopKinds, db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect, arity: usize) !void {
         if (self.opt.len > 0) return;
-        self.opt = try extractItemKindsOpt(alloc, items, arity);
+        self.opt = try engine_from.leftmostProjectionCollationsOpt(db, alloc, ps, arity);
     }
 
-    pub fn merge(self: *SetopKinds, alloc: std.mem.Allocator, items: []const select_mod.SelectItem, arity: usize) !void {
+    pub fn merge(self: *SetopKinds, db: *Database, alloc: std.mem.Allocator, ps: stmt_mod.ParsedSelect, arity: usize) !void {
         if (self.opt.len == 0) {
-            self.opt = try extractItemKindsOpt(alloc, items, arity);
+            self.opt = try engine_from.leftmostProjectionCollationsOpt(db, alloc, ps, arity);
             return;
         }
-        const right = try extractItemKindsOpt(alloc, items, arity);
+        const right = try engine_from.leftmostProjectionCollationsOpt(db, alloc, ps, arity);
         for (self.opt, 0..) |k, i| {
             if (k == null and i < right.len) self.opt[i] = right[i];
         }
@@ -54,20 +60,6 @@ pub const SetopKinds = struct {
         return out;
     }
 };
-
-fn extractItemKindsOpt(
-    alloc: std.mem.Allocator,
-    items: []const select_mod.SelectItem,
-    row_arity: usize,
-) ![]?ast.CollationKind {
-    for (items) |item| if (item == .star) return &.{};
-    if (items.len != row_arity) return &.{};
-    const out = try alloc.alloc(?ast.CollationKind, items.len);
-    for (items, out) |item, *o| {
-        o.* = collation.peekKind(item.expr.expr);
-    }
-    return out;
-}
 
 pub fn combine(
     arena: std.mem.Allocator,

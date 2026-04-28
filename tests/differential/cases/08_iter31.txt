@@ -417,12 +417,26 @@ CREATE TABLE t(x TEXT COLLATE NOCASE, y INT); INSERT INTO t VALUES ('B',1),('a',
 #  * Explicit `ORDER BY x COLLATE BINARY` overrides the column-default
 #    (regression-lock).
 #  * RTRIM column propagates to chain ORDER BY.
-#  * Setop DEDUP (UNION / INTERSECT / EXCEPT) column-default propagation
-#    is a separate concern (Iter31.U candidate); not addressed here.
 CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT x FROM t UNION ALL SELECT 'C' ORDER BY x;
 CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'),('b'); SELECT x FROM t UNION ALL SELECT 'C' ORDER BY x COLLATE BINARY;
 CREATE TABLE t(x TEXT COLLATE RTRIM); INSERT INTO t VALUES ('a   '),('b'); SELECT x FROM t UNION ALL SELECT 'a' ORDER BY x;
-# INTERSECT/EXCEPT chains use the same applySetopPostProcess path; this
-# fixture locks in that the column-default propagates regardless of the
-# operator mix in the chain.
-CREATE TABLE t(x TEXT COLLATE NOCASE); INSERT INTO t VALUES ('B'),('a'),('A'); SELECT x FROM t INTERSECT SELECT 'a' UNION ALL SELECT 'B' ORDER BY x;
+
+# Setop DEDUP column-default propagation (Iter31.U):
+#  * sqlite3 propagates the leftmost branch's column-default collation
+#    into UNION/INTERSECT/EXCEPT dedup comparison, not just the explicit
+#    COLLATE wrapper (Iter31.Q). Precedence per branch: explicit wrapper
+#    > column-ref column-default (even BINARY) > null (literal yields).
+#    The chain folds "leftmost non-null wins".
+#  * UNION across NOCASE+plain: 'A' and 'a' merge (NOCASE-equal), one row
+#    survives (sqlite3 dedup keep-last replaces with the right side's
+#    representation).
+#  * Plain leftmost + NOCASE wrapper on right: column-ref's BINARY
+#    column-default locks dedup to BINARY despite RHS COLLATE NOCASE
+#    (regression-lock for the "column-ref overrides RHS wrapper" rule).
+#  * INTERSECT and EXCEPT exercise the same SetopKinds.merge path.
+#  * Star (`*`) expansion picks up cart-resolved column-default kinds.
+CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(y TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'),('b'); SELECT x FROM t1 UNION SELECT y FROM t2 ORDER BY x;
+CREATE TABLE t(x TEXT); INSERT INTO t VALUES('A'),('B'); SELECT x FROM t UNION SELECT 'a' COLLATE NOCASE ORDER BY x;
+CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(y TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'); SELECT x FROM t1 INTERSECT SELECT y FROM t2 ORDER BY x;
+CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(y TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'); SELECT x FROM t1 EXCEPT SELECT y FROM t2 ORDER BY x;
+CREATE TABLE t1(x TEXT COLLATE NOCASE); CREATE TABLE t2(x TEXT); INSERT INTO t1 VALUES('A'),('B'); INSERT INTO t2 VALUES('a'); SELECT * FROM t1 UNION SELECT * FROM t2 ORDER BY x;

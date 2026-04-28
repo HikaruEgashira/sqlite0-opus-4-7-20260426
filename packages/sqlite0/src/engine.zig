@@ -253,16 +253,16 @@ pub fn executeSelectWithOuter(
     // through (`SELECT DISTINCT x ... UNION ...`).
     var current = try executeOneSelect(db, alloc, ps, postProcessForBranch(ps), outer_frames);
     var left_arity = arityOf(ps, current);
-    // Per-column set-op dedup collation (Iter31.Q): see engine_setop.SetopKinds.
+    // Per-column set-op dedup collation (Iter31.Q + .U): see engine_setop.SetopKinds.
     var kinds: engine_setop.SetopKinds = .{};
-    if (left_arity) |a| try kinds.seed(alloc, ps.items, a);
+    if (left_arity) |a| try kinds.seed(db, alloc, ps, a);
     for (ps.branches) |branch| {
         const right = try executeOneSelect(db, alloc, branch.select, postProcessForBranch(branch.select), outer_frames);
         const right_arity = arityOf(branch.select, right);
         if (left_arity != null and right_arity != null and left_arity.? != right_arity.?) {
             return Error.ColumnCountMismatch;
         }
-        if (right_arity) |a| try kinds.merge(alloc, branch.select.items, a);
+        if (right_arity) |a| try kinds.merge(db, alloc, branch.select, a);
         const resolved = try kinds.resolve(alloc);
         current = try engine_setop.combine(alloc, branch.kind, current, right, resolved);
         if (left_arity == null) left_arity = right_arity;
