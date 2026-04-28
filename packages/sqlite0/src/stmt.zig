@@ -1,7 +1,6 @@
-//! Statement parsing. Each `parse*Statement` consumes one statement,
-//! returns a `Parsed*` struct, leaves the cursor on `.semicolon`/`.eof`.
-//! Execution lives in `engine.dispatchOne`. VALUES inside FROM is
-//! eagerly evaluated at parse time (no outer correlation in standard SQL).
+//! Statement parsing. `parse*Statement` consumes one statement, returns a
+//! `Parsed*` struct, leaves the cursor on `.semicolon`/`.eof`. Execution
+//! lives in `engine.dispatchOne`. VALUES inside FROM is eagerly evaluated.
 
 const std = @import("std");
 const value_mod = @import("value.zig");
@@ -56,14 +55,11 @@ pub const freeSetopBranches = stmt_setop.freeSetopBranches;
 
 pub const OrderDirection = enum { asc, desc };
 
+/// `position` non-null = 1-based SELECT-list column ref (sqlite3 quirk).
+/// `nulls_first` null = direction default (ASC→true, DESC→false). `collation`
+/// is the outermost COLLATE wrapper (Iter31.O); BINARY when none. `expr`
+/// retains the wrapper so eval-time callers see the same value either way.
 pub const OrderTerm = struct {
-    /// `position` non-null = 1-based SELECT-list column ref (sqlite3 quirk).
-    /// `nulls_first` null = use direction default (ASC→true, DESC→false);
-    /// non-null = explicit `NULLS FIRST` / `NULLS LAST` postfix.
-    /// `collation` is extracted from the expression's outermost
-    /// `Collate(...)` wrapper at parse time (Iter31.O); BINARY when the
-    /// expression has none. `expr` retains the wrapper so eval-time
-    /// callers (rare for ORDER BY) still see it.
     expr: *ast.Expr,
     position: ?usize = null,
     dir: OrderDirection,
@@ -71,9 +67,12 @@ pub const OrderTerm = struct {
     collation: ast.CollationKind = .binary,
 };
 
+/// `collation` is the outermost COLLATE wrapper (Iter31.P); used by
+/// `aggregate.groupKeysEqual` for per-column key compare.
 pub const GroupByTerm = struct {
     expr: *ast.Expr,
     position: ?usize = null,
+    collation: ast.CollationKind = .binary,
 };
 
 // FROM clause — types and parsing live in stmt_from.zig (split out to
@@ -232,18 +231,20 @@ pub fn freeParsedSelectFields(allocator: std.mem.Allocator, ps: ParsedSelect) vo
 
 /// Parse `GROUP BY e1 [, e2 ...]`. Bare positive integer literal is a
 /// 1-based SELECT-list column reference (sqlite3 quirk; `GROUP BY 1+0`
-/// keeps expression semantics — only literal INTEGER nodes resolve
-/// positionally, mirroring `parseOrderTerm`).
+/// keeps expression semantics). Mirrors parseOrderTerm: peel COLLATE
+/// wrapper(s) so the inner literal drives the position quirk and the
+/// outermost collation wins for group-key equality (Iter31.P).
 fn parseGroupByList(p: *Parser) ![]GroupByTerm {
     var list: std.ArrayList(GroupByTerm) = .empty;
     errdefer freeGroupByTerms(p.allocator, list.items);
     while (true) {
         const expr = try p.parseExpr();
-        const position: ?usize = if (expr.* == .literal) switch (expr.*.literal) {
+        const peeled = collation.peel(expr);
+        const position: ?usize = if (peeled.inner.* == .literal) switch (peeled.inner.literal) {
             .integer => |n| if (n > 0) @as(usize, @intCast(n)) else null,
             else => null,
         } else null;
-        try list.append(p.allocator, .{ .expr = expr, .position = position });
+        try list.append(p.allocator, .{ .expr = expr, .position = position, .collation = peeled.kind });
         if (p.cur.kind != .comma) break;
         p.advance();
     }

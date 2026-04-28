@@ -32,6 +32,7 @@ const walk = @import("aggregate_walk.zig");
 const state = @import("aggregate_state.zig");
 const database = @import("database.zig");
 const func_util = @import("func_util.zig");
+const collation = @import("collation.zig");
 const stmt_mod = @import("stmt.zig");
 
 const Value = value_mod.Value;
@@ -112,7 +113,7 @@ pub fn executeAggregated(
         }
 
         const key = try evaluateGroupKey(alloc, db, group_by, items, row, source_columns, source_qualifiers, outer_frames);
-        const group_idx = if (findGroup(groups.items, key)) |idx| blk: {
+        const group_idx = if (findGroup(groups.items, key, group_by)) |idx| blk: {
             // Existing group — discard the redundant key (arena reclaims).
             for (key) |v| ops.freeValue(alloc, v);
             alloc.free(key);
@@ -191,8 +192,12 @@ fn evaluateGroupKey(
 }
 
 fn resolveGroupByAlias(expr: *ast.Expr, items: []const select.SelectItem) ?*ast.Expr {
-    if (expr.* != .column_ref) return null;
-    const cref = expr.*.column_ref;
+    // sqlite3 unwraps COLLATE for alias lookup and re-applies it for compare;
+    // mirror by peeling here. The kind already lives on `GroupByTerm.collation`
+    // (extracted at parse time) so equality picks it up regardless.
+    const inner = collation.peel(expr).inner;
+    if (inner.* != .column_ref) return null;
+    const cref = inner.*.column_ref;
     if (cref.qualifier != null) return null;
     for (items) |item| switch (item) {
         .star => {},
@@ -203,22 +208,25 @@ fn resolveGroupByAlias(expr: *ast.Expr, items: []const select.SelectItem) ?*ast.
     return null;
 }
 
-fn findGroup(groups: []const Group, key: []const Value) ?usize {
+fn findGroup(groups: []const Group, key: []const Value, group_by: []const stmt_mod.GroupByTerm) ?usize {
     for (groups, 0..) |g, i| {
-        if (groupKeysEqual(g.key, key)) return i;
+        if (groupKeysEqual(g.key, key, group_by)) return i;
     }
     return null;
 }
 
 /// sqlite3 GROUP BY collation: NULL == NULL within group key (one of the few
 /// places NULL is treated as equal). Numeric values cross-compare via the
-/// REAL coercion already in `compareValues`.
-fn groupKeysEqual(a: []const Value, b: []const Value) bool {
+/// REAL coercion already in `compareValues`. TEXT pairs honor the per-term
+/// COLLATE wrapper (Iter31.P) so `GROUP BY x COLLATE NOCASE` folds 'A'/'a'
+/// into one group.
+fn groupKeysEqual(a: []const Value, b: []const Value, group_by: []const stmt_mod.GroupByTerm) bool {
     if (a.len != b.len) return false;
-    for (a, b) |va, vb| {
+    for (a, b, 0..) |va, vb, i| {
         if (va == .null and vb == .null) continue;
         if (va == .null or vb == .null) return false;
-        if (ops.compareValues(va, vb) != .eq) return false;
+        const kind = if (i < group_by.len) group_by[i].collation else .binary;
+        if (collation.compareValuesCollated(va, vb, kind) != .eq) return false;
     }
     return true;
 }
