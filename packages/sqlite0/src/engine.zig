@@ -53,8 +53,20 @@ pub fn dispatchOne(db: *Database, p: *parser_mod.Parser) !StatementResult {
     defer p.db = saved_db;
 
     switch (p.cur.kind) {
-        .keyword_select => {
+        .keyword_select, .keyword_with => {
             const parsed = try stmt_mod.parseSelectStatement(p);
+            // Iter31.Z — materialise any `WITH name AS (...)` CTEs into
+            // `db.transient_ctes` before the main SELECT runs. Earlier
+            // CTEs are visible to later CTEs because we extend the
+            // slice incrementally. Cleared on exit (defer) so the next
+            // statement starts with a fresh empty slice — the arena
+            // tearing down right after this returns also reclaims the
+            // backing rows / columns / TransientCte slots.
+            const saved_ctes = db.transient_ctes;
+            defer db.transient_ctes = saved_ctes;
+            if (parsed.with_ctes.len > 0) {
+                try materializeCtes(db, p.allocator, parsed.with_ctes);
+            }
             const arena_rows = try executeSelect(db, p.allocator, parsed);
             const long_rows = try dupeRowsToLongLived(db.allocator, arena_rows);
             return .{ .select = long_rows };
@@ -466,6 +478,35 @@ pub fn lookupTable(db: *Database, scratch: std.mem.Allocator, name: []const u8) 
     const lower = try database.lowerCaseDupe(scratch, name);
     defer scratch.free(lower);
     return db.tables.getPtr(lower) orelse Error.NoSuchTable;
+}
+
+/// Iter31.Z — execute each CTE body left-to-right and stash the result
+/// on `db.transient_ctes`. A later CTE that references an earlier one
+/// resolves through `engine_from.resolveSource` because we extend the
+/// visible slice after each materialisation. All allocations live in
+/// the per-statement arena (`alloc`); the caller's defer restores
+/// `db.transient_ctes` to its prior value, after which the arena
+/// teardown reclaims the rows.
+fn materializeCtes(
+    db: *Database,
+    alloc: std.mem.Allocator,
+    ctes: []const stmt_mod.ParsedCte,
+) Error!void {
+    const slots = try alloc.alloc(database.TransientCte, ctes.len);
+    var i: usize = 0;
+    while (i < ctes.len) : (i += 1) {
+        const result = try executeSelectWithColumns(db, alloc, ctes[i].select);
+        const rows_const = try alloc.alloc([]const Value, result.rows.len);
+        for (result.rows, rows_const) |row, *slot| slot.* = row;
+        slots[i] = .{
+            .name = ctes[i].name,
+            .columns = result.columns,
+            .rows = rows_const,
+        };
+        // Publish through `db.transient_ctes` so the next CTE in the
+        // list can resolve a `.table_ref` against earlier names.
+        db.transient_ctes = slots[0 .. i + 1];
+    }
 }
 
 /// Deep-copy `rows` from arena-backed memory into `long`. Each TEXT/BLOB

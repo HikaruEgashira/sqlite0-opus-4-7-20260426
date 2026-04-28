@@ -7,10 +7,10 @@ const value_mod = @import("value.zig");
 const ops = @import("ops.zig");
 const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
-const eval = @import("eval.zig");
 const select = @import("select.zig");
 const func_util = @import("func_util.zig");
 const collation = @import("collation.zig");
+const stmt_cte = @import("stmt_cte.zig");
 
 const Value = value_mod.Value;
 const Error = ops.Error;
@@ -44,6 +44,12 @@ pub const ParsedSelect = struct {
     order_by: []OrderTerm = &.{},
     limit: ?*ast.Expr = null,
     offset: ?*ast.Expr = null,
+    /// Iter31.Z — `WITH name AS (SELECT ...) [, ...]` prefix. Empty when
+    /// the SELECT had no WITH clause. Only set on the top-level
+    /// `parseSelectStatement` result; setop branches and CTE bodies go
+    /// through `parseSelectInner` directly so they can never carry CTEs
+    /// (sqlite3 rejects nested WITH at most positions; we reject in all).
+    with_ctes: []ParsedCte = &.{},
 };
 
 // Set-op types live in stmt_setop.zig; re-exported to keep call sites
@@ -52,6 +58,10 @@ const stmt_setop = @import("stmt_setop.zig");
 pub const SetopKind = stmt_setop.SetopKind;
 pub const SetopBranch = stmt_setop.SetopBranch;
 pub const freeSetopBranches = stmt_setop.freeSetopBranches;
+
+// CTE types live in stmt_cte.zig; re-exported for parity.
+pub const ParsedCte = stmt_cte.ParsedCte;
+pub const freeCtes = stmt_cte.freeCtes;
 
 pub const OrderDirection = enum { asc, desc };
 
@@ -86,15 +96,23 @@ pub const freeParsedFrom = stmt_from.freeParsedFrom;
 pub const freeFromList = stmt_from.freeFromList;
 
 pub fn parseSelectStatement(p: *Parser) Error!ParsedSelect {
-    return parseSelectInner(p, true);
+    var with_ctes: []ParsedCte = &.{};
+    errdefer freeCtes(p.allocator, with_ctes);
+    if (p.cur.kind == .keyword_with) {
+        with_ctes = try stmt_cte.parseWithClause(p);
+    }
+    var ps = try parseSelectInner(p, true);
+    ps.with_ctes = with_ctes;
+    return ps;
 }
 
 /// Iter20 set-op support: `allow_post = true` is the outer call (parses
 /// branches and the chain-level ORDER BY / LIMIT / OFFSET). `false` is used
 /// recursively for each setop branch — those branches must NOT consume
 /// post-clauses, since sqlite3 errors on `... ORDER BY ... UNION ...` and on
-/// `... LIMIT ... UNION ...`.
-fn parseSelectInner(p: *Parser, allow_post: bool) Error!ParsedSelect {
+/// `... LIMIT ... UNION ...`. Public so `stmt_cte.parseWithClause` can use
+/// it for CTE bodies (which must NOT recurse into WITH).
+pub fn parseSelectInner(p: *Parser, allow_post: bool) Error!ParsedSelect {
     try p.expect(.keyword_select);
 
     var distinct = false;
@@ -227,6 +245,7 @@ pub fn freeParsedSelectFields(allocator: std.mem.Allocator, ps: ParsedSelect) vo
     freeOrderTerms(allocator, ps.order_by);
     if (ps.limit) |e| e.deinit(allocator);
     if (ps.offset) |e| e.deinit(allocator);
+    if (ps.with_ctes.len > 0) freeCtes(allocator, ps.with_ctes);
 }
 
 /// Parse `GROUP BY e1 [, e2 ...]`. Bare positive integer literal is a
@@ -312,105 +331,15 @@ pub fn freeOrderTerms(allocator: std.mem.Allocator, terms: []OrderTerm) void {
 }
 
 // ── VALUES ──────────────────────────────────────────────────────────────────
+// Implementation lives in stmt_values.zig (split out of stmt.zig to keep
+// it under 500 lines per CLAUDE.md before adding CTE support). Both
+// `parseValuesStatement` (used by engine.dispatchOne for top-level
+// VALUES) and `parseValuesBody` (used here by parseInsertStatement, and
+// by stmt_from for `FROM (VALUES ...)`) are re-exported.
 
-/// `VALUES (e1, ...) [, (...)]` at the statement top level. Like
-/// `parseSelectStatement`, leaves the cursor on `.semicolon` or `.eof`.
-pub fn parseValuesStatement(p: *Parser) ![][]Value {
-    try p.expect(.keyword_values);
-    return parseValuesBody(p);
-}
-
-/// VALUES tuple list (after the `VALUES` keyword has been consumed). Used
-/// both at the top level and inside a FROM subquery / INSERT body. Eagerly
-/// evaluates each tuple with empty row context — VALUES cannot correlate
-/// with outer columns in standard SQL, so this is correct.
-pub fn parseValuesBody(p: *Parser) ![][]Value {
-    var rows: std.ArrayList([]Value) = .empty;
-    errdefer {
-        for (rows.items) |row| {
-            for (row) |v| ops.freeValue(p.allocator, v);
-            p.allocator.free(row);
-        }
-        rows.deinit(p.allocator);
-    }
-
-    const first = try parseValuesTuple(p);
-    try rows.append(p.allocator, first);
-    const arity = first.len;
-
-    while (p.cur.kind == .comma) {
-        p.advance();
-        const tuple = try parseValuesTuple(p);
-        if (tuple.len != arity) {
-            for (tuple) |v| ops.freeValue(p.allocator, v);
-            p.allocator.free(tuple);
-            return Error.SyntaxError;
-        }
-        try rows.append(p.allocator, tuple);
-    }
-
-    return rows.toOwnedSlice(p.allocator);
-}
-
-fn parseValuesTuple(p: *Parser) ![]Value {
-    try p.expect(.lparen);
-    const asts = try parseExpressionAsts(p);
-    defer freeAsts(p.allocator, asts);
-    try p.expect(.rparen);
-    return evaluateRow(p.allocator, asts, &.{}, &.{}, p.db);
-}
-
-/// Parse a comma-separated expression list as ASTs (no evaluation).
-fn parseExpressionAsts(p: *Parser) ![]*ast.Expr {
-    var asts: std.ArrayList(*ast.Expr) = .empty;
-    errdefer {
-        for (asts.items) |e| e.deinit(p.allocator);
-        asts.deinit(p.allocator);
-    }
-    try asts.ensureUnusedCapacity(p.allocator, 1);
-    asts.appendAssumeCapacity(try p.parseExpr());
-    while (p.cur.kind == .comma) {
-        p.advance();
-        try asts.ensureUnusedCapacity(p.allocator, 1);
-        asts.appendAssumeCapacity(try p.parseExpr());
-    }
-    return asts.toOwnedSlice(p.allocator);
-}
-
-/// Evaluate `asts` with the given `current_row` and `columns` to produce a
-/// single result row. `db` is forwarded to the EvalContext so subqueries
-/// inside the expressions (`VALUES ((SELECT ...))`, sqlite3 quirk) can
-/// resolve. On failure all already-evaluated Values are freed.
-fn evaluateRow(
-    allocator: std.mem.Allocator,
-    asts: []const *ast.Expr,
-    current_row: []const Value,
-    columns: []const []const u8,
-    db: ?*@import("database.zig").Database,
-) Error![]Value {
-    const row = try allocator.alloc(Value, asts.len);
-    var produced: usize = 0;
-    errdefer {
-        for (row[0..produced]) |v| ops.freeValue(allocator, v);
-        allocator.free(row);
-    }
-    const ctx = eval.EvalContext{
-        .allocator = allocator,
-        .current_row = current_row,
-        .columns = columns,
-        .db = db,
-    };
-    for (asts) |expr| {
-        row[produced] = try eval.evalExpr(ctx, expr);
-        produced += 1;
-    }
-    return row;
-}
-
-fn freeAsts(allocator: std.mem.Allocator, asts: []const *ast.Expr) void {
-    for (asts) |e| e.deinit(allocator);
-    allocator.free(asts);
-}
+const stmt_values = @import("stmt_values.zig");
+pub const parseValuesStatement = stmt_values.parseValuesStatement;
+pub const parseValuesBody = stmt_values.parseValuesBody;
 
 // ── CREATE TABLE ────────────────────────────────────────────────────────────
 // Implementation lives in stmt_ddl.zig; re-exported here so existing call

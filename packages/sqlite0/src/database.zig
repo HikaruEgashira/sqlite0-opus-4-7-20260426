@@ -135,6 +135,18 @@ pub const ExecResult = struct {
 /// `database_journal_mode_test.zig` API) can spell it `database.JournalMode`.
 pub const JournalMode = @import("journal.zig").JournalMode;
 
+/// Iter31.Z — one materialised non-recursive CTE binding. `name` is a
+/// borrowed slice into the parser source; `columns` and `rows` live in
+/// the per-statement arena (allocated by `engine.dispatchOne`'s arena
+/// before `executeSelect`). The slice on `Database.transient_ctes` is
+/// reset to empty as the arena tears down — entries never outlive the
+/// statement that created them.
+pub const TransientCte = struct {
+    name: []const u8,
+    columns: []const []const u8,
+    rows: []const []const Value,
+};
+
 /// Iter27.F — one entry on the savepoint stack. `name` is owned by
 /// `db.allocator` (duped from the parser's source slice). `mark` owns
 /// per-page snapshots of `pager.staged_frames` at savepoint time, so
@@ -194,6 +206,15 @@ pub const Database = struct {
     /// Iter29.S — cumulative rowcount across all completed DML on this
     /// connection (sqlite3 `total_changes()`). Monotonically increasing.
     total_changes: i64 = 0,
+    /// Iter31.Z — non-recursive CTE bindings live for one statement.
+    /// `engine.dispatchOne` populates this slice (in the per-statement
+    /// arena) before running the main SELECT and clears it on exit so
+    /// the next statement starts fresh. `engine_from.resolveSource`
+    /// `.table_ref` checks this slice ahead of `tables` so a CTE name
+    /// shadows a real table for the duration of the statement
+    /// (sqlite3 quirk: `WITH t AS (...) SELECT * FROM t` reads the
+    /// CTE even when a real `t` exists).
+    transient_ctes: []const TransientCte = &.{},
     /// Iter27.F — savepoint stack (LIFO). Entries are pushed by
     /// SAVEPOINT, popped by RELEASE / COMMIT / ROLLBACK / by ROLLBACK
     /// TO (which keeps the named entry but pops everything above it).

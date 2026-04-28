@@ -23,6 +23,7 @@ const eval = @import("eval.zig");
 const cursor_mod = @import("cursor.zig");
 const btree_cursor_mod = @import("btree_cursor.zig");
 const collation_mod = @import("collation.zig");
+const func_util = @import("func_util.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -200,6 +201,21 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             .qualifier = iv.alias orelse "",
         },
         .table_ref => |tr| tblblk: {
+            // Iter31.Z — non-recursive CTE shadowing. A CTE name in
+            // `db.transient_ctes` wins over a real table with the same
+            // name (sqlite3 quirk verified by probe). Linear scan; N is
+            // bounded by the number of CTEs in the surrounding WITH
+            // (typically 1–3, never large).
+            for (db.transient_ctes) |cte| {
+                if (!func_util.eqlIgnoreCase(cte.name, tr.name)) continue;
+                const out = try alloc.alloc([]const Value, cte.rows.len);
+                for (cte.rows, out) |row, *slot| slot.* = row;
+                break :tblblk .{
+                    .rows = out,
+                    .columns = cte.columns,
+                    .qualifier = tr.alias orelse tr.name,
+                };
+            }
             // Phase 3a (Iter24.A): the row source goes through `Cursor`
             // rather than reading `t.rows.items` directly. Phase 3b
             // (Iter25.B.4/5) added the BtreeCursor backend — `t.root_page

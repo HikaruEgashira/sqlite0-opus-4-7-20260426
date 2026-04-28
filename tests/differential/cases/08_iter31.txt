@@ -508,3 +508,25 @@ PRAGMA user_version = 2147483647; PRAGMA user_version;
 PRAGMA user_version = 2147483648; PRAGMA user_version;
 PRAGMA user_version(7); PRAGMA user_version;
 PRAGMA totally_unknown = 99;
+
+# Non-recursive CTE: `WITH name AS (...) SELECT ...` (Iter31.Z):
+#  * sqlite3 supports `WITH t AS (SELECT ...) SELECT * FROM t` and chained
+#    `WITH a AS (...), b AS (...) SELECT ...` where later items see earlier
+#    ones. sqlite0 materialises each CTE left-to-right into a transient
+#    map on `Database` consulted by `engine_from.resolveSource` ahead of
+#    `db.tables`, so a CTE name shadows a real table for the duration of
+#    the statement.
+#  * Skipped (deferred to a later iteration): `RECURSIVE`, `t(a, b)`
+#    column rename, nested `WITH` inside a CTE body or subquery,
+#    WITH-prefixed INSERT/UPDATE/DELETE, `WITH t AS (VALUES ...)`.
+#  * Regression-lock: when no CTE matches, the table-ref still resolves
+#    against `db.tables`; an unknown name still surfaces NoSuchTable.
+WITH t AS (SELECT 1 AS x) SELECT * FROM t;
+WITH cte AS (SELECT 'hello' AS msg) SELECT msg, msg||'!' FROM cte;
+WITH a AS (SELECT 1 AS x), b AS (SELECT x+1 AS y FROM a) SELECT y FROM b;
+WITH t AS (SELECT 1 UNION SELECT 2 UNION SELECT 3) SELECT count(*) FROM t;
+WITH cte AS (SELECT 1 AS x) SELECT * FROM cte WHERE x > 0 ORDER BY x;
+WITH cte AS (SELECT 1 AS x) SELECT cte.x, c2.x FROM cte JOIN cte AS c2 ON cte.x = c2.x;
+CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH big AS (SELECT v*10 AS w FROM u) SELECT sum(w) FROM big;
+CREATE TABLE t(x INT); INSERT INTO t VALUES(10); WITH t AS (SELECT 99 AS x) SELECT x FROM t;
+CREATE TABLE u(v INT); WITH cte AS (SELECT 1) SELECT * FROM u;
