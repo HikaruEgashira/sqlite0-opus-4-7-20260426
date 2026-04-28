@@ -30,7 +30,11 @@ pub fn call(allocator: std.mem.Allocator, db: ?*Database, name: []const u8, args
     if (util.eqlIgnoreCase(name, "upper")) return fnUpper(allocator, args);
     if (util.eqlIgnoreCase(name, "substr") or util.eqlIgnoreCase(name, "substring")) return substr_mod.fnSubstr(allocator, args);
     if (util.eqlIgnoreCase(name, "abs")) return fnAbs(allocator, args);
-    if (util.eqlIgnoreCase(name, "coalesce") or util.eqlIgnoreCase(name, "ifnull")) return fnCoalesce(allocator, args);
+    // sqlite3 splits these: `coalesce` is variadic with min 2 args;
+    // `ifnull` is fixed at exactly 2 args (3+ raises "wrong number of
+    // arguments to function ifnull()" at prepare time).
+    if (util.eqlIgnoreCase(name, "coalesce")) return fnCoalesce(allocator, args);
+    if (util.eqlIgnoreCase(name, "ifnull")) return fnIfnull(allocator, args);
     if (util.eqlIgnoreCase(name, "nullif")) return fnNullif(allocator, args);
     if (util.eqlIgnoreCase(name, "typeof")) return fnTypeof(allocator, args);
     if (util.eqlIgnoreCase(name, "round")) return fnRound(allocator, args);
@@ -298,6 +302,11 @@ fn fnCoalesce(allocator: std.mem.Allocator, args: []const Value) Error!Value {
         if (a != .null) return try util.dupeValue(allocator, a);
     }
     return Value.null;
+}
+
+fn fnIfnull(allocator: std.mem.Allocator, args: []const Value) Error!Value {
+    if (args.len != 2) return Error.WrongArgumentCount;
+    return fnCoalesce(allocator, args);
 }
 
 fn fnNullif(allocator: std.mem.Allocator, args: []const Value) Error!Value {
