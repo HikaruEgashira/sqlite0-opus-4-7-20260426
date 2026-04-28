@@ -74,5 +74,6 @@ pub fn keywordKind(text: []const u8) ?TokenKind {
     if (eq(text, "with")) return .keyword_with;
     if (eq(text, "returning")) return .keyword_returning;
     if (eq(text, "default")) return .keyword_default;
+    if (eq(text, "check")) return .keyword_check;
     return null;
 }

@@ -200,3 +200,26 @@ CREATE TABLE t(id INTEGER PRIMARY KEY, x); INSERT INTO t DEFAULT VALUES; SELECT 
 CREATE TABLE t(x INT NOT NULL); INSERT INTO t DEFAULT VALUES;
 CREATE TABLE t(x); INSERT INTO t DEFAULT VALUES; INSERT INTO t DEFAULT VALUES; SELECT count(*) FROM t;
 CREATE TABLE t(x);
+
+# Column-level CHECK enforced on INSERT (Iter31.AJ):
+#  * Column-constraint `CHECK (<expr>)` recorded as a source slice at
+#    parse time then re-parsed inside `registerTable` against
+#    `db.allocator` so the AST outlives the per-statement arena.
+#  * INSERT path eval: NULL or truthy result passes (sqlite3 spec —
+#    "the constraint is violated if the expression is FALSE"); zero /
+#    text coercing to false rejects with `Error.ConstraintCheck`.
+#  * Order: NOT NULL -> CHECK -> IPK UNIQUE. INSERT OR IGNORE swallows;
+#    OR ABORT/FAIL/ROLLBACK error. UPDATE / file-mode / table-level
+#    CHECK / REPLACE-on-CHECK are deferred to subsequent iterations.
+#  * Column refs resolve case-insensitively (eval_column reuses
+#    eqlIgnoreCase) and may reference any column in the row, matching
+#    sqlite3's relaxed column-vs-table CHECK distinction.
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); SELECT * FROM t;
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(-1);
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(NULL); SELECT * FROM t;
+CREATE TABLE t(X CHECK(X > 0)); INSERT INTO t VALUES(7); SELECT * FROM t;
+CREATE TABLE t(a CHECK(a > 0), b CHECK(b < 100)); INSERT INTO t VALUES(5, 50); SELECT * FROM t;
+CREATE TABLE t(a CHECK(a > 0), b CHECK(b < 100)); INSERT INTO t VALUES(5, 999);
+CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); INSERT OR IGNORE INTO t VALUES(-1); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x CHECK(x > 0)); INSERT INTO t VALUES(1, 10); SELECT * FROM t;
+CREATE TABLE t(id INTEGER PRIMARY KEY, x CHECK(x > 0)); INSERT INTO t VALUES(1, 0);

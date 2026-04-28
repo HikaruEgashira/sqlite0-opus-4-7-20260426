@@ -124,10 +124,20 @@ fn registerSyntheticSchemaTable(db: *database.Database, name: []const u8) Error!
     const collations = try db.allocator.alloc(@import("ast.zig").CollationKind, col_names.len);
     errdefer db.allocator.free(collations);
     @memset(collations, .binary);
+    // Iter31.AJ — synthetic schema tables carry no CHECK constraints;
+    // allocate empty slots in the same shape Table.deinit expects.
+    const check_exprs = try db.allocator.alloc(?*@import("ast.zig").Expr, col_names.len);
+    errdefer db.allocator.free(check_exprs);
+    @memset(check_exprs, null);
+    const check_srcs = try db.allocator.alloc(?[]u8, col_names.len);
+    errdefer db.allocator.free(check_srcs);
+    @memset(check_srcs, null);
     try db.tables.put(db.allocator, lower, .{
         .columns = cols,
         .not_null = not_null,
         .collations = collations,
+        .check_exprs = check_exprs,
+        .check_srcs = check_srcs,
         .root_page = 1,
         .is_system = true,
     });

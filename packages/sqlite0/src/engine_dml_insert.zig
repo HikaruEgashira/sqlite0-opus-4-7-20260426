@@ -14,6 +14,7 @@ const func_util = @import("func_util.zig");
 const engine_dml = @import("engine_dml.zig");
 const engine_dml_insert_file = @import("engine_dml_insert_file.zig");
 const engine_returning = @import("engine_returning.zig");
+const eval = @import("eval.zig");
 
 const Value = value_mod.Value;
 const Database = database.Database;
@@ -70,6 +71,10 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
     if (t.root_page != 0) {
         if (parsed.returning != null) return Error.UnsupportedFeature; // Iter31.AE deferred (a)
         if (parsed.conflict_action != .abort) return Error.UnsupportedFeature; // Iter31.AG deferred (file)
+        // Iter31.AJ — file-mode CHECK enforcement is deferred to a later
+        // iteration. Reject ahead of any pwrite so the Pager never sees a
+        // row that would have failed the constraint.
+        for (t.check_exprs) |opt| if (opt != null) return Error.UnsupportedFeature;
         const rc = try engine_dml_insert_file.executeInsertFile(db, t, target_indices, source_rows);
         return .{ .rowcount = rc };
     }
@@ -135,6 +140,19 @@ pub fn executeInsert(db: *Database, arena: std.mem.Allocator, parsed: stmt_mod.P
         // `OR REPLACE` only swallows UNIQUE; NOT NULL still errors here
         // since we have no column DEFAULTs to substitute.
         enforceNotNull(t, new_row) catch |err| {
+            if (parsed.conflict_action == .ignore) {
+                for (new_row) |v| ops.freeValue(db.allocator, v);
+                db.allocator.free(new_row);
+                continue;
+            }
+            return err;
+        };
+        // Iter31.AJ — column-level CHECK after NOT NULL so the eval sees
+        // the post-IPK-auto row. IGNORE swallows; ABORT/FAIL/ROLLBACK
+        // surface ConstraintCheck. REPLACE-on-CHECK is deferred — sqlite3
+        // does drop the offending row, but our matching of "which row is
+        // offending" is rowid-only today.
+        evaluateColumnChecks(db, arena, t, new_row) catch |err| {
             if (parsed.conflict_action == .ignore) {
                 for (new_row) |v| ops.freeValue(db.allocator, v);
                 db.allocator.free(new_row);
@@ -254,5 +272,32 @@ fn findTableColumn(t: *const Table, name: []const u8) ?usize {
 pub fn enforceNotNull(t: *const Table, row: []const Value) Error!void {
     for (t.not_null, row) |required, v| {
         if (required and v == .null) return Error.ConstraintNotNull;
+    }
+}
+
+/// Iter31.AJ — evaluate every column-level CHECK against the post-IPK
+/// row. sqlite3 CHECK semantics: NULL or truthy → pass; integer/real 0
+/// or text coercing to false → reject. The eval allocator is the same
+/// per-statement arena that owns intermediate Values; the result is
+/// inspected then dropped, no long-lived allocations escape.
+fn evaluateColumnChecks(
+    db: *Database,
+    arena: std.mem.Allocator,
+    t: *const Table,
+    row: []const Value,
+) Error!void {
+    for (t.check_exprs) |opt| {
+        const expr = opt orelse continue;
+        const ctx: eval.EvalContext = .{
+            .allocator = arena,
+            .current_row = row,
+            .columns = t.columns,
+            .column_collations = t.collations,
+            .db = db,
+        };
+        const result = try eval.evalExpr(ctx, expr);
+        defer ops.freeValue(arena, result);
+        const truthy = ops.truthy(result) orelse continue; // NULL → pass
+        if (!truthy) return Error.ConstraintCheck;
     }
 }

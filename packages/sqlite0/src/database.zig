@@ -89,6 +89,20 @@ pub const Table = struct {
     /// bare reference to this column AND no explicit `expr COLLATE`
     /// wrapper is present. Explicit COLLATE always overrides.
     collations: []ast.CollationKind,
+    /// Iter31.AJ — parallel to `columns`. Non-null entry holds the
+    /// column-level CHECK constraint AST. Both the AST and the SQL
+    /// source slice it borrows from (via `column_ref.name` /
+    /// `func_call.name`) are owned by `Database.allocator`; the source
+    /// lives in `check_srcs` and outlives the AST in deinit order.
+    /// INSERT path enforces; UPDATE/file-mode is Iter31.AK+. The
+    /// constraint passes when the expression evaluates to NULL or
+    /// truthy; an integer/real 0 or text coercing to false rejects.
+    check_exprs: []?*ast.Expr,
+    /// Iter31.AJ — parallel to `columns`. Duped CHECK source bytes
+    /// referenced by `check_exprs[i]`'s identifier slices. Allocated
+    /// by `registerTable`; freed by `deinit` AFTER the matching
+    /// `check_exprs[i]` so the AST never reads freed bytes.
+    check_srcs: []?[]u8,
     rows: std.ArrayListUnmanaged([]Value) = .empty,
     /// Non-zero when this table lives in a Pager-backed sqlite3 .db
     /// file. 0 means in-memory (CREATE TABLE on a memory Database).
@@ -129,6 +143,13 @@ pub const Table = struct {
         allocator.free(self.columns);
         allocator.free(self.not_null);
         allocator.free(self.collations);
+        // Iter31.AJ — drop ASTs first so column_ref.name slices into
+        // check_srcs are still valid bytes when consulted (Expr.deinit
+        // doesn't read them, but tools / future asserts might).
+        for (self.check_exprs) |opt| if (opt) |e| e.deinit(allocator);
+        allocator.free(self.check_exprs);
+        for (self.check_srcs) |opt| if (opt) |s| allocator.free(s);
+        allocator.free(self.check_srcs);
     }
 };
 
@@ -310,6 +331,20 @@ pub const Database = struct {
         errdefer self.allocator.free(not_null);
         const collations = try self.allocator.alloc(ast.CollationKind, parsed.columns.len);
         errdefer self.allocator.free(collations);
+        // Iter31.AJ — pre-zero so partial-fill cleanup (and the final
+        // Table.deinit on hashmap-put failure) skips unfilled slots.
+        const check_exprs = try self.allocator.alloc(?*ast.Expr, parsed.columns.len);
+        @memset(check_exprs, null);
+        errdefer {
+            for (check_exprs) |opt| if (opt) |e| e.deinit(self.allocator);
+            self.allocator.free(check_exprs);
+        }
+        const check_srcs = try self.allocator.alloc(?[]u8, parsed.columns.len);
+        @memset(check_srcs, null);
+        errdefer {
+            for (check_srcs) |opt| if (opt) |s| self.allocator.free(s);
+            self.allocator.free(check_srcs);
+        }
         var ipk: ?usize = null;
         while (produced < parsed.columns.len) : (produced += 1) {
             const src = parsed.columns[produced];
@@ -331,6 +366,26 @@ pub const Database = struct {
                 }
                 ipk = produced;
             }
+            // Iter31.AJ — re-parse the CHECK source against `self.allocator`
+            // so the AST and its borrowed identifier slices both live as
+            // long as the Table. Run BEFORE the cols/not_null/collations
+            // assignments so a parse failure leaks nothing — the cols
+            // errdefer iterates `[0..produced]` which excludes this slot
+            // until the loop tail bumps `produced`. Explicit lowered-free
+            // mirrors the duplicate / multi-IPK early-exit branches above.
+            if (src.check_text) |txt| {
+                const duped = self.allocator.dupe(u8, txt) catch |err| {
+                    self.allocator.free(lowered);
+                    return err;
+                };
+                check_srcs[produced] = duped;
+                var pp = parser_mod.Parser.init(self.allocator, duped);
+                const expr = pp.parseExpr() catch |err| {
+                    self.allocator.free(lowered);
+                    return err;
+                };
+                check_exprs[produced] = expr;
+            }
             cols[produced] = lowered;
             not_null[produced] = src.is_not_null;
             collations[produced] = src.collation;
@@ -340,6 +395,8 @@ pub const Database = struct {
             .columns = cols,
             .not_null = not_null,
             .collations = collations,
+            .check_exprs = check_exprs,
+            .check_srcs = check_srcs,
             .ipk_column = ipk,
         });
     }

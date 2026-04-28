@@ -257,3 +257,33 @@ test "Database.execute: alias preserved across FROM and WHERE" {
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expectEqual(@as(i64, 10), rows[0][0].integer);
 }
+
+// Iter31.AJ regression — `registerTable` runs the CHECK re-parse before
+// transferring `lowered` ownership to `cols[produced]`, so a parse
+// failure must not leak the just-allocated lowered name. The testing
+// allocator panics on any leak.
+test "Database.execute: CHECK with bad expr fails cleanly without leaking" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(Error.SyntaxError, db.execute("CREATE TABLE t(x CHECK(@@@))"));
+}
+
+test "Database.execute: CHECK truthy on INSERT round-trips the row" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    var er = try db.execute("CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(5); SELECT * FROM t");
+    defer er.deinit();
+    try std.testing.expectEqual(@as(i64, 5), er.statements[2].select[0][0].integer);
+}
+
+test "Database.execute: CHECK falsy rejects with ConstraintCheck" {
+    const allocator = std.testing.allocator;
+    var db = Database.init(allocator);
+    defer db.deinit();
+    try std.testing.expectError(
+        Error.ConstraintCheck,
+        db.execute("CREATE TABLE t(x CHECK(x > 0)); INSERT INTO t VALUES(-1)"),
+    );
+}

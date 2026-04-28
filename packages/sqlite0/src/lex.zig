@@ -70,6 +70,7 @@ pub const TokenKind = enum {
     keyword_with,
     keyword_returning,
     keyword_default,
+    keyword_check,
     plus,
     minus,
     star,
