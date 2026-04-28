@@ -565,3 +565,16 @@ CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH big AS (SELECT v*10
 CREATE TABLE u(v INT); INSERT INTO u VALUES(1),(2),(3); WITH t(x) AS (VALUES (10),(20)) UPDATE u SET v=v*100 WHERE v IN (SELECT x/10 FROM t); SELECT * FROM u ORDER BY v;
 CREATE TABLE u(v INT); WITH src(x) AS (VALUES(1),(2),(3)) INSERT INTO u SELECT x*10 FROM src; SELECT * FROM u ORDER BY v;
 CREATE TABLE u(v INT); INSERT INTO u VALUES(5); WITH a(p) AS (SELECT 5), b(q) AS (SELECT p*2 FROM a) DELETE FROM u WHERE v IN (SELECT q/2 FROM b); SELECT count(*) FROM u;
+
+# WITH inside FROM subquery (Iter31.AC):
+#  * sqlite3 accepts `FROM (WITH cte AS (...) SELECT * FROM cte)`. The
+#    inner CTE's name is local to the subquery scope; outside the
+#    parentheses the name is invisible.
+#  * Implementation: parse the inner WITH locally in `parseFromSource`,
+#    materialise via `engine_cte.materialize` with save/restore of
+#    `db.transient_ctes` around the inner SELECT.
+SELECT * FROM (WITH cte AS (SELECT 1 AS x) SELECT x*2 FROM cte);
+SELECT * FROM (WITH cte AS (SELECT 1 AS x UNION SELECT 2) SELECT * FROM cte);
+SELECT cnt FROM (WITH src(x) AS (VALUES (10),(20),(30)) SELECT count(*) AS cnt FROM src);
+SELECT a.y FROM (WITH t(n) AS (VALUES (1),(2),(3)) SELECT n*10 AS y FROM t) AS a ORDER BY a.y;
+SELECT (SELECT v FROM (WITH s(p) AS (SELECT 7) SELECT p*p AS v FROM s));

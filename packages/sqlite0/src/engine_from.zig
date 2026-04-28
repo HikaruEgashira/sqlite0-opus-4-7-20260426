@@ -246,6 +246,15 @@ fn resolveSource(db: *Database, alloc: std.mem.Allocator, src: ParsedFromSource)
             };
         },
         .subquery => |sq| blk: {
+            // Iter31.AC — `(WITH cte AS (...) SELECT ...)` materialises
+            // its inner CTEs in a local scope so the names don't leak
+            // out of the subquery. `db.transient_ctes` is saved / a new
+            // slice published / restored after the inner SELECT runs.
+            const saved_ctes = db.transient_ctes;
+            defer db.transient_ctes = saved_ctes;
+            if (sq.with_ctes.len > 0) {
+                try @import("engine_cte.zig").materialize(db, alloc, sq.with_ctes);
+            }
             // Run the inner SELECT and capture its projected column names.
             // The qualifier is the explicit alias (if any); without an alias
             // qualified refs into the subquery can't match — sqlite3 still

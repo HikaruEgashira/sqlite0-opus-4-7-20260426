@@ -72,6 +72,12 @@ pub const ParsedFromSource = union(enum) {
     subquery: struct {
         select: stmt.ParsedSelect,
         alias: ?[]const u8 = null,
+        /// Iter31.AC — optional `WITH name AS (...)` prefix inside the
+        /// subquery. Each CTE is materialised in a nested scope by
+        /// `engine_from.resolveSource` (saving / restoring
+        /// `db.transient_ctes`) right before the subquery's SELECT runs.
+        /// Empty slice = no inner WITH (the common path).
+        with_ctes: []stmt.ParsedCte = &.{},
     },
 };
 
@@ -90,7 +96,10 @@ pub fn freeParsedFrom(allocator: std.mem.Allocator, src: ParsedFromSource) void 
             allocator.free(iv.columns);
         },
         .table_ref => {},
-        .subquery => |sq| stmt.freeParsedSelectFields(allocator, sq.select),
+        .subquery => |sq| {
+            stmt.freeParsedSelectFields(allocator, sq.select);
+            if (sq.with_ctes.len > 0) stmt.freeCtes(allocator, sq.with_ctes);
+        },
     }
 }
 
@@ -176,13 +185,23 @@ fn matchJoinSeparator(p: *Parser) ?JoinSep {
 fn parseFromSource(p: *Parser) Error!ParsedFromSource {
     if (p.cur.kind == .lparen) {
         p.advance();
+        // Iter31.AC — `(WITH cte AS (...) SELECT ...)` inside FROM. We
+        // parse the WITH clause locally so its scope is bounded to this
+        // subquery; engine_from.resolveSource saves / restores
+        // db.transient_ctes around the inner SELECT.
+        var inner_ctes: []stmt.ParsedCte = &.{};
+        errdefer if (inner_ctes.len > 0) stmt.freeCtes(p.allocator, inner_ctes);
+        if (p.cur.kind == .keyword_with) {
+            inner_ctes = try @import("stmt_cte.zig").parseWithClause(p);
+        }
         if (p.cur.kind == .keyword_select) {
             const ps = try stmt.parseSelectStatement(p);
             errdefer stmt.freeParsedSelectFields(p.allocator, ps);
             try p.expect(.rparen);
             const alias = parseOptionalAlias(p);
-            return .{ .subquery = .{ .select = ps, .alias = alias } };
+            return .{ .subquery = .{ .select = ps, .alias = alias, .with_ctes = inner_ctes } };
         }
+        if (inner_ctes.len > 0) return Error.SyntaxError;
         try p.expect(.keyword_values);
         const rows = try stmt.parseValuesBody(p);
         errdefer {
